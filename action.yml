@@ -8,5 +8,5 @@ runs:
       shell: perl {0}
     - run: ${GITHUB_ACTION_PATH}/action.pl
       shell: bash
-      with:
+      env:
         GITHUB_TOKEN: ${{ github.token }}
