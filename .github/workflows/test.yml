@@ -8,7 +8,7 @@ jobs:
     steps:
     - name: checkout
       uses: actions/checkout@v4
-    - id: foo
+    - id: running-tests
       uses: ./
     - name: Creates artifact
       run: echo $(GITHUB_ACTION) > last_run_id
