@@ -5,6 +5,7 @@ use warnings;
 use v5.14;
 
 use LWP::UserAgent;
+use JSON;
 
 my $GITHUB_TOKEN=$ENV{'GITHUB_TOKEN'};
 my $repo=$ENV{'GITHUB_REPOSITORY'};
@@ -18,6 +19,6 @@ my $request = new HTTP::Request('GET' => "https://api.github.com/repos/$repo/act
 
 my $response;
 
-eval { $response = $ua->request($request)->as_string() };
+eval { $response = decode_json($ua->request($request)->as_string()) };
 
-say $response;
+say $response->{'artifacts'}[0];
