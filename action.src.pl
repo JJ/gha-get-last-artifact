@@ -21,4 +21,4 @@ my $response;
 
 eval { $response = decode_json($ua->request($request)->as_string()) };
 
-say $response->{'artifacts'}[0];
+say $response;

@@ -9,6 +9,7 @@ jobs:
     - name: checkout
       uses: actions/checkout@v4
     - id: running-tests
+      name: Run local tests
       uses: ./
     - name: Creates artifact
       run: echo "$GITHUB_RUN_ID" > last_run_id
