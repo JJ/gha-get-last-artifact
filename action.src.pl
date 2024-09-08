@@ -21,4 +21,4 @@ my $response;
 
 eval { $response = decode_json( $ua->request($request)->decoded_content ) } || die "Can't decode $!";
 
-say $response->{'artifacts'};
+say $response->{'artifacts'}->[0];
