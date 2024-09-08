@@ -4,8 +4,6 @@ runs:
   using: "composite"
   steps:
     - uses: actions/checkout@v4
-    - run: print %ENV;
-      shell: perl {0}
     - uses: awalsh128/cache-apt-pkgs-action@latest
       with:
         packages: liblwp-protocol-https-perl
