@@ -21,3291 +21,16836 @@ $fatpacked{"Action.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'ACTION';
   }
 ACTION
 
-$fatpacked{"Error.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'ERROR';
-  # Error.pm
-  #
-  # Copyright (c) 1997-8 Graham Barr <gbarr@ti.com>. All rights reserved.
-  # This program is free software; you can redistribute it and/or
-  # modify it under the same terms as Perl itself.
-  #
-  # Based on my original Error.pm, and Exceptions.pm by Peter Seibel
-  # <peter@weblogic.com> and adapted by Jesse Glick <jglick@sig.bsh.com>.
-  #
-  # but modified ***significantly***
+$fatpacked{"HTTP/Config.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'HTTP_CONFIG';
+  package HTTP::Config;
   
-  package Error;
-  $Error::VERSION = '0.17029';
   use strict;
   use warnings;
   
-  use 5.004;
+  our $VERSION = '6.37';
   
-  use overload (
-      '""'       => 'stringify',
-      '0+'       => 'value',
-      'bool'     => sub { return 1; },
-      'fallback' => 1
-  );
+  use URI;
   
-  $Error::Depth  = 0;       # Depth to pass to caller()
-  $Error::Debug  = 0;       # Generate verbose stack traces
-  @Error::STACK  = ();      # Clause stack for try
-  $Error::THROWN = undef;   # last error thrown, a workaround until die $ref works
-  
-  my $LAST;                 # Last error created
-  my %ERROR;                # Last error associated with package
-  
-  sub _throw_Error_Simple
-  {
-      my $args = shift;
-      return Error::Simple->new( $args->{'text'} );
+  sub new {
+      my $class = shift;
+      return bless [], $class;
   }
   
-  $Error::ObjectifyCallback = \&_throw_Error_Simple;
-  
-  # Exported subs are defined in Error::subs
-  
-  use Scalar::Util ();
-  
-  sub import
-  {
-      shift;
-      my @tags = @_;
-      local $Exporter::ExportLevel = $Exporter::ExportLevel + 1;
-  
-      @tags = grep {
-          if ( $_ eq ':warndie' )
-          {
-              Error::WarnDie->import();
-              0;
-          }
-          else
-          {
-              1;
-          }
-      } @tags;
-  
-      Error::subs->import(@tags);
+  sub entries {
+      my $self = shift;
+      @$self;
   }
   
-  # I really want to use last for the name of this method, but it is a keyword
-  # which prevent the syntax  last Error
-  
-  sub prior
-  {
-      shift;    # ignore
-  
-      return $LAST unless @_;
-  
-      my $pkg = shift;
-      return exists $ERROR{$pkg} ? $ERROR{$pkg} : undef
-          unless ref($pkg);
-  
-      my $obj = $pkg;
-      my $err = undef;
-      if ( $obj->isa('HASH') )
-      {
-          $err = $obj->{'__Error__'}
-              if exists $obj->{'__Error__'};
-      }
-      elsif ( $obj->isa('GLOB') )
-      {
-          $err = ${*$obj}{'__Error__'}
-              if exists ${*$obj}{'__Error__'};
-      }
-  
-      $err;
+  sub empty {
+      my $self = shift;
+      not @$self;
   }
   
-  sub flush
-  {
-      shift;    #ignore
-  
-      unless (@_)
-      {
-          $LAST = undef;
+  sub add {
+      if (@_ == 2) {
+          my $self = shift;
+          push(@$self, shift);
           return;
       }
-  
-      my $pkg = shift;
-      return unless ref($pkg);
-  
-      undef $ERROR{$pkg} if defined $ERROR{$pkg};
+      my($self, %spec) = @_;
+      push(@$self, \%spec);
+      return;
   }
   
-  # Return as much information as possible about where the error
-  # happened. The -stacktrace element only exists if $Error::DEBUG
-  # was set when the error was created
+  sub find2 {
+      my($self, %spec) = @_;
+      my @found;
+      my @rest;
+   ITEM:
+      for my $item (@$self) {
+          for my $k (keys %spec) {
+              no warnings 'uninitialized';
+              if (!exists $item->{$k} || $spec{$k} ne $item->{$k}) {
+                  push(@rest, $item);
+                  next ITEM;
+              }
+          }
+          push(@found, $item);
+      }
+      return \@found unless wantarray;
+      return \@found, \@rest;
+  }
   
-  sub stacktrace
+  sub find {
+      my $self = shift;
+      my $f = $self->find2(@_);
+      return @$f if wantarray;
+      return $f->[0];
+  }
+  
+  sub remove {
+      my($self, %spec) = @_;
+      my($removed, $rest) = $self->find2(%spec);
+      @$self = @$rest if @$removed;
+      return @$removed;
+  }
+  
+  my %MATCH = (
+      m_scheme => sub {
+          my($v, $uri) = @_;
+          return $uri->_scheme eq $v;  # URI known to be canonical
+      },
+      m_secure => sub {
+          my($v, $uri) = @_;
+          my $secure = $uri->can("secure") ? $uri->secure : $uri->_scheme eq "https";
+          return $secure == !!$v;
+      },
+      m_host_port => sub {
+          my($v, $uri) = @_;
+          return unless $uri->can("host_port");
+          return $uri->host_port eq $v, 7;
+      },
+      m_host => sub {
+          my($v, $uri) = @_;
+          return unless $uri->can("host");
+          return $uri->host eq $v, 6;
+      },
+      m_port => sub {
+          my($v, $uri) = @_;
+          return unless $uri->can("port");
+          return $uri->port eq $v;
+      },
+      m_domain => sub {
+          my($v, $uri) = @_;
+          return unless $uri->can("host");
+          my $h = $uri->host;
+          $h = "$h.local" unless $h =~ /\./;
+          $v = ".$v" unless $v =~ /^\./;
+          return length($v), 5 if substr($h, -length($v)) eq $v;
+          return 0;
+      },
+      m_path => sub {
+          my($v, $uri) = @_;
+          return unless $uri->can("path");
+          return $uri->path eq $v, 4;
+      },
+      m_path_prefix => sub {
+          my($v, $uri) = @_;
+          return unless $uri->can("path");
+          my $path = $uri->path;
+          my $len = length($v);
+          return $len, 3 if $path eq $v;
+          return 0 if length($path) <= $len;
+          $v .= "/" unless $v =~ m,/\z,,;
+          return $len, 3 if substr($path, 0, length($v)) eq $v;
+          return 0;
+      },
+      m_path_match => sub {
+          my($v, $uri) = @_;
+          return unless $uri->can("path");
+          return $uri->path =~ $v;
+      },
+      m_uri__ => sub {
+          my($v, $k, $uri) = @_;
+          return unless $uri->can($k);
+          return 1 unless defined $v;
+          return $uri->$k eq $v;
+      },
+      m_method => sub {
+          my($v, $uri, $request) = @_;
+          return $request && $request->method eq $v;
+      },
+      m_proxy => sub {
+          my($v, $uri, $request) = @_;
+          return $request && ($request->{proxy} || "") eq $v;
+      },
+      m_code => sub {
+          my($v, $uri, $request, $response) = @_;
+          $v =~ s/xx\z//;
+          return unless $response;
+          return length($v), 2 if substr($response->code, 0, length($v)) eq $v;
+      },
+      m_media_type => sub {  # for request too??
+          my($v, $uri, $request, $response) = @_;
+          return unless $response;
+          return 1, 1 if $v eq "*/*";
+          my $ct = $response->content_type;
+          return 2, 1 if $v =~ s,/\*\z,, && $ct =~ m,^\Q$v\E/,;
+          return 3, 1 if $v eq "html" && $response->content_is_html;
+          return 4, 1 if $v eq "xhtml" && $response->content_is_xhtml;
+          return 10, 1 if $v eq $ct;
+          return 0;
+      },
+      m_header__ => sub {
+          my($v, $k, $uri, $request, $response) = @_;
+          return unless $request;
+          my $req_header = $request->header($k);
+          return 1 if defined($req_header) && $req_header eq $v;
+          if ($response) {
+              my $res_header = $response->header($k);
+              return 1 if defined($res_header) && $res_header eq $v;
+          }
+          return 0;
+      },
+      m_response_attr__ => sub {
+          my($v, $k, $uri, $request, $response) = @_;
+          return unless $response;
+          return 1 if !defined($v) && exists $response->{$k};
+          return 0 unless exists $response->{$k};
+          return 1 if $response->{$k} eq $v;
+          return 0;
+      },
+  );
+  
+  sub matching {
+      my $self = shift;
+      if (@_ == 1) {
+          if ($_[0]->can("request")) {
+              unshift(@_, $_[0]->request);
+              unshift(@_, undef) unless defined $_[0];
+          }
+          unshift(@_, $_[0]->uri_canonical) if $_[0] && $_[0]->can("uri_canonical");
+      }
+      my($uri, $request, $response) = @_;
+      $uri = URI->new($uri) unless ref($uri);
+  
+      my @m;
+   ITEM:
+      for my $item (@$self) {
+          my $order;
+          for my $ikey (keys %$item) {
+              my $mkey = $ikey;
+              my $k;
+              $k = $1 if $mkey =~ s/__(.*)/__/;
+              if (my $m = $MATCH{$mkey}) {
+                  #print "$ikey $mkey\n";
+                  my($c, $o);
+                  my @arg = (
+                      defined($k) ? $k : (),
+                      $uri, $request, $response
+                  );
+                  my $v = $item->{$ikey};
+                  $v = [$v] unless ref($v) eq "ARRAY";
+                  for (@$v) {
+                      ($c, $o) = $m->($_, @arg);
+                      #print "  - $_ ==> $c $o\n";
+                      last if $c;
+                  }
+                  next ITEM unless $c;
+                  $order->[$o || 0] += $c;
+              }
+          }
+          $order->[7] ||= 0;
+          $item->{_order} = join(".", reverse map sprintf("%03d", $_ || 0), @$order);
+          push(@m, $item);
+      }
+      @m = sort { $b->{_order} cmp $a->{_order} } @m;
+      delete $_->{_order} for @m;
+      return @m if wantarray;
+      return $m[0];
+  }
+  
+  sub add_item {
+      my $self = shift;
+      my $item = shift;
+      return $self->add(item => $item, @_);
+  }
+  
+  sub remove_items {
+      my $self = shift;
+      return map $_->{item}, $self->remove(@_);
+  }
+  
+  sub matching_items {
+      my $self = shift;
+      return map $_->{item}, $self->matching(@_);
+  }
+  
+  1;
+  
+  =pod
+  
+  =encoding UTF-8
+  
+  =head1 NAME
+  
+  HTTP::Config - Configuration for request and response objects
+  
+  =head1 VERSION
+  
+  version 6.37
+  
+  =head1 SYNOPSIS
+  
+   use HTTP::Config;
+   my $c = HTTP::Config->new;
+   $c->add(m_domain => ".example.com", m_scheme => "http", verbose => 1);
+   
+   use HTTP::Request;
+   my $request = HTTP::Request->new(GET => "http://www.example.com");
+   
+   if (my @m = $c->matching($request)) {
+      print "Yadayada\n" if $m[0]->{verbose};
+   }
+  
+  =head1 DESCRIPTION
+  
+  An C<HTTP::Config> object is a list of entries that
+  can be matched against request or request/response pairs.  Its
+  purpose is to hold configuration data that can be looked up given a
+  request or response object.
+  
+  Each configuration entry is a hash.  Some keys specify matching to
+  occur against attributes of request/response objects.  Other keys can
+  be used to hold user data.
+  
+  The following methods are provided:
+  
+  =over 4
+  
+  =item $conf = HTTP::Config->new
+  
+  Constructs a new empty C<HTTP::Config> object and returns it.
+  
+  =item $conf->entries
+  
+  Returns the list of entries in the configuration object.
+  In scalar context returns the number of entries.
+  
+  =item $conf->empty
+  
+  Return true if there are no entries in the configuration object.
+  This is just a shorthand for C<< not $conf->entries >>.
+  
+  =item $conf->add( %matchspec, %other )
+  
+  =item $conf->add( \%entry )
+  
+  Adds a new entry to the configuration.
+  You can either pass separate key/value pairs or a hash reference.
+  
+  =item $conf->remove( %spec )
+  
+  Removes (and returns) the entries that have matches for all the key/value pairs in %spec.
+  If %spec is empty this will match all entries; so it will empty the configuration object.
+  
+  =item $conf->matching( $uri, $request, $response )
+  
+  =item $conf->matching( $uri )
+  
+  =item $conf->matching( $request )
+  
+  =item $conf->matching( $response )
+  
+  Returns the entries that match the given $uri, $request and $response triplet.
+  
+  If called with a single $request object then the $uri is obtained by calling its 'uri_canonical' method.
+  If called with a single $response object, then the request object is obtained by calling its 'request' method;
+  and then the $uri is obtained as if a single $request was provided.
+  
+  The entries are returned with the most specific matches first.
+  In scalar context returns the most specific match or C<undef> in none match.
+  
+  =item $conf->add_item( $item, %matchspec )
+  
+  =item $conf->remove_items( %spec )
+  
+  =item $conf->matching_items( $uri, $request, $response )
+  
+  Wrappers that hides the entries themselves.
+  
+  =back
+  
+  =head2 Matching
+  
+  The following keys on a configuration entry specify matching.  For all
+  of these you can provide an array of values instead of a single value.
+  The entry matches if at least one of the values in the array matches.
+  
+  Entries that require match against a response object attribute will never match
+  unless a response object was provided.
+  
+  =over
+  
+  =item m_scheme => $scheme
+  
+  Matches if the URI uses the specified scheme; e.g. "http".
+  
+  =item m_secure => $bool
+  
+  If $bool is TRUE; matches if the URI uses a secure scheme.  If $bool
+  is FALSE; matches if the URI does not use a secure scheme.  An example
+  of a secure scheme is "https".
+  
+  =item m_host_port => "$hostname:$port"
+  
+  Matches if the URI's host_port method return the specified value.
+  
+  =item m_host => $hostname
+  
+  Matches if the URI's host method returns the specified value.
+  
+  =item m_port => $port
+  
+  Matches if the URI's port method returns the specified value.
+  
+  =item m_domain => ".$domain"
+  
+  Matches if the URI's host method return a value that within the given
+  domain.  The hostname "www.example.com" will for instance match the
+  domain ".com".
+  
+  =item m_path => $path
+  
+  Matches if the URI's path method returns the specified value.
+  
+  =item m_path_prefix => $path
+  
+  Matches if the URI's path is the specified path or has the specified
+  path as prefix.
+  
+  =item m_path_match => $Regexp
+  
+  Matches if the regular expression matches the URI's path.  Eg. qr/\.html$/.
+  
+  =item m_method => $method
+  
+  Matches if the request method matches the specified value. Eg. "GET" or "POST".
+  
+  =item m_code => $digit
+  
+  =item m_code => $status_code
+  
+  Matches if the response status code matches.  If a single digit is
+  specified; matches for all response status codes beginning with that digit.
+  
+  =item m_proxy => $url
+  
+  Matches if the request is to be sent to the given Proxy server.
+  
+  =item m_media_type => "*/*"
+  
+  =item m_media_type => "text/*"
+  
+  =item m_media_type => "html"
+  
+  =item m_media_type => "xhtml"
+  
+  =item m_media_type => "text/html"
+  
+  Matches if the response media type matches.
+  
+  With a value of "html" matches if $response->content_is_html returns TRUE.
+  With a value of "xhtml" matches if $response->content_is_xhtml returns TRUE.
+  
+  =item m_uri__I<$method> => undef
+  
+  Matches if the URI object provides the method.
+  
+  =item m_uri__I<$method> => $string
+  
+  Matches if the URI's $method method returns the given value.
+  
+  =item m_header__I<$field> => $string
+  
+  Matches if either the request or the response have a header $field with the given value.
+  
+  =item m_response_attr__I<$key> => undef
+  
+  =item m_response_attr__I<$key> => $string
+  
+  Matches if the response object has that key, or the entry has the given value.
+  
+  =back
+  
+  =head1 SEE ALSO
+  
+  L<URI>, L<HTTP::Request>, L<HTTP::Response>
+  
+  =head1 AUTHOR
+  
+  Gisle Aas <gisle@activestate.com>
+  
+  =head1 COPYRIGHT AND LICENSE
+  
+  This software is copyright (c) 1994 by Gisle Aas.
+  
+  This is free software; you can redistribute it and/or modify it under
+  the same terms as the Perl 5 programming language system itself.
+  
+  =cut
+  
+  __END__
+  
+  
+  #ABSTRACT: Configuration for request and response objects
+  
+HTTP_CONFIG
+
+$fatpacked{"HTTP/Date.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'HTTP_DATE';
+  package HTTP::Date;
+  
+  use strict;
+  
+  our $VERSION = '6.05';
+  
+  require Exporter;
+  our @ISA       = qw(Exporter);
+  our @EXPORT    = qw(time2str str2time);
+  our @EXPORT_OK = qw(parse_date time2iso time2isoz);
+  
+  require Time::Local;
+  
+  our ( @DoW, @MoY, %MoY );
+  @DoW       = qw(Sun Mon Tue Wed Thu Fri Sat);
+  @MoY       = qw(Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec);
+  @MoY{@MoY} = ( 1 .. 12 );
+  
+  my %GMT_ZONE = ( GMT => 1, UTC => 1, UT => 1, Z => 1 );
+  
+  sub time2str (;$) {
+      my $time = shift;
+      $time = time unless defined $time;
+      my ( $sec, $min, $hour, $mday, $mon, $year, $wday ) = gmtime($time);
+      sprintf(
+          "%s, %02d %s %04d %02d:%02d:%02d GMT",
+          $DoW[$wday],
+          $mday, $MoY[$mon], $year + 1900,
+          $hour, $min,       $sec
+      );
+  }
+  
+  sub str2time ($;$) {
+      my $str = shift;
+      return undef unless defined $str;
+  
+      # fast exit for strictly conforming string
+      if ( $str
+          =~ /^[SMTWF][a-z][a-z], (\d\d) ([JFMAJSOND][a-z][a-z]) (\d\d\d\d) (\d\d):(\d\d):(\d\d) GMT$/
+      ) {
+          return eval {
+              my $t = Time::Local::timegm( $6, $5, $4, $1, $MoY{$2} - 1, $3 );
+              $t < 0 ? undef : $t;
+          };
+      }
+  
+      my @d = parse_date($str);
+      return undef unless @d;
+      $d[1]--;    # month
+  
+      my $tz = pop(@d);
+      unless ( defined $tz ) {
+          unless ( defined( $tz = shift ) ) {
+              return eval {
+                  my $frac = $d[-1];
+                  $frac -= ( $d[-1] = int($frac) );
+                  my $t = Time::Local::timelocal( reverse @d ) + $frac;
+                  $t < 0 ? undef : $t;
+              };
+          }
+      }
+  
+      my $offset = 0;
+      if ( $GMT_ZONE{ uc $tz } ) {
+  
+          # offset already zero
+      }
+      elsif ( $tz =~ /^([-+])?(\d\d?):?(\d\d)?$/ ) {
+          $offset = 3600 * $2;
+          $offset += 60 * $3 if $3;
+          $offset *= -1      if $1 && $1 eq '-';
+      }
+      else {
+          eval { require Time::Zone } || return undef;
+          $offset = Time::Zone::tz_offset($tz);
+          return undef unless defined $offset;
+      }
+  
+      return eval {
+          my $frac = $d[-1];
+          $frac -= ( $d[-1] = int($frac) );
+          my $t = Time::Local::timegm( reverse @d ) + $frac;
+          $t < 0 ? undef : $t - $offset;
+      };
+  }
+  
+  sub parse_date ($) {
+      local ($_) = shift;
+      return unless defined;
+  
+      # More lax parsing below
+      s/^\s+//;                                            # kill leading space
+      s/^(?:Sun|Mon|Tue|Wed|Thu|Fri|Sat)[a-z]*,?\s*//i;    # Useless weekday
+  
+      my ( $day, $mon, $yr, $hr, $min, $sec, $tz, $ampm );
+  
+      # Then we are able to check for most of the formats with this regexp
+      (
+          ( $day, $mon, $yr, $hr, $min, $sec, $tz )
+          = /^
+       (\d\d?)               # day
+          (?:\s+|[-\/])
+       (\w+)                 # month
+          (?:\s+|[-\/])
+       (\d+)                 # year
+       (?:
+             (?:\s+|:)       # separator before clock
+          (\d\d?):(\d\d)     # hour:min
+          (?::(\d\d))?       # optional seconds
+       )?                    # optional clock
+          \s*
+       ([-+]?\d{2,4}|(?![APap][Mm]\b)[A-Za-z]+)? # timezone
+          \s*
+       (?:\(\w+\)|\w{3,})?   # ASCII representation of timezone.
+          \s*$
+      /x
+          )
+  
+          ||
+  
+          # Try the ctime and asctime format
+          (
+          ( $mon, $day, $hr, $min, $sec, $tz, $yr )
+          = /^
+       (\w{1,3})             # month
+          \s+
+       (\d\d?)               # day
+          \s+
+       (\d\d?):(\d\d)        # hour:min
+       (?::(\d\d))?          # optional seconds
+          \s+
+       (?:([A-Za-z]+)\s+)?   # optional timezone
+       (\d+)                 # year
+          \s*$               # allow trailing whitespace
+      /x
+          )
+  
+          ||
+  
+          # Then the Unix 'ls -l' date format
+          (
+          ( $mon, $day, $yr, $hr, $min, $sec )
+          = /^
+       (\w{3})               # month
+          \s+
+       (\d\d?)               # day
+          \s+
+       (?:
+          (\d\d\d\d) |       # year
+          (\d{1,2}):(\d{2})  # hour:min
+              (?::(\d\d))?       # optional seconds
+       )
+       \s*$
+         /x
+          )
+  
+          ||
+  
+          # ISO 8601 format '1996-02-29 12:00:00 -0100' and variants
+          (
+          ( $yr, $mon, $day, $hr, $min, $sec, $tz )
+          = /^
+        (\d{4})              # year
+           [-\/]?
+        (\d\d?)              # numerical month
+           [-\/]?
+        (\d\d?)              # day
+       (?:
+             (?:\s+|[-:Tt])  # separator before clock
+          (\d\d?):?(\d\d)    # hour:min
+          (?::?(\d\d(?:\.\d*)?))?  # optional seconds (and fractional)
+       )?                    # optional clock
+          \s*
+       ([-+]?\d\d?:?(:?\d\d)?
+        |Z|z)?               # timezone  (Z is "zero meridian", i.e. GMT)
+          \s*$
+      /x
+          )
+  
+          ||
+  
+          # Windows 'dir' 11-12-96  03:52PM
+          (
+          ( $mon, $day, $yr, $hr, $min, $ampm )
+          = /^
+            (\d{2})                # numerical month
+               -
+            (\d{2})                # day
+               -
+            (\d{2})                # year
+               \s+
+            (\d\d?):(\d\d)([APap][Mm])  # hour:min AM or PM
+               \s*$
+          /x
+          )
+  
+          || return;    # unrecognized format
+  
+      # Translate month name to number
+      $mon
+          = $MoY{$mon}
+          || $MoY{"\u\L$mon"}
+          || ( $mon =~ /^\d\d?$/ && $mon >= 1 && $mon <= 12 && int($mon) )
+          || return;
+  
+      # If the year is missing, we assume first date before the current,
+      # because of the formats we support such dates are mostly present
+      # on "ls -l" listings.
+      unless ( defined $yr ) {
+          my $cur_mon;
+          ( $cur_mon, $yr ) = (localtime)[ 4, 5 ];
+          $yr += 1900;
+          $cur_mon++;
+          $yr-- if $mon > $cur_mon;
+      }
+      elsif ( length($yr) < 3 ) {
+  
+          # Find "obvious" year
+          my $cur_yr = (localtime)[5] + 1900;
+          my $m      = $cur_yr % 100;
+          my $tmp    = $yr;
+          $yr += $cur_yr - $m;
+          $m  -= $tmp;
+          $yr += ( $m > 0 ) ? 100 : -100
+              if abs($m) > 50;
+      }
+  
+      # Make sure clock elements are defined
+      $hr  = 0 unless defined($hr);
+      $min = 0 unless defined($min);
+      $sec = 0 unless defined($sec);
+  
+      # Compensate for AM/PM
+      if ($ampm) {
+          $ampm = uc $ampm;
+          $hr   = 0 if $hr == 12 && $ampm eq 'AM';
+          $hr += 12 if $ampm eq 'PM' && $hr != 12;
+      }
+  
+      return ( $yr, $mon, $day, $hr, $min, $sec, $tz )
+          if wantarray;
+  
+      if ( defined $tz ) {
+          $tz = "Z" if $tz =~ /^(GMT|UTC?|[-+]?0+)$/;
+      }
+      else {
+          $tz = "";
+      }
+      return sprintf(
+          "%04d-%02d-%02d %02d:%02d:%02d%s",
+          $yr, $mon, $day, $hr, $min, $sec, $tz
+      );
+  }
+  
+  sub time2iso (;$) {
+      my $time = shift;
+      $time = time unless defined $time;
+      my ( $sec, $min, $hour, $mday, $mon, $year ) = localtime($time);
+      sprintf(
+          "%04d-%02d-%02d %02d:%02d:%02d",
+          $year + 1900, $mon + 1, $mday, $hour, $min, $sec
+      );
+  }
+  
+  sub time2isoz (;$) {
+      my $time = shift;
+      $time = time unless defined $time;
+      my ( $sec, $min, $hour, $mday, $mon, $year ) = gmtime($time);
+      sprintf(
+          "%04d-%02d-%02d %02d:%02d:%02dZ",
+          $year + 1900, $mon + 1, $mday, $hour, $min, $sec
+      );
+  }
+  
+  1;
+  
+  # ABSTRACT: HTTP::Date - date conversion routines
+  #
+  
+  __END__
+  
+  =pod
+  
+  =encoding UTF-8
+  
+  =head1 NAME
+  
+  HTTP::Date - HTTP::Date - date conversion routines
+  
+  =head1 VERSION
+  
+  version 6.05
+  
+  =head1 SYNOPSIS
+  
+   use HTTP::Date;
+  
+   $string = time2str($time);    # Format as GMT ASCII time
+   $time = str2time($string);    # convert ASCII date to machine time
+  
+  =head1 DESCRIPTION
+  
+  This module provides functions that deal the date formats used by the
+  HTTP protocol (and then some more).  Only the first two functions,
+  time2str() and str2time(), are exported by default.
+  
+  =over 4
+  
+  =item time2str( [$time] )
+  
+  The time2str() function converts a machine time (seconds since epoch)
+  to a string.  If the function is called without an argument or with an
+  undefined argument, it will use the current time.
+  
+  The string returned is in the format preferred for the HTTP protocol.
+  This is a fixed length subset of the format defined by RFC 1123,
+  represented in Universal Time (GMT).  An example of a time stamp
+  in this format is:
+  
+     Sun, 06 Nov 1994 08:49:37 GMT
+  
+  =item str2time( $str [, $zone] )
+  
+  The str2time() function converts a string to machine time.  It returns
+  C<undef> if the format of $str is unrecognized, otherwise whatever the
+  C<Time::Local> functions can make out of the parsed time.  Dates
+  before the system's epoch may not work on all operating systems.  The
+  time formats recognized are the same as for parse_date().
+  
+  The function also takes an optional second argument that specifies the
+  default time zone to use when converting the date.  This parameter is
+  ignored if the zone is found in the date string itself.  If this
+  parameter is missing, and the date string format does not contain any
+  zone specification, then the local time zone is assumed.
+  
+  If the zone is not "C<GMT>" or numerical (like "C<-0800>" or
+  "C<+0100>"), then the C<Time::Zone> module must be installed in order
+  to get the date recognized.
+  
+  =item parse_date( $str )
+  
+  This function will try to parse a date string, and then return it as a
+  list of numerical values followed by a (possible undefined) time zone
+  specifier; ($year, $month, $day, $hour, $min, $sec, $tz).  The $year
+  will be the full 4-digit year, and $month numbers start with 1 (for January).
+  
+  In scalar context the numbers are interpolated in a string of the
+  "YYYY-MM-DD hh:mm:ss TZ"-format and returned.
+  
+  If the date is unrecognized, then the empty list is returned (C<undef> in
+  scalar context).
+  
+  The function is able to parse the following formats:
+  
+   "Wed, 09 Feb 1994 22:23:32 GMT"       -- HTTP format
+   "Thu Feb  3 17:03:55 GMT 1994"        -- ctime(3) format
+   "Thu Feb  3 00:00:00 1994",           -- ANSI C asctime() format
+   "Tuesday, 08-Feb-94 14:15:29 GMT"     -- old rfc850 HTTP format
+   "Tuesday, 08-Feb-1994 14:15:29 GMT"   -- broken rfc850 HTTP format
+  
+   "03/Feb/1994:17:03:55 -0700"   -- common logfile format
+   "09 Feb 1994 22:23:32 GMT"     -- HTTP format (no weekday)
+   "08-Feb-94 14:15:29 GMT"       -- rfc850 format (no weekday)
+   "08-Feb-1994 14:15:29 GMT"     -- broken rfc850 format (no weekday)
+  
+   "1994-02-03 14:15:29 -0100"    -- ISO 8601 format
+   "1994-02-03 14:15:29"          -- zone is optional
+   "1994-02-03"                   -- only date
+   "1994-02-03T14:15:29"          -- Use T as separator
+   "19940203T141529Z"             -- ISO 8601 compact format
+   "19940203"                     -- only date
+  
+   "08-Feb-94"         -- old rfc850 HTTP format    (no weekday, no time)
+   "08-Feb-1994"       -- broken rfc850 HTTP format (no weekday, no time)
+   "09 Feb 1994"       -- proposed new HTTP format  (no weekday, no time)
+   "03/Feb/1994"       -- common logfile format     (no time, no offset)
+  
+   "Feb  3  1994"      -- Unix 'ls -l' format
+   "Feb  3 17:03"      -- Unix 'ls -l' format
+  
+   "11-15-96  03:52PM" -- Windows 'dir' format
+  
+  The parser ignores leading and trailing whitespace.  It also allow the
+  seconds to be missing and the month to be numerical in most formats.
+  
+  If the year is missing, then we assume that the date is the first
+  matching date I<before> current month.  If the year is given with only
+  2 digits, then parse_date() will select the century that makes the
+  year closest to the current date.
+  
+  =item time2iso( [$time] )
+  
+  Same as time2str(), but returns a "YYYY-MM-DD hh:mm:ss"-formatted
+  string representing time in the local time zone.
+  
+  =item time2isoz( [$time] )
+  
+  Same as time2str(), but returns a "YYYY-MM-DD hh:mm:ssZ"-formatted
+  string representing Universal Time.
+  
+  =back
+  
+  =head1 SEE ALSO
+  
+  L<perlfunc/time>, L<Time::Zone>
+  
+  =head1 AUTHOR
+  
+  Gisle Aas <gisle@activestate.com>
+  
+  =head1 COPYRIGHT AND LICENSE
+  
+  This software is copyright (c) 1995-2019 by Gisle Aas.
+  
+  This is free software; you can redistribute it and/or modify it under
+  the same terms as the Perl 5 programming language system itself.
+  
+  =cut
+HTTP_DATE
+
+$fatpacked{"HTTP/Headers.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'HTTP_HEADERS';
+  package HTTP::Headers;
+  
+  use strict;
+  use warnings;
+  
+  our $VERSION = '6.37';
+  
+  use Carp ();
+  
+  # The $TRANSLATE_UNDERSCORE variable controls whether '_' can be used
+  # as a replacement for '-' in header field names.
+  our $TRANSLATE_UNDERSCORE = 1 unless defined $TRANSLATE_UNDERSCORE;
+  
+  # "Good Practice" order of HTTP message headers:
+  #    - General-Headers
+  #    - Request-Headers
+  #    - Response-Headers
+  #    - Entity-Headers
+  
+  my @general_headers = qw(
+      Cache-Control Connection Date Pragma Trailer Transfer-Encoding Upgrade
+      Via Warning
+  );
+  
+  my @request_headers = qw(
+      Accept Accept-Charset Accept-Encoding Accept-Language
+      Authorization Expect From Host
+      If-Match If-Modified-Since If-None-Match If-Range If-Unmodified-Since
+      Max-Forwards Proxy-Authorization Range Referer TE User-Agent
+  );
+  
+  my @response_headers = qw(
+      Accept-Ranges Age ETag Location Proxy-Authenticate Retry-After Server
+      Vary WWW-Authenticate
+  );
+  
+  my @entity_headers = qw(
+      Allow Content-Encoding Content-Language Content-Length Content-Location
+      Content-MD5 Content-Range Content-Type Expires Last-Modified
+  );
+  
+  my %entity_header = map { lc($_) => 1 } @entity_headers;
+  
+  my @header_order = (
+      @general_headers,
+      @request_headers,
+      @response_headers,
+      @entity_headers,
+  );
+  
+  # Make alternative representations of @header_order.  This is used
+  # for sorting and case matching.
+  my %header_order;
+  my %standard_case;
+  
+  {
+      my $i = 0;
+      for (@header_order) {
+  	my $lc = lc $_;
+  	$header_order{$lc} = ++$i;
+  	$standard_case{$lc} = $_;
+      }
+  }
+  
+  
+  
+  sub new
+  {
+      my($class) = shift;
+      my $self = bless {}, $class;
+      $self->header(@_) if @_; # set up initial headers
+      $self;
+  }
+  
+  
+  sub header
+  {
+      my $self = shift;
+      Carp::croak('Usage: $h->header($field, ...)') unless @_;
+      my(@old);
+      my %seen;
+      while (@_) {
+  	my $field = shift;
+          my $op = @_ ? ($seen{lc($field)}++ ? 'PUSH' : 'SET') : 'GET';
+  	@old = $self->_header($field, shift, $op);
+      }
+      return @old if wantarray;
+      return $old[0] if @old <= 1;
+      join(", ", @old);
+  }
+  
+  sub clear
+  {
+      my $self = shift;
+      %$self = ();
+  }
+  
+  
+  sub push_header
+  {
+      my $self = shift;
+      return $self->_header(@_, 'PUSH_H') if @_ == 2;
+      while (@_) {
+  	$self->_header(splice(@_, 0, 2), 'PUSH_H');
+      }
+  }
+  
+  
+  sub init_header
+  {
+      Carp::croak('Usage: $h->init_header($field, $val)') if @_ != 3;
+      shift->_header(@_, 'INIT');
+  }
+  
+  
+  sub remove_header
+  {
+      my($self, @fields) = @_;
+      my $field;
+      my @values;
+      foreach $field (@fields) {
+  	$field =~ tr/_/-/ if $field !~ /^:/ && $TRANSLATE_UNDERSCORE;
+  	my $v = delete $self->{lc $field};
+  	push(@values, ref($v) eq 'ARRAY' ? @$v : $v) if defined $v;
+      }
+      return @values;
+  }
+  
+  sub remove_content_headers
+  {
+      my $self = shift;
+      unless (defined(wantarray)) {
+  	# fast branch that does not create return object
+  	delete @$self{grep $entity_header{$_} || /^content-/, keys %$self};
+  	return;
+      }
+  
+      my $c = ref($self)->new;
+      for my $f (grep $entity_header{$_} || /^content-/, keys %$self) {
+  	$c->{$f} = delete $self->{$f};
+      }
+      if (exists $self->{'::std_case'}) {
+  	$c->{'::std_case'} = $self->{'::std_case'};
+      }
+      $c;
+  }
+  
+  
+  sub _header
+  {
+      my($self, $field, $val, $op) = @_;
+  
+      Carp::croak("Illegal field name '$field'")
+          if rindex($field, ':') > 1 || !length($field);
+  
+      unless ($field =~ /^:/) {
+  	$field =~ tr/_/-/ if $TRANSLATE_UNDERSCORE;
+  	my $old = $field;
+  	$field = lc $field;
+  	unless($standard_case{$field} || $self->{'::std_case'}{$field}) {
+  	    # generate a %std_case entry for this field
+  	    $old =~ s/\b(\w)/\u$1/g;
+  	    $self->{'::std_case'}{$field} = $old;
+  	}
+      }
+  
+      $op ||= defined($val) ? 'SET' : 'GET';
+      if ($op eq 'PUSH_H') {
+  	# Like PUSH but where we don't care about the return value
+  	if (exists $self->{$field}) {
+  	    my $h = $self->{$field};
+  	    if (ref($h) eq 'ARRAY') {
+  		push(@$h, ref($val) eq "ARRAY" ? @$val : $val);
+  	    }
+  	    else {
+  		$self->{$field} = [$h, ref($val) eq "ARRAY" ? @$val : $val]
+  	    }
+  	    return;
+  	}
+  	$self->{$field} = $val;
+  	return;
+      }
+  
+      my $h = $self->{$field};
+      my @old = ref($h) eq 'ARRAY' ? @$h : (defined($h) ? ($h) : ());
+  
+      unless ($op eq 'GET' || ($op eq 'INIT' && @old)) {
+  	if (defined($val)) {
+  	    my @new = ($op eq 'PUSH') ? @old : ();
+  	    if (ref($val) ne 'ARRAY') {
+  		push(@new, $val);
+  	    }
+  	    else {
+  		push(@new, @$val);
+  	    }
+  	    $self->{$field} = @new > 1 ? \@new : $new[0];
+  	}
+  	elsif ($op ne 'PUSH') {
+  	    delete $self->{$field};
+  	}
+      }
+      @old;
+  }
+  
+  
+  sub _sorted_field_names
+  {
+      my $self = shift;
+      return [ sort {
+          ($header_order{$a} || 999) <=> ($header_order{$b} || 999) ||
+           $a cmp $b
+      } grep !/^::/, keys %$self ];
+  }
+  
+  
+  sub header_field_names {
+      my $self = shift;
+      return map $standard_case{$_} || $self->{'::std_case'}{$_} || $_, @{ $self->_sorted_field_names },
+  	if wantarray;
+      return grep !/^::/, keys %$self;
+  }
+  
+  
+  sub scan
+  {
+      my($self, $sub) = @_;
+      my $key;
+      for $key (@{ $self->_sorted_field_names }) {
+  	my $vals = $self->{$key};
+  	if (ref($vals) eq 'ARRAY') {
+  	    my $val;
+  	    for $val (@$vals) {
+  		$sub->($standard_case{$key} || $self->{'::std_case'}{$key} || $key, $val);
+  	    }
+  	}
+  	else {
+  	    $sub->($standard_case{$key} || $self->{'::std_case'}{$key} || $key, $vals);
+  	}
+      }
+  }
+  
+  sub flatten {
+  	my($self)=@_;
+  
+  	(
+  		map {
+  			my $k = $_;
+  			map {
+  				( $k => $_ )
+  			} $self->header($_);
+  		} $self->header_field_names
+  	);
+  }
+  
+  sub as_string
+  {
+      my($self, $endl) = @_;
+      $endl = "\n" unless defined $endl;
+  
+      my @result = ();
+      for my $key (@{ $self->_sorted_field_names }) {
+  	next if index($key, '_') == 0;
+  	my $vals = $self->{$key};
+  	if ( ref($vals) eq 'ARRAY' ) {
+  	    for my $val (@$vals) {
+  		$val = '' if not defined $val;
+  		my $field = $standard_case{$key} || $self->{'::std_case'}{$key} || $key;
+  		$field =~ s/^://;
+  		if ( index($val, "\n") >= 0 ) {
+  		    $val = _process_newline($val, $endl);
+  		}
+  		push @result, $field . ': ' . $val;
+  	    }
+  	}
+  	else {
+  	    $vals = '' if not defined $vals;
+  	    my $field = $standard_case{$key} || $self->{'::std_case'}{$key} || $key;
+  	    $field =~ s/^://;
+  	    if ( index($vals, "\n") >= 0 ) {
+  		$vals = _process_newline($vals, $endl);
+  	    }
+  	    push @result, $field . ': ' . $vals;
+  	}
+      }
+  
+      join($endl, @result, '');
+  }
+  
+  sub _process_newline {
+      local $_ = shift;
+      my $endl = shift;
+      # must handle header values with embedded newlines with care
+      s/\s+$//;        # trailing newlines and space must go
+      s/\n(\x0d?\n)+/\n/g;     # no empty lines
+      s/\n([^\040\t])/\n $1/g; # initial space for continuation
+      s/\n/$endl/g;    # substitute with requested line ending
+      $_;
+  }
+  
+  
+  
+  if (eval { require Clone; 1 }) {
+      *clone = \&Clone::clone;
+  } else {
+      *clone = sub {
+  	my $self = shift;
+  	my $clone = HTTP::Headers->new;
+  	$self->scan(sub { $clone->push_header(@_);} );
+  	$clone;
+      };
+  }
+  
+  
+  sub _date_header
+  {
+      require HTTP::Date;
+      my($self, $header, $time) = @_;
+      my($old) = $self->_header($header);
+      if (defined $time) {
+  	$self->_header($header, HTTP::Date::time2str($time));
+      }
+      $old =~ s/;.*// if defined($old);
+      HTTP::Date::str2time($old);
+  }
+  
+  
+  sub date                { shift->_date_header('Date',                @_); }
+  sub expires             { shift->_date_header('Expires',             @_); }
+  sub if_modified_since   { shift->_date_header('If-Modified-Since',   @_); }
+  sub if_unmodified_since { shift->_date_header('If-Unmodified-Since', @_); }
+  sub last_modified       { shift->_date_header('Last-Modified',       @_); }
+  
+  # This is used as a private LWP extension.  The Client-Date header is
+  # added as a timestamp to a response when it has been received.
+  sub client_date         { shift->_date_header('Client-Date',         @_); }
+  
+  # The retry_after field is dual format (can also be a expressed as
+  # number of seconds from now), so we don't provide an easy way to
+  # access it until we have know how both these interfaces can be
+  # addressed.  One possibility is to return a negative value for
+  # relative seconds and a positive value for epoch based time values.
+  #sub retry_after       { shift->_date_header('Retry-After',       @_); }
+  
+  sub content_type      {
+      my $self = shift;
+      my $ct = $self->{'content-type'};
+      $self->{'content-type'} = shift if @_;
+      $ct = $ct->[0] if ref($ct) eq 'ARRAY';
+      return '' unless defined($ct) && length($ct);
+      my @ct = split(/;\s*/, $ct, 2);
+      for ($ct[0]) {
+  	s/\s+//g;
+  	$_ = lc($_);
+      }
+      wantarray ? @ct : $ct[0];
+  }
+  
+  sub content_type_charset {
+      my $self = shift;
+      require HTTP::Headers::Util;
+      my $h = $self->{'content-type'};
+      $h = $h->[0] if ref($h);
+      $h = "" unless defined $h;
+      my @v = HTTP::Headers::Util::split_header_words($h);
+      if (@v) {
+  	my($ct, undef, %ct_param) = @{$v[0]};
+  	my $charset = $ct_param{charset};
+  	if ($ct) {
+  	    $ct = lc($ct);
+  	    $ct =~ s/\s+//;
+  	}
+  	if ($charset) {
+  	    $charset = uc($charset);
+  	    $charset =~ s/^\s+//;  $charset =~ s/\s+\z//;
+  	    undef($charset) if $charset eq "";
+  	}
+  	return $ct, $charset if wantarray;
+  	return $charset;
+      }
+      return undef, undef if wantarray;
+      return undef;
+  }
+  
+  sub content_is_text {
+      my $self = shift;
+      return $self->content_type =~ m,^text/,;
+  }
+  
+  sub content_is_html {
+      my $self = shift;
+      return $self->content_type eq 'text/html' || $self->content_is_xhtml;
+  }
+  
+  sub content_is_xhtml {
+      my $ct = shift->content_type;
+      return $ct eq "application/xhtml+xml" ||
+             $ct eq "application/vnd.wap.xhtml+xml";
+  }
+  
+  sub content_is_xml {
+      my $ct = shift->content_type;
+      return 1 if $ct eq "text/xml";
+      return 1 if $ct eq "application/xml";
+      return 1 if $ct =~ /\+xml$/;
+      return 0;
+  }
+  
+  sub referer           {
+      my $self = shift;
+      if (@_ && $_[0] =~ /#/) {
+  	# Strip fragment per RFC 2616, section 14.36.
+  	my $uri = shift;
+  	if (ref($uri)) {
+  	    $uri = $uri->clone;
+  	    $uri->fragment(undef);
+  	}
+  	else {
+  	    $uri =~ s/\#.*//;
+  	}
+  	unshift @_, $uri;
+      }
+      ($self->_header('Referer', @_))[0];
+  }
+  *referrer = \&referer;  # on tchrist's request
+  
+  sub title             { (shift->_header('Title',            @_))[0] }
+  sub content_encoding  { (shift->_header('Content-Encoding', @_))[0] }
+  sub content_language  { (shift->_header('Content-Language', @_))[0] }
+  sub content_length    { (shift->_header('Content-Length',   @_))[0] }
+  
+  sub user_agent        { (shift->_header('User-Agent',       @_))[0] }
+  sub server            { (shift->_header('Server',           @_))[0] }
+  
+  sub from              { (shift->_header('From',             @_))[0] }
+  sub warning           { (shift->_header('Warning',          @_))[0] }
+  
+  sub www_authenticate  { (shift->_header('WWW-Authenticate', @_))[0] }
+  sub authorization     { (shift->_header('Authorization',    @_))[0] }
+  
+  sub proxy_authenticate  { (shift->_header('Proxy-Authenticate',  @_))[0] }
+  sub proxy_authorization { (shift->_header('Proxy-Authorization', @_))[0] }
+  
+  sub authorization_basic       { shift->_basic_auth("Authorization",       @_) }
+  sub proxy_authorization_basic { shift->_basic_auth("Proxy-Authorization", @_) }
+  
+  sub _basic_auth {
+      require MIME::Base64;
+      my($self, $h, $user, $passwd) = @_;
+      my($old) = $self->_header($h);
+      if (defined $user) {
+  	Carp::croak("Basic authorization user name can't contain ':'")
+  	  if $user =~ /:/;
+  	$passwd = '' unless defined $passwd;
+  	$self->_header($h => 'Basic ' .
+                               MIME::Base64::encode("$user:$passwd", ''));
+      }
+      if (defined $old && $old =~ s/^\s*Basic\s+//) {
+  	my $val = MIME::Base64::decode($old);
+  	return $val unless wantarray;
+  	return split(/:/, $val, 2);
+      }
+      return;
+  }
+  
+  
+  1;
+  
+  =pod
+  
+  =encoding UTF-8
+  
+  =head1 NAME
+  
+  HTTP::Headers - Class encapsulating HTTP Message headers
+  
+  =head1 VERSION
+  
+  version 6.37
+  
+  =head1 SYNOPSIS
+  
+   require HTTP::Headers;
+   $h = HTTP::Headers->new;
+  
+   $h->header('Content-Type' => 'text/plain');  # set
+   $ct = $h->header('Content-Type');            # get
+   $h->remove_header('Content-Type');           # delete
+  
+  =head1 DESCRIPTION
+  
+  The C<HTTP::Headers> class encapsulates HTTP-style message headers.
+  The headers consist of attribute-value pairs also called fields, which
+  may be repeated, and which are printed in a particular order.  The
+  field names are cases insensitive.
+  
+  Instances of this class are usually created as member variables of the
+  C<HTTP::Request> and C<HTTP::Response> classes, internal to the
+  library.
+  
+  The following methods are available:
+  
+  =over 4
+  
+  =item $h = HTTP::Headers->new
+  
+  Constructs a new C<HTTP::Headers> object.  You might pass some initial
+  attribute-value pairs as parameters to the constructor.  I<E.g.>:
+  
+   $h = HTTP::Headers->new(
+         Date         => 'Thu, 03 Feb 1994 00:00:00 GMT',
+         Content_Type => 'text/html; version=3.2',
+         Content_Base => 'http://www.perl.org/');
+  
+  The constructor arguments are passed to the C<header> method which is
+  described below.
+  
+  =item $h->clone
+  
+  Returns a copy of this C<HTTP::Headers> object.
+  
+  =item $h->header( $field )
+  
+  =item $h->header( $field => $value )
+  
+  =item $h->header( $f1 => $v1, $f2 => $v2, ... )
+  
+  Get or set the value of one or more header fields.  The header field
+  name ($field) is not case sensitive.  To make the life easier for perl
+  users who wants to avoid quoting before the => operator, you can use
+  '_' as a replacement for '-' in header names.
+  
+  The header() method accepts multiple ($field => $value) pairs, which
+  means that you can update several fields with a single invocation.
+  
+  The $value argument may be a plain string or a reference to an array
+  of strings for a multi-valued field. If the $value is provided as
+  C<undef> then the field is removed.  If the $value is not given, then
+  that header field will remain unchanged. In addition to being a string,
+  $value may be something that stringifies.
+  
+  The old value (or values) of the last of the header fields is returned.
+  If no such field exists C<undef> will be returned.
+  
+  A multi-valued field will be returned as separate values in list
+  context and will be concatenated with ", " as separator in scalar
+  context.  The HTTP spec (RFC 2616) promises that joining multiple
+  values in this way will not change the semantic of a header field, but
+  in practice there are cases like old-style Netscape cookies (see
+  L<HTTP::Cookies>) where "," is used as part of the syntax of a single
+  field value.
+  
+  Examples:
+  
+   $header->header(MIME_Version => '1.0',
+  		 User_Agent   => 'My-Web-Client/0.01');
+   $header->header(Accept => "text/html, text/plain, image/*");
+   $header->header(Accept => [qw(text/html text/plain image/*)]);
+   @accepts = $header->header('Accept');  # get multiple values
+   $accepts = $header->header('Accept');  # get values as a single string
+  
+  =item $h->push_header( $field => $value )
+  
+  =item $h->push_header( $f1 => $v1, $f2 => $v2, ... )
+  
+  Add a new field value for the specified header field.  Previous values
+  for the same field are retained.
+  
+  As for the header() method, the field name ($field) is not case
+  sensitive and '_' can be used as a replacement for '-'.
+  
+  The $value argument may be a scalar or a reference to a list of
+  scalars.
+  
+   $header->push_header(Accept => 'image/jpeg');
+   $header->push_header(Accept => [map "image/$_", qw(gif png tiff)]);
+  
+  =item $h->init_header( $field => $value )
+  
+  Set the specified header to the given value, but only if no previous
+  value for that field is set.
+  
+  The header field name ($field) is not case sensitive and '_'
+  can be used as a replacement for '-'.
+  
+  The $value argument may be a scalar or a reference to a list of
+  scalars.
+  
+  =item $h->remove_header( $field, ... )
+  
+  This function removes the header fields with the specified names.
+  
+  The header field names ($field) are not case sensitive and '_'
+  can be used as a replacement for '-'.
+  
+  The return value is the values of the fields removed.  In scalar
+  context the number of fields removed is returned.
+  
+  Note that if you pass in multiple field names then it is generally not
+  possible to tell which of the returned values belonged to which field.
+  
+  =item $h->remove_content_headers
+  
+  This will remove all the header fields used to describe the content of
+  a message.  All header field names prefixed with C<Content-> fall
+  into this category, as well as C<Allow>, C<Expires> and
+  C<Last-Modified>.  RFC 2616 denotes these fields as I<Entity Header
+  Fields>.
+  
+  The return value is a new C<HTTP::Headers> object that contains the
+  removed headers only.
+  
+  =item $h->clear
+  
+  This will remove all header fields.
+  
+  =item $h->header_field_names
+  
+  Returns the list of distinct names for the fields present in the
+  header.  The field names have case as suggested by HTTP spec, and the
+  names are returned in the recommended "Good Practice" order.
+  
+  In scalar context return the number of distinct field names.
+  
+  =item $h->scan( \&process_header_field )
+  
+  Apply a subroutine to each header field in turn.  The callback routine
+  is called with two parameters; the name of the field and a single
+  value (a string).  If a header field is multi-valued, then the
+  routine is called once for each value.  The field name passed to the
+  callback routine has case as suggested by HTTP spec, and the headers
+  will be visited in the recommended "Good Practice" order.
+  
+  Any return values of the callback routine are ignored.  The loop can
+  be broken by raising an exception (C<die>), but the caller of scan()
+  would have to trap the exception itself.
+  
+  =item $h->flatten()
+  
+  Returns the list of pairs of keys and values.
+  
+  =item $h->as_string
+  
+  =item $h->as_string( $eol )
+  
+  Return the header fields as a formatted MIME header.  Since it
+  internally uses the C<scan> method to build the string, the result
+  will use case as suggested by HTTP spec, and it will follow
+  recommended "Good Practice" of ordering the header fields.  Long header
+  values are not folded.
+  
+  The optional $eol parameter specifies the line ending sequence to
+  use.  The default is "\n".  Embedded "\n" characters in header field
+  values will be substituted with this line ending sequence.
+  
+  =back
+  
+  =head1 CONVENIENCE METHODS
+  
+  The most frequently used headers can also be accessed through the
+  following convenience methods.  Most of these methods can both be used to read
+  and to set the value of a header.  The header value is set if you pass
+  an argument to the method.  The old header value is always returned.
+  If the given header did not exist then C<undef> is returned.
+  
+  Methods that deal with dates/times always convert their value to system
+  time (seconds since Jan 1, 1970) and they also expect this kind of
+  value when the header value is set.
+  
+  =over 4
+  
+  =item $h->date
+  
+  This header represents the date and time at which the message was
+  originated. I<E.g.>:
+  
+    $h->date(time);  # set current date
+  
+  =item $h->expires
+  
+  This header gives the date and time after which the entity should be
+  considered stale.
+  
+  =item $h->if_modified_since
+  
+  =item $h->if_unmodified_since
+  
+  These header fields are used to make a request conditional.  If the requested
+  resource has (or has not) been modified since the time specified in this field,
+  then the server will return a C<304 Not Modified> response instead of
+  the document itself.
+  
+  =item $h->last_modified
+  
+  This header indicates the date and time at which the resource was last
+  modified. I<E.g.>:
+  
+    # check if document is more than 1 hour old
+    if (my $last_mod = $h->last_modified) {
+        if ($last_mod < time - 60*60) {
+  	  ...
+        }
+    }
+  
+  =item $h->content_type
+  
+  The Content-Type header field indicates the media type of the message
+  content. I<E.g.>:
+  
+    $h->content_type('text/html');
+  
+  The value returned will be converted to lower case, and potential
+  parameters will be chopped off and returned as a separate value if in
+  an array context.  If there is no such header field, then the empty
+  string is returned.  This makes it safe to do the following:
+  
+    if ($h->content_type eq 'text/html') {
+       # we enter this place even if the real header value happens to
+       # be 'TEXT/HTML; version=3.0'
+       ...
+    }
+  
+  =item $h->content_type_charset
+  
+  Returns the upper-cased charset specified in the Content-Type header.  In list
+  context return the lower-cased bare content type followed by the upper-cased
+  charset.  Both values will be C<undef> if not specified in the header.
+  
+  =item $h->content_is_text
+  
+  Returns TRUE if the Content-Type header field indicate that the
+  content is textual.
+  
+  =item $h->content_is_html
+  
+  Returns TRUE if the Content-Type header field indicate that the
+  content is some kind of HTML (including XHTML).  This method can't be
+  used to set Content-Type.
+  
+  =item $h->content_is_xhtml
+  
+  Returns TRUE if the Content-Type header field indicate that the
+  content is XHTML.  This method can't be used to set Content-Type.
+  
+  =item $h->content_is_xml
+  
+  Returns TRUE if the Content-Type header field indicate that the
+  content is XML.  This method can't be used to set Content-Type.
+  
+  =item $h->content_encoding
+  
+  The Content-Encoding header field is used as a modifier to the
+  media type.  When present, its value indicates what additional
+  encoding mechanism has been applied to the resource.
+  
+  =item $h->content_length
+  
+  A decimal number indicating the size in bytes of the message content.
+  
+  =item $h->content_language
+  
+  The natural language(s) of the intended audience for the message
+  content.  The value is one or more language tags as defined by RFC
+  1766.  Eg. "no" for some kind of Norwegian and "en-US" for English the
+  way it is written in the US.
+  
+  =item $h->title
+  
+  The title of the document.  In libwww-perl this header will be
+  initialized automatically from the E<lt>TITLE>...E<lt>/TITLE> element
+  of HTML documents.  I<This header is no longer part of the HTTP
+  standard.>
+  
+  =item $h->user_agent
+  
+  This header field is used in request messages and contains information
+  about the user agent originating the request.  I<E.g.>:
+  
+    $h->user_agent('Mozilla/5.0 (compatible; MSIE 7.0; Windows NT 6.0)');
+  
+  =item $h->server
+  
+  The server header field contains information about the software being
+  used by the originating server program handling the request.
+  
+  =item $h->from
+  
+  This header should contain an Internet e-mail address for the human
+  user who controls the requesting user agent.  The address should be
+  machine-usable, as defined by RFC822.  E.g.:
+  
+    $h->from('King Kong <king@kong.com>');
+  
+  I<This header is no longer part of the HTTP standard.>
+  
+  =item $h->referer
+  
+  Used to specify the address (URI) of the document from which the
+  requested resource address was obtained.
+  
+  The "Free On-line Dictionary of Computing" as this to say about the
+  word I<referer>:
+  
+       <World-Wide Web> A misspelling of "referrer" which
+       somehow made it into the {HTTP} standard.  A given {web
+       page}'s referer (sic) is the {URL} of whatever web page
+       contains the link that the user followed to the current
+       page.  Most browsers pass this information as part of a
+       request.
+  
+       (1998-10-19)
+  
+  By popular demand C<referrer> exists as an alias for this method so you
+  can avoid this misspelling in your programs and still send the right
+  thing on the wire.
+  
+  When setting the referrer, this method removes the fragment from the
+  given URI if it is present, as mandated by RFC2616.  Note that
+  the removal does I<not> happen automatically if using the header(),
+  push_header() or init_header() methods to set the referrer.
+  
+  =item $h->www_authenticate
+  
+  This header must be included as part of a C<401 Unauthorized> response.
+  The field value consist of a challenge that indicates the
+  authentication scheme and parameters applicable to the requested URI.
+  
+  =item $h->proxy_authenticate
+  
+  This header must be included in a C<407 Proxy Authentication Required>
+  response.
+  
+  =item $h->authorization
+  
+  =item $h->proxy_authorization
+  
+  A user agent that wishes to authenticate itself with a server or a
+  proxy, may do so by including these headers.
+  
+  =item $h->authorization_basic
+  
+  This method is used to get or set an authorization header that use the
+  "Basic Authentication Scheme".  In array context it will return two
+  values; the user name and the password.  In scalar context it will
+  return I<"uname:password"> as a single string value.
+  
+  When used to set the header value, it expects two arguments.  I<E.g.>:
+  
+    $h->authorization_basic($uname, $password);
+  
+  The method will croak if the $uname contains a colon ':'.
+  
+  =item $h->proxy_authorization_basic
+  
+  Same as authorization_basic() but will set the "Proxy-Authorization"
+  header instead.
+  
+  =back
+  
+  =head1 NON-CANONICALIZED FIELD NAMES
+  
+  The header field name spelling is normally canonicalized including the
+  '_' to '-' translation.  There are some application where this is not
+  appropriate.  Prefixing field names with ':' allow you to force a
+  specific spelling.  For example if you really want a header field name
+  to show up as C<foo_bar> instead of "Foo-Bar", you might set it like
+  this:
+  
+    $h->header(":foo_bar" => 1);
+  
+  These field names are returned with the ':' intact for
+  $h->header_field_names and the $h->scan callback, but the colons do
+  not show in $h->as_string.
+  
+  =head1 AUTHOR
+  
+  Gisle Aas <gisle@activestate.com>
+  
+  =head1 COPYRIGHT AND LICENSE
+  
+  This software is copyright (c) 1994 by Gisle Aas.
+  
+  This is free software; you can redistribute it and/or modify it under
+  the same terms as the Perl 5 programming language system itself.
+  
+  =cut
+  
+  __END__
+  
+  
+  #ABSTRACT: Class encapsulating HTTP Message headers
+  
+HTTP_HEADERS
+
+$fatpacked{"HTTP/Headers/Auth.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'HTTP_HEADERS_AUTH';
+  package HTTP::Headers::Auth;
+  
+  use strict;
+  use warnings;
+  
+  our $VERSION = '6.37';
+  
+  use HTTP::Headers;
+  
+  package
+      HTTP::Headers;
+  
+  BEGIN {
+      # we provide a new (and better) implementations below
+      undef(&www_authenticate);
+      undef(&proxy_authenticate);
+  }
+  
+  require HTTP::Headers::Util;
+  
+  sub _parse_authenticate
+  {
+      my @ret;
+      for (HTTP::Headers::Util::split_header_words(@_)) {
+  	if (!defined($_->[1])) {
+  	    # this is a new auth scheme
+  	    push(@ret, shift(@$_) => {});
+  	    shift @$_;
+  	}
+  	if (@ret) {
+  	    # this a new parameter pair for the last auth scheme
+  	    while (@$_) {
+  		my $k = shift @$_;
+  		my $v = shift @$_;
+  	        $ret[-1]{$k} = $v;
+  	    }
+  	}
+  	else {
+  	    # something wrong, parameter pair without any scheme seen
+  	    # IGNORE
+  	}
+      }
+      @ret;
+  }
+  
+  sub _authenticate
+  {
+      my $self = shift;
+      my $header = shift;
+      my @old = $self->_header($header);
+      if (@_) {
+  	$self->remove_header($header);
+  	my @new = @_;
+  	while (@new) {
+  	    my $a_scheme = shift(@new);
+  	    if ($a_scheme =~ /\s/) {
+  		# assume complete valid value, pass it through
+  		$self->push_header($header, $a_scheme);
+  	    }
+  	    else {
+  		my @param;
+  		if (@new) {
+  		    my $p = $new[0];
+  		    if (ref($p) eq "ARRAY") {
+  			@param = @$p;
+  			shift(@new);
+  		    }
+  		    elsif (ref($p) eq "HASH") {
+  			@param = %$p;
+  			shift(@new);
+  		    }
+  		}
+  		my $val = ucfirst(lc($a_scheme));
+  		if (@param) {
+  		    my $sep = " ";
+  		    while (@param) {
+  			my $k = shift @param;
+  			my $v = shift @param;
+  			if ($v =~ /[^0-9a-zA-Z]/ || lc($k) eq "realm") {
+  			    # must quote the value
+  			    $v =~ s,([\\\"]),\\$1,g;
+  			    $v = qq("$v");
+  			}
+  			$val .= "$sep$k=$v";
+  			$sep = ", ";
+  		    }
+  		}
+  		$self->push_header($header, $val);
+  	    }
+  	}
+      }
+      return unless defined wantarray;
+      wantarray ? _parse_authenticate(@old) : join(", ", @old);
+  }
+  
+  
+  sub www_authenticate    { shift->_authenticate("WWW-Authenticate", @_)   }
+  sub proxy_authenticate  { shift->_authenticate("Proxy-Authenticate", @_) }
+  
+  1;
+  
+  __END__
+  
+  =pod
+  
+  =encoding UTF-8
+  
+  =head1 NAME
+  
+  HTTP::Headers::Auth
+  
+  =head1 VERSION
+  
+  version 6.37
+  
+  =head1 AUTHOR
+  
+  Gisle Aas <gisle@activestate.com>
+  
+  =head1 COPYRIGHT AND LICENSE
+  
+  This software is copyright (c) 1994 by Gisle Aas.
+  
+  This is free software; you can redistribute it and/or modify it under
+  the same terms as the Perl 5 programming language system itself.
+  
+  =cut
+HTTP_HEADERS_AUTH
+
+$fatpacked{"HTTP/Headers/ETag.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'HTTP_HEADERS_ETAG';
+  package HTTP::Headers::ETag;
+  
+  use strict;
+  use warnings;
+  
+  our $VERSION = '6.37';
+  
+  require HTTP::Date;
+  
+  require HTTP::Headers;
+  package
+      HTTP::Headers;
+  
+  sub _etags
+  {
+      my $self = shift;
+      my $header = shift;
+      my @old = _split_etag_list($self->_header($header));
+      if (@_) {
+  	$self->_header($header => join(", ", _split_etag_list(@_)));
+      }
+      wantarray ? @old : join(", ", @old);
+  }
+  
+  sub etag          { shift->_etags("ETag", @_); }
+  sub if_match      { shift->_etags("If-Match", @_); }
+  sub if_none_match { shift->_etags("If-None-Match", @_); }
+  
+  sub if_range {
+      # Either a date or an entity-tag
+      my $self = shift;
+      my @old = $self->_header("If-Range");
+      if (@_) {
+  	my $new = shift;
+  	if (!defined $new) {
+  	    $self->remove_header("If-Range");
+  	}
+  	elsif ($new =~ /^\d+$/) {
+  	    $self->_date_header("If-Range", $new);
+  	}
+  	else {
+  	    $self->_etags("If-Range", $new);
+  	}
+      }
+      return unless defined(wantarray);
+      for (@old) {
+  	my $t = HTTP::Date::str2time($_);
+  	$_ = $t if $t;
+      }
+      wantarray ? @old : join(", ", @old);
+  }
+  
+  
+  # Split a list of entity tag values.  The return value is a list
+  # consisting of one element per entity tag.  Suitable for parsing
+  # headers like C<If-Match>, C<If-None-Match>.  You might even want to
+  # use it on C<ETag> and C<If-Range> entity tag values, because it will
+  # normalize them to the common form.
+  #
+  #  entity-tag	  = [ weak ] opaque-tag
+  #  weak		  = "W/"
+  #  opaque-tag	  = quoted-string
+  
+  
+  sub _split_etag_list
+  {
+      my(@val) = @_;
+      my @res;
+      for (@val) {
+          while (length) {
+              my $weak = "";
+  	    $weak = "W/" if s,^\s*[wW]/,,;
+              my $etag = "";
+  	    if (s/^\s*(\"[^\"\\]*(?:\\.[^\"\\]*)*\")//) {
+  		push(@res, "$weak$1");
+              }
+              elsif (s/^\s*,//) {
+                  push(@res, qq(W/"")) if $weak;
+              }
+              elsif (s/^\s*([^,\s]+)//) {
+                  $etag = $1;
+  		$etag =~ s/([\"\\])/\\$1/g;
+  	        push(@res, qq($weak"$etag"));
+              }
+              elsif (s/^\s+// || !length) {
+                  push(@res, qq(W/"")) if $weak;
+              }
+              else {
+  	 	die "This should not happen: '$_'";
+              }
+          }
+     }
+     @res;
+  }
+  
+  1;
+  
+  __END__
+  
+  =pod
+  
+  =encoding UTF-8
+  
+  =head1 NAME
+  
+  HTTP::Headers::ETag
+  
+  =head1 VERSION
+  
+  version 6.37
+  
+  =head1 AUTHOR
+  
+  Gisle Aas <gisle@activestate.com>
+  
+  =head1 COPYRIGHT AND LICENSE
+  
+  This software is copyright (c) 1994 by Gisle Aas.
+  
+  This is free software; you can redistribute it and/or modify it under
+  the same terms as the Perl 5 programming language system itself.
+  
+  =cut
+HTTP_HEADERS_ETAG
+
+$fatpacked{"HTTP/Headers/Util.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'HTTP_HEADERS_UTIL';
+  package HTTP::Headers::Util;
+  
+  use strict;
+  use warnings;
+  
+  our $VERSION = '6.37';
+  
+  use Exporter 5.57 'import';
+  
+  our @EXPORT_OK=qw(split_header_words _split_header_words join_header_words);
+  
+  
+  sub split_header_words {
+      my @res = &_split_header_words;
+      for my $arr (@res) {
+  	for (my $i = @$arr - 2; $i >= 0; $i -= 2) {
+  	    $arr->[$i] = lc($arr->[$i]);
+  	}
+      }
+      return @res;
+  }
+  
+  sub _split_header_words
+  {
+      my(@val) = @_;
+      my @res;
+      for (@val) {
+  	my @cur;
+  	while (length) {
+  	    if (s/^\s*(=*[^\s=;,]+)//) {  # 'token' or parameter 'attribute'
+  		push(@cur, $1);
+  		# a quoted value
+  		if (s/^\s*=\s*\"([^\"\\]*(?:\\.[^\"\\]*)*)\"//) {
+  		    my $val = $1;
+  		    $val =~ s/\\(.)/$1/g;
+  		    push(@cur, $val);
+  		# some unquoted value
+  		}
+  		elsif (s/^\s*=\s*([^;,\s]*)//) {
+  		    my $val = $1;
+  		    $val =~ s/\s+$//;
+  		    push(@cur, $val);
+  		# no value, a lone token
+  		}
+  		else {
+  		    push(@cur, undef);
+  		}
+  	    }
+  	    elsif (s/^\s*,//) {
+  		push(@res, [@cur]) if @cur;
+  		@cur = ();
+  	    }
+  	    elsif (s/^\s*;// || s/^\s+// || s/^=//) {
+  		# continue
+  	    }
+  	    else {
+  		die "This should not happen: '$_'";
+  	    }
+  	}
+  	push(@res, \@cur) if @cur;
+      }
+      @res;
+  }
+  
+  
+  sub join_header_words
+  {
+      @_ = ([@_]) if @_ && !ref($_[0]);
+      my @res;
+      for (@_) {
+  	my @cur = @$_;
+  	my @attr;
+  	while (@cur) {
+  	    my $k = shift @cur;
+  	    my $v = shift @cur;
+  	    if (defined $v) {
+  		if ($v =~ /[\x00-\x20()<>@,;:\\\"\/\[\]?={}\x7F-\xFF]/ || !length($v)) {
+  		    $v =~ s/([\"\\])/\\$1/g;  # escape " and \
+  		    $k .= qq(="$v");
+  		}
+  		else {
+  		    # token
+  		    $k .= "=$v";
+  		}
+  	    }
+  	    push(@attr, $k);
+  	}
+  	push(@res, join("; ", @attr)) if @attr;
+      }
+      join(", ", @res);
+  }
+  
+  
+  1;
+  
+  =pod
+  
+  =encoding UTF-8
+  
+  =head1 NAME
+  
+  HTTP::Headers::Util - Header value parsing utility functions
+  
+  =head1 VERSION
+  
+  version 6.37
+  
+  =head1 SYNOPSIS
+  
+    use HTTP::Headers::Util qw(split_header_words);
+    @values = split_header_words($h->header("Content-Type"));
+  
+  =head1 DESCRIPTION
+  
+  This module provides a few functions that helps parsing and
+  construction of valid HTTP header values.  None of the functions are
+  exported by default.
+  
+  The following functions are available:
+  
+  =over 4
+  
+  =item split_header_words( @header_values )
+  
+  This function will parse the header values given as argument into a
+  list of anonymous arrays containing key/value pairs.  The function
+  knows how to deal with ",", ";" and "=" as well as quoted values after
+  "=".  A list of space separated tokens are parsed as if they were
+  separated by ";".
+  
+  If the @header_values passed as argument contains multiple values,
+  then they are treated as if they were a single value separated by
+  comma ",".
+  
+  This means that this function is useful for parsing header fields that
+  follow this syntax (BNF as from the HTTP/1.1 specification, but we relax
+  the requirement for tokens).
+  
+    headers           = #header
+    header            = (token | parameter) *( [";"] (token | parameter))
+  
+    token             = 1*<any CHAR except CTLs or separators>
+    separators        = "(" | ")" | "<" | ">" | "@"
+                      | "," | ";" | ":" | "\" | <">
+                      | "/" | "[" | "]" | "?" | "="
+                      | "{" | "}" | SP | HT
+  
+    quoted-string     = ( <"> *(qdtext | quoted-pair ) <"> )
+    qdtext            = <any TEXT except <">>
+    quoted-pair       = "\" CHAR
+  
+    parameter         = attribute "=" value
+    attribute         = token
+    value             = token | quoted-string
+  
+  Each I<header> is represented by an anonymous array of key/value
+  pairs.  The keys will be all be forced to lower case.
+  The value for a simple token (not part of a parameter) is C<undef>.
+  Syntactically incorrect headers will not necessarily be parsed as you
+  would want.
+  
+  This is easier to describe with some examples:
+  
+     split_header_words('foo="bar"; port="80,81"; DISCARD, BAR=baz');
+     split_header_words('text/html; charset="iso-8859-1"');
+     split_header_words('Basic realm="\\"foo\\\\bar\\""');
+  
+  will return
+  
+     [foo=>'bar', port=>'80,81', discard=> undef], [bar=>'baz' ]
+     ['text/html' => undef, charset => 'iso-8859-1']
+     [basic => undef, realm => "\"foo\\bar\""]
+  
+  If you don't want the function to convert tokens and attribute keys to
+  lower case you can call it as C<_split_header_words> instead (with a
+  leading underscore).
+  
+  =item join_header_words( @arrays )
+  
+  This will do the opposite of the conversion done by split_header_words().
+  It takes a list of anonymous arrays as arguments (or a list of
+  key/value pairs) and produces a single header value.  Attribute values
+  are quoted if needed.
+  
+  Example:
+  
+     join_header_words(["text/plain" => undef, charset => "iso-8859/1"]);
+     join_header_words("text/plain" => undef, charset => "iso-8859/1");
+  
+  will both return the string:
+  
+     text/plain; charset="iso-8859/1"
+  
+  =back
+  
+  =head1 AUTHOR
+  
+  Gisle Aas <gisle@activestate.com>
+  
+  =head1 COPYRIGHT AND LICENSE
+  
+  This software is copyright (c) 1994 by Gisle Aas.
+  
+  This is free software; you can redistribute it and/or modify it under
+  the same terms as the Perl 5 programming language system itself.
+  
+  =cut
+  
+  __END__
+  
+  
+  #ABSTRACT: Header value parsing utility functions
+  
+HTTP_HEADERS_UTIL
+
+$fatpacked{"HTTP/Message.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'HTTP_MESSAGE';
+  package HTTP::Message;
+  
+  use strict;
+  use warnings;
+  
+  our $VERSION = '6.37';
+  
+  require HTTP::Headers;
+  require Carp;
+  
+  my $CRLF = "\015\012";   # "\r\n" is not portable
+  unless ($HTTP::URI_CLASS) {
+      if ($ENV{PERL_HTTP_URI_CLASS}
+      &&  $ENV{PERL_HTTP_URI_CLASS} =~ /^([\w:]+)$/) {
+          $HTTP::URI_CLASS = $1;
+      } else {
+          $HTTP::URI_CLASS = "URI";
+      }
+  }
+  eval "require $HTTP::URI_CLASS"; die $@ if $@;
+  
+  *_utf8_downgrade = defined(&utf8::downgrade) ?
+      sub {
+          utf8::downgrade($_[0], 1) or
+              Carp::croak("HTTP::Message content must be bytes")
+      }
+      :
+      sub {
+      };
+  
+  sub new
+  {
+      my($class, $header, $content) = @_;
+      if (defined $header) {
+  	Carp::croak("Bad header argument") unless ref $header;
+          if (ref($header) eq "ARRAY") {
+  	    $header = HTTP::Headers->new(@$header);
+  	}
+  	else {
+  	    $header = $header->clone;
+  	}
+      }
+      else {
+  	$header = HTTP::Headers->new;
+      }
+      if (defined $content) {
+          _utf8_downgrade($content);
+      }
+      else {
+          $content = '';
+      }
+  
+      bless {
+  	'_headers' => $header,
+  	'_content' => $content,
+      }, $class;
+  }
+  
+  
+  sub parse
+  {
+      my($class, $str) = @_;
+  
+      my @hdr;
+      while (1) {
+  	if ($str =~ s/^([^\s:]+)[ \t]*: ?(.*)\n?//) {
+  	    push(@hdr, $1, $2);
+  	    $hdr[-1] =~ s/\r\z//;
+  	}
+  	elsif (@hdr && $str =~ s/^([ \t].*)\n?//) {
+  	    $hdr[-1] .= "\n$1";
+  	    $hdr[-1] =~ s/\r\z//;
+  	}
+  	else {
+  	    $str =~ s/^\r?\n//;
+  	    last;
+  	}
+      }
+      local $HTTP::Headers::TRANSLATE_UNDERSCORE;
+      new($class, \@hdr, $str);
+  }
+  
+  
+  sub clone
+  {
+      my $self  = shift;
+      my $clone = HTTP::Message->new($self->headers,
+  				   $self->content);
+      $clone->protocol($self->protocol);
+      $clone;
+  }
+  
+  
+  sub clear {
+      my $self = shift;
+      $self->{_headers}->clear;
+      $self->content("");
+      delete $self->{_parts};
+      return;
+  }
+  
+  
+  sub protocol {
+      shift->_elem('_protocol',  @_);
+  }
+  
+  sub headers {
+      my $self = shift;
+  
+      # recalculation of _content might change headers, so we
+      # need to force it now
+      $self->_content unless exists $self->{_content};
+  
+      $self->{_headers};
+  }
+  
+  sub headers_as_string {
+      shift->headers->as_string(@_);
+  }
+  
+  
+  sub content  {
+  
+      my $self = $_[0];
+      if (defined(wantarray)) {
+  	$self->_content unless exists $self->{_content};
+  	my $old = $self->{_content};
+  	$old = $$old if ref($old) eq "SCALAR";
+  	&_set_content if @_ > 1;
+  	return $old;
+      }
+  
+      if (@_ > 1) {
+  	&_set_content;
+      }
+      else {
+  	Carp::carp("Useless content call in void context") if $^W;
+      }
+  }
+  
+  
+  sub _set_content {
+      my $self = $_[0];
+      _utf8_downgrade($_[1]);
+      if (!ref($_[1]) && ref($self->{_content}) eq "SCALAR") {
+  	${$self->{_content}} = defined( $_[1] ) ? $_[1] : '';
+      }
+      else {
+  	die "Can't set content to be a scalar reference" if ref($_[1]) eq "SCALAR";
+  	$self->{_content} = defined( $_[1] ) ? $_[1] : '';
+  	delete $self->{_content_ref};
+      }
+      delete $self->{_parts} unless $_[2];
+  }
+  
+  
+  sub add_content
+  {
+      my $self = shift;
+      $self->_content unless exists $self->{_content};
+      my $chunkref = \$_[0];
+      $chunkref = $$chunkref if ref($$chunkref);  # legacy
+  
+      _utf8_downgrade($$chunkref);
+  
+      my $ref = ref($self->{_content});
+      if (!$ref) {
+  	$self->{_content} .= $$chunkref;
+      }
+      elsif ($ref eq "SCALAR") {
+  	${$self->{_content}} .= $$chunkref;
+      }
+      else {
+  	Carp::croak("Can't append to $ref content");
+      }
+      delete $self->{_parts};
+  }
+  
+  sub add_content_utf8 {
+      my($self, $buf)  = @_;
+      utf8::upgrade($buf);
+      utf8::encode($buf);
+      $self->add_content($buf);
+  }
+  
+  sub content_ref
+  {
+      my $self = shift;
+      $self->_content unless exists $self->{_content};
+      delete $self->{_parts};
+      my $old = \$self->{_content};
+      my $old_cref = $self->{_content_ref};
+      if (@_) {
+  	my $new = shift;
+  	Carp::croak("Setting content_ref to a non-ref") unless ref($new);
+  	delete $self->{_content};  # avoid modifying $$old
+  	$self->{_content} = $new;
+  	$self->{_content_ref}++;
+      }
+      $old = $$old if $old_cref;
+      return $old;
+  }
+  
+  
+  sub content_charset
+  {
+      my $self = shift;
+      if (my $charset = $self->content_type_charset) {
+  	return $charset;
+      }
+  
+      # time to start guessing
+      my $cref = $self->decoded_content(ref => 1, charset => "none");
+  
+      # Unicode BOM
+      for ($$cref) {
+  	return "UTF-8"     if /^\xEF\xBB\xBF/;
+  	return "UTF-32LE" if /^\xFF\xFE\x00\x00/;
+  	return "UTF-32BE" if /^\x00\x00\xFE\xFF/;
+  	return "UTF-16LE" if /^\xFF\xFE/;
+  	return "UTF-16BE" if /^\xFE\xFF/;
+      }
+  
+      if ($self->content_is_xml) {
+  	# http://www.w3.org/TR/2006/REC-xml-20060816/#sec-guessing
+  	# XML entity not accompanied by external encoding information and not
+  	# in UTF-8 or UTF-16 encoding must begin with an XML encoding declaration,
+  	# in which the first characters must be '<?xml'
+  	for ($$cref) {
+  	    return "UTF-32BE" if /^\x00\x00\x00</;
+  	    return "UTF-32LE" if /^<\x00\x00\x00/;
+  	    return "UTF-16BE" if /^(?:\x00\s)*\x00</;
+  	    return "UTF-16LE" if /^(?:\s\x00)*<\x00/;
+  	    if (/^\s*(<\?xml[^\x00]*?\?>)/) {
+  		if ($1 =~ /\sencoding\s*=\s*(["'])(.*?)\1/) {
+  		    my $enc = $2;
+  		    $enc =~ s/^\s+//; $enc =~ s/\s+\z//;
+  		    return $enc if $enc;
+  		}
+  	    }
+  	}
+  	return "UTF-8";
+      }
+      elsif ($self->content_is_html) {
+  	# look for <META charset="..."> or <META content="...">
+  	# http://dev.w3.org/html5/spec/Overview.html#determining-the-character-encoding
+  	require IO::HTML;
+  	# Use relaxed search to match previous versions of HTTP::Message:
+  	my $encoding = IO::HTML::find_charset_in($$cref, { encoding    => 1,
+  	                                                   need_pragma => 0 });
+  	return $encoding->mime_name if $encoding;
+      }
+      elsif ($self->content_type eq "application/json") {
+  	for ($$cref) {
+  	    # RFC 4627, ch 3
+  	    return "UTF-32BE" if /^\x00\x00\x00./s;
+  	    return "UTF-32LE" if /^.\x00\x00\x00/s;
+  	    return "UTF-16BE" if /^\x00.\x00./s;
+  	    return "UTF-16LE" if /^.\x00.\x00/s;
+  	    return "UTF-8";
+  	}
+      }
+      if ($self->content_type =~ /^text\//) {
+  	for ($$cref) {
+  	    if (length) {
+  		return "US-ASCII" unless /[\x80-\xFF]/;
+  		require Encode;
+  		eval {
+  		    Encode::decode_utf8($_, Encode::FB_CROAK() | Encode::LEAVE_SRC());
+  		};
+  		return "UTF-8" unless $@;
+  		return "ISO-8859-1";
+  	    }
+  	}
+      }
+  
+      return undef;
+  }
+  
+  
+  sub decoded_content
+  {
+      my($self, %opt) = @_;
+      my $content_ref;
+      my $content_ref_iscopy;
+  
+      eval {
+  	$content_ref = $self->content_ref;
+  	die "Can't decode ref content" if ref($content_ref) ne "SCALAR";
+  
+  	if (my $h = $self->header("Content-Encoding")) {
+  	    $h =~ s/^\s+//;
+  	    $h =~ s/\s+$//;
+  	    for my $ce (reverse split(/\s*,\s*/, lc($h))) {
+  		next unless $ce;
+  		next if $ce eq "identity" || $ce eq "none";
+  		if ($ce eq "gzip" || $ce eq "x-gzip") {
+  		    require IO::Uncompress::Gunzip;
+  		    my $output;
+  		    IO::Uncompress::Gunzip::gunzip($content_ref, \$output, Transparent => 0)
+  			or die "Can't gunzip content: $IO::Uncompress::Gunzip::GunzipError";
+  		    $content_ref = \$output;
+  		    $content_ref_iscopy++;
+  		}
+  		elsif ($ce eq 'br') {
+  		    require IO::Uncompress::Brotli;
+  		    my $bro = IO::Uncompress::Brotli->create;
+  		    my $output = eval { $bro->decompress($$content_ref) };
+  		    $@ and die "Can't unbrotli content: $@";
+  		    $content_ref = \$output;
+  		    $content_ref_iscopy++;
+  		}
+  		elsif ($ce eq "x-bzip2" or $ce eq "bzip2") {
+  		    require IO::Uncompress::Bunzip2;
+  		    my $output;
+  		    IO::Uncompress::Bunzip2::bunzip2($content_ref, \$output, Transparent => 0)
+  			or die "Can't bunzip content: $IO::Uncompress::Bunzip2::Bunzip2Error";
+  		    $content_ref = \$output;
+  		    $content_ref_iscopy++;
+  		}
+  		elsif ($ce eq "deflate") {
+  		    require IO::Uncompress::Inflate;
+  		    my $output;
+  		    my $status = IO::Uncompress::Inflate::inflate($content_ref, \$output, Transparent => 0);
+  		    my $error = $IO::Uncompress::Inflate::InflateError;
+  		    unless ($status) {
+  			# "Content-Encoding: deflate" is supposed to mean the
+  			# "zlib" format of RFC 1950, but Microsoft got that
+  			# wrong, so some servers sends the raw compressed
+  			# "deflate" data.  This tries to inflate this format.
+  			$output = undef;
+  			require IO::Uncompress::RawInflate;
+  			unless (IO::Uncompress::RawInflate::rawinflate($content_ref, \$output)) {
+  			    $self->push_header("Client-Warning" =>
+  				"Could not raw inflate content: $IO::Uncompress::RawInflate::RawInflateError");
+  			    $output = undef;
+  			}
+  		    }
+  		    die "Can't inflate content: $error" unless defined $output;
+  		    $content_ref = \$output;
+  		    $content_ref_iscopy++;
+  		}
+  		elsif ($ce eq "compress" || $ce eq "x-compress") {
+  		    die "Can't uncompress content";
+  		}
+  		elsif ($ce eq "base64") {  # not really C-T-E, but should be harmless
+  		    require MIME::Base64;
+  		    $content_ref = \MIME::Base64::decode($$content_ref);
+  		    $content_ref_iscopy++;
+  		}
+  		elsif ($ce eq "quoted-printable") { # not really C-T-E, but should be harmless
+  		    require MIME::QuotedPrint;
+  		    $content_ref = \MIME::QuotedPrint::decode($$content_ref);
+  		    $content_ref_iscopy++;
+  		}
+  		else {
+  		    die "Don't know how to decode Content-Encoding '$ce'";
+  		}
+  	    }
+  	}
+  
+  	if ($self->content_is_text || (my $is_xml = $self->content_is_xml)) {
+  	    my $charset = lc(
+  	        $opt{charset} ||
+  		$self->content_type_charset ||
+  		$opt{default_charset} ||
+  		$self->content_charset ||
+  		"ISO-8859-1"
+  	    );
+  	    if ($charset eq "none") {
+  		# leave it as is
+  	    }
+  	    elsif ($charset eq "us-ascii" || $charset eq "iso-8859-1") {
+  		if ($$content_ref =~ /[^\x00-\x7F]/ && defined &utf8::upgrade) {
+  		    unless ($content_ref_iscopy) {
+  			my $copy = $$content_ref;
+  			$content_ref = \$copy;
+  			$content_ref_iscopy++;
+  		    }
+  		    utf8::upgrade($$content_ref);
+  		}
+  	    }
+  	    else {
+  		require Encode;
+  		eval {
+  		    $content_ref = \Encode::decode($charset, $$content_ref,
+  			 ($opt{charset_strict} ? Encode::FB_CROAK() : 0) | Encode::LEAVE_SRC());
+  		};
+  		if ($@) {
+  		    my $retried;
+  		    if ($@ =~ /^Unknown encoding/) {
+  			my $alt_charset = lc($opt{alt_charset} || "");
+  			if ($alt_charset && $charset ne $alt_charset) {
+  			    # Retry decoding with the alternative charset
+  			    $content_ref = \Encode::decode($alt_charset, $$content_ref,
+  				 ($opt{charset_strict} ? Encode::FB_CROAK() : 0) | Encode::LEAVE_SRC())
+  			        unless $alt_charset eq "none";
+  			    $retried++;
+  			}
+  		    }
+  		    die unless $retried;
+  		}
+  		die "Encode::decode() returned undef improperly" unless defined $$content_ref;
+  		if ($is_xml) {
+  		    # Get rid of the XML encoding declaration if present
+  		    $$content_ref =~ s/^\x{FEFF}//;
+  		    if ($$content_ref =~ /^(\s*<\?xml[^\x00]*?\?>)/) {
+  			substr($$content_ref, 0, length($1)) =~ s/\sencoding\s*=\s*(["']).*?\1//;
+  		    }
+  		}
+  	    }
+  	}
+      };
+      if ($@) {
+  	Carp::croak($@) if $opt{raise_error};
+  	return undef;
+      }
+  
+      return $opt{ref} ? $content_ref : $$content_ref;
+  }
+  
+  
+  sub decodable
+  {
+      # should match the Content-Encoding values that decoded_content can deal with
+      my $self = shift;
+      my @enc;
+      local $@;
+      # XXX preferably we should determine if the modules are available without loading
+      # them here
+      eval {
+          require IO::Uncompress::Gunzip;
+          push(@enc, "gzip", "x-gzip");
+      };
+      eval {
+          require IO::Uncompress::Inflate;
+          require IO::Uncompress::RawInflate;
+          push(@enc, "deflate");
+      };
+      eval {
+          require IO::Uncompress::Bunzip2;
+          push(@enc, "x-bzip2", "bzip2");
+      };
+      eval {
+          require IO::Uncompress::Brotli;
+          push(@enc, 'br');
+      };
+      # we don't care about announcing the 'identity', 'base64' and
+      # 'quoted-printable' stuff
+      return wantarray ? @enc : join(", ", @enc);
+  }
+  
+  
+  sub decode
+  {
+      my $self = shift;
+      return 1 unless $self->header("Content-Encoding");
+      if (defined(my $content = $self->decoded_content(charset => "none"))) {
+  	$self->remove_header("Content-Encoding", "Content-Length", "Content-MD5");
+  	$self->content($content);
+  	return 1;
+      }
+      return 0;
+  }
+  
+  
+  sub encode
+  {
+      my($self, @enc) = @_;
+  
+      Carp::croak("Can't encode multipart/* messages") if $self->content_type =~ m,^multipart/,;
+      Carp::croak("Can't encode message/* messages") if $self->content_type =~ m,^message/,;
+  
+      return 1 unless @enc;  # nothing to do
+  
+      my $content = $self->content;
+      for my $encoding (@enc) {
+  	if ($encoding eq "identity" || $encoding eq "none") {
+  	    # nothing to do
+  	}
+  	elsif ($encoding eq "base64") {
+  	    require MIME::Base64;
+  	    $content = MIME::Base64::encode($content);
+  	}
+  	elsif ($encoding eq "gzip" || $encoding eq "x-gzip") {
+  	    require IO::Compress::Gzip;
+  	    my $output;
+  	    IO::Compress::Gzip::gzip(\$content, \$output, Minimal => 1)
+  		or die "Can't gzip content: $IO::Compress::Gzip::GzipError";
+  	    $content = $output;
+  	}
+  	elsif ($encoding eq "deflate") {
+  	    require IO::Compress::Deflate;
+  	    my $output;
+  	    IO::Compress::Deflate::deflate(\$content, \$output)
+  		or die "Can't deflate content: $IO::Compress::Deflate::DeflateError";
+  	    $content = $output;
+  	}
+  	elsif ($encoding eq "x-bzip2" || $encoding eq "bzip2") {
+  	    require IO::Compress::Bzip2;
+  	    my $output;
+  	    IO::Compress::Bzip2::bzip2(\$content, \$output)
+  		or die "Can't bzip2 content: $IO::Compress::Bzip2::Bzip2Error";
+  	    $content = $output;
+  	}
+  	elsif ($encoding eq "br") {
+  		require IO::Compress::Brotli;
+  		my $output;
+  		eval { $output = IO::Compress::Brotli::bro($content) }
+  		or die "Can't brotli content: $@";
+  		$content = $output;
+  	}
+  	elsif ($encoding eq "rot13") {  # for the fun of it
+  	    $content =~ tr/A-Za-z/N-ZA-Mn-za-m/;
+  	}
+  	else {
+  	    return 0;
+  	}
+      }
+      my $h = $self->header("Content-Encoding");
+      unshift(@enc, $h) if $h;
+      $self->header("Content-Encoding", join(", ", @enc));
+      $self->remove_header("Content-Length", "Content-MD5");
+      $self->content($content);
+      return 1;
+  }
+  
+  
+  sub as_string
+  {
+      my($self, $eol) = @_;
+      $eol = "\n" unless defined $eol;
+  
+      # The calculation of content might update the headers
+      # so we need to do that first.
+      my $content = $self->content;
+  
+      return join("", $self->{'_headers'}->as_string($eol),
+  		    $eol,
+  		    $content,
+  		    (@_ == 1 && length($content) &&
+  		     $content !~ /\n\z/) ? "\n" : "",
+  		);
+  }
+  
+  
+  sub dump
+  {
+      my($self, %opt) = @_;
+      my $content = $self->content;
+      my $chopped = 0;
+      if (!ref($content)) {
+  	my $maxlen = $opt{maxlength};
+  	$maxlen = 512 unless defined($maxlen);
+  	if ($maxlen && length($content) > $maxlen * 1.1 + 3) {
+  	    $chopped = length($content) - $maxlen;
+  	    $content = substr($content, 0, $maxlen) . "...";
+  	}
+  
+  	$content =~ s/\\/\\\\/g;
+  	$content =~ s/\t/\\t/g;
+  	$content =~ s/\r/\\r/g;
+  
+  	# no need for 3 digits in escape for these
+  	$content =~ s/([\0-\11\13-\037])(?!\d)/sprintf('\\%o',ord($1))/eg;
+  
+  	$content =~ s/([\0-\11\13-\037\177-\377])/sprintf('\\x%02X',ord($1))/eg;
+  	$content =~ s/([^\12\040-\176])/sprintf('\\x{%X}',ord($1))/eg;
+  
+  	# remaining whitespace
+  	$content =~ s/( +)\n/("\\40" x length($1)) . "\n"/eg;
+  	$content =~ s/(\n+)\n/("\\n" x length($1)) . "\n"/eg;
+  	$content =~ s/\n\z/\\n/;
+  
+  	my $no_content = $opt{no_content};
+  	$no_content = "(no content)" unless defined $no_content;
+  	if ($content eq $no_content) {
+  	    # escape our $no_content marker
+  	    $content =~ s/^(.)/sprintf('\\x%02X',ord($1))/eg;
+  	}
+  	elsif ($content eq "") {
+  	    $content = $no_content;
+  	}
+      }
+  
+      my @dump;
+      push(@dump, $opt{preheader}) if $opt{preheader};
+      push(@dump, $self->{_headers}->as_string, $content);
+      push(@dump, "(+ $chopped more bytes not shown)") if $chopped;
+  
+      my $dump = join("\n", @dump, "");
+      $dump =~ s/^/$opt{prefix}/gm if $opt{prefix};
+  
+      print $dump unless defined wantarray;
+      return $dump;
+  }
+  
+  # allow subclasses to override what will handle individual parts
+  sub _part_class {
+      return __PACKAGE__;
+  }
+  
+  sub parts {
+      my $self = shift;
+      if (defined(wantarray) && (!exists $self->{_parts} || ref($self->{_content}) eq "SCALAR")) {
+  	$self->_parts;
+      }
+      my $old = $self->{_parts};
+      if (@_) {
+  	my @parts = map { ref($_) eq 'ARRAY' ? @$_ : $_ } @_;
+  	my $ct = $self->content_type || "";
+  	if ($ct =~ m,^message/,) {
+  	    Carp::croak("Only one part allowed for $ct content")
+  		if @parts > 1;
+  	}
+  	elsif ($ct !~ m,^multipart/,) {
+  	    $self->remove_content_headers;
+  	    $self->content_type("multipart/mixed");
+  	}
+  	$self->{_parts} = \@parts;
+  	_stale_content($self);
+      }
+      return @$old if wantarray;
+      return $old->[0];
+  }
+  
+  sub add_part {
+      my $self = shift;
+      if (($self->content_type || "") !~ m,^multipart/,) {
+  	my $p = $self->_part_class->new(
+  	    $self->remove_content_headers,
+  	    $self->content(""),
+  	);
+  	$self->content_type("multipart/mixed");
+  	$self->{_parts} = [];
+          if ($p->headers->header_field_names || $p->content ne "") {
+              push(@{$self->{_parts}}, $p);
+          }
+      }
+      elsif (!exists $self->{_parts} || ref($self->{_content}) eq "SCALAR") {
+  	$self->_parts;
+      }
+  
+      push(@{$self->{_parts}}, @_);
+      _stale_content($self);
+      return;
+  }
+  
+  sub _stale_content {
+      my $self = shift;
+      if (ref($self->{_content}) eq "SCALAR") {
+  	# must recalculate now
+  	$self->_content;
+      }
+      else {
+  	# just invalidate cache
+  	delete $self->{_content};
+  	delete $self->{_content_ref};
+      }
+  }
+  
+  # delegate all other method calls to the headers object.
+  our $AUTOLOAD;
+  
+  sub AUTOLOAD {
+      my ( $package, $method ) = $AUTOLOAD =~ m/\A(.+)::([^:]*)\z/;
+      my $code = $_[0]->can($method);
+      Carp::croak(
+          qq(Can't locate object method "$method" via package "$package"))
+          unless $code;
+      goto &$code;
+  }
+  
+  sub can {
+      my ( $self, $method ) = @_;
+  
+      if ( my $own_method = $self->SUPER::can($method) ) {
+          return $own_method;
+      }
+  
+      my $headers = ref($self) ? $self->headers : 'HTTP::Headers';
+      if ( $headers->can($method) ) {
+  
+          # We create the function here so that it will not need to be
+          # autoloaded or recreated the next time.
+          no strict 'refs';
+          *$method = sub {
+              local $Carp::Internal{ +__PACKAGE__ } = 1;
+              shift->headers->$method(@_);
+          };
+          return \&$method;
+      }
+  
+      return undef;
+  }
+  
+  sub DESTROY { }    # avoid AUTOLOADing it
+  
+  # Private method to access members in %$self
+  sub _elem
+  {
+      my $self = shift;
+      my $elem = shift;
+      my $old = $self->{$elem};
+      $self->{$elem} = $_[0] if @_;
+      return $old;
+  }
+  
+  
+  # Create private _parts attribute from current _content
+  sub _parts {
+      my $self = shift;
+      my $ct = $self->content_type;
+      if ($ct =~ m,^multipart/,) {
+  	require HTTP::Headers::Util;
+  	my @h = HTTP::Headers::Util::split_header_words($self->header("Content-Type"));
+  	die "Assert" unless @h;
+  	my %h = @{$h[0]};
+  	if (defined(my $b = $h{boundary})) {
+  	    my $str = $self->content;
+  	    $str =~ s/\r?\n--\Q$b\E--.*//s;
+  	    if ($str =~ s/(^|.*?\r?\n)--\Q$b\E\r?\n//s) {
+  		$self->{_parts} = [map $self->_part_class->parse($_),
+  				   split(/\r?\n--\Q$b\E\r?\n/, $str)]
+  	    }
+  	}
+      }
+      elsif ($ct eq "message/http") {
+  	require HTTP::Request;
+  	require HTTP::Response;
+  	my $content = $self->content;
+  	my $class = ($content =~ m,^(HTTP/.*)\n,) ?
+  	    "HTTP::Response" : "HTTP::Request";
+  	$self->{_parts} = [$class->parse($content)];
+      }
+      elsif ($ct =~ m,^message/,) {
+  	$self->{_parts} = [ $self->_part_class->parse($self->content) ];
+      }
+  
+      $self->{_parts} ||= [];
+  }
+  
+  
+  # Create private _content attribute from current _parts
+  sub _content {
+      my $self = shift;
+      my $ct = $self->{_headers}->header("Content-Type") || "multipart/mixed";
+      if ($ct =~ m,^\s*message/,i) {
+  	_set_content($self, $self->{_parts}[0]->as_string($CRLF), 1);
+  	return;
+      }
+  
+      require HTTP::Headers::Util;
+      my @v = HTTP::Headers::Util::split_header_words($ct);
+      Carp::carp("Multiple Content-Type headers") if @v > 1;
+      @v = @{$v[0]};
+  
+      my $boundary;
+      my $boundary_index;
+      for (my @tmp = @v; @tmp;) {
+  	my($k, $v) = splice(@tmp, 0, 2);
+  	if ($k eq "boundary") {
+  	    $boundary = $v;
+  	    $boundary_index = @v - @tmp - 1;
+  	    last;
+  	}
+      }
+  
+      my @parts = map $_->as_string($CRLF), @{$self->{_parts}};
+  
+      my $bno = 0;
+      $boundary = _boundary() unless defined $boundary;
+   CHECK_BOUNDARY:
+      {
+  	for (@parts) {
+  	    if (index($_, $boundary) >= 0) {
+  		# must have a better boundary
+  		$boundary = _boundary(++$bno);
+  		redo CHECK_BOUNDARY;
+  	    }
+  	}
+      }
+  
+      if ($boundary_index) {
+  	$v[$boundary_index] = $boundary;
+      }
+      else {
+  	push(@v, boundary => $boundary);
+      }
+  
+      $ct = HTTP::Headers::Util::join_header_words(@v);
+      $self->{_headers}->header("Content-Type", $ct);
+  
+      _set_content($self, "--$boundary$CRLF" .
+  	                join("$CRLF--$boundary$CRLF", @parts) .
+  			"$CRLF--$boundary--$CRLF",
+                          1);
+  }
+  
+  
+  sub _boundary
+  {
+      my $size = shift || return "xYzZY";
+      require MIME::Base64;
+      my $b = MIME::Base64::encode(join("", map chr(rand(256)), 1..$size*3), "");
+      $b =~ s/[\W]/X/g;  # ensure alnum only
+      $b;
+  }
+  
+  
+  1;
+  
+  =pod
+  
+  =encoding UTF-8
+  
+  =head1 NAME
+  
+  HTTP::Message - HTTP style message (base class)
+  
+  =head1 VERSION
+  
+  version 6.37
+  
+  =head1 SYNOPSIS
+  
+   use base 'HTTP::Message';
+  
+  =head1 DESCRIPTION
+  
+  An C<HTTP::Message> object contains some headers and a content body.
+  The following methods are available:
+  
+  =over 4
+  
+  =item $mess = HTTP::Message->new
+  
+  =item $mess = HTTP::Message->new( $headers )
+  
+  =item $mess = HTTP::Message->new( $headers, $content )
+  
+  This constructs a new message object.  Normally you would want
+  construct C<HTTP::Request> or C<HTTP::Response> objects instead.
+  
+  The optional $header argument should be a reference to an
+  C<HTTP::Headers> object or a plain array reference of key/value pairs.
+  If an C<HTTP::Headers> object is provided then a copy of it will be
+  embedded into the constructed message, i.e. it will not be owned and
+  can be modified afterwards without affecting the message.
+  
+  The optional $content argument should be a string of bytes.
+  
+  =item $mess = HTTP::Message->parse( $str )
+  
+  This constructs a new message object by parsing the given string.
+  
+  =item $mess->headers
+  
+  Returns the embedded C<HTTP::Headers> object.
+  
+  =item $mess->headers_as_string
+  
+  =item $mess->headers_as_string( $eol )
+  
+  Call the as_string() method for the headers in the
+  message.  This will be the same as
+  
+      $mess->headers->as_string
+  
+  but it will make your program a whole character shorter :-)
+  
+  =item $mess->content
+  
+  =item $mess->content( $bytes )
+  
+  The content() method sets the raw content if an argument is given.  If no
+  argument is given the content is not touched.  In either case the
+  original raw content is returned.
+  
+  If the C<undef> argument is given, the content is reset to its default value,
+  which is an empty string.
+  
+  Note that the content should be a string of bytes.  Strings in perl
+  can contain characters outside the range of a byte.  The C<Encode>
+  module can be used to turn such strings into a string of bytes.
+  
+  =item $mess->add_content( $bytes )
+  
+  The add_content() methods appends more data bytes to the end of the
+  current content buffer.
+  
+  =item $mess->add_content_utf8( $string )
+  
+  The add_content_utf8() method appends the UTF-8 bytes representing the
+  string to the end of the current content buffer.
+  
+  =item $mess->content_ref
+  
+  =item $mess->content_ref( \$bytes )
+  
+  The content_ref() method will return a reference to content buffer string.
+  It can be more efficient to access the content this way if the content
+  is huge, and it can even be used for direct manipulation of the content,
+  for instance:
+  
+    ${$res->content_ref} =~ s/\bfoo\b/bar/g;
+  
+  This example would modify the content buffer in-place.
+  
+  If an argument is passed it will setup the content to reference some
+  external source.  The content() and add_content() methods
+  will automatically dereference scalar references passed this way.  For
+  other references content() will return the reference itself and
+  add_content() will refuse to do anything.
+  
+  =item $mess->content_charset
+  
+  This returns the charset used by the content in the message.  The
+  charset is either found as the charset attribute of the
+  C<Content-Type> header or by guessing.
+  
+  See L<http://www.w3.org/TR/REC-html40/charset.html#spec-char-encoding>
+  for details about how charset is determined.
+  
+  =item $mess->decoded_content( %options )
+  
+  Returns the content with any C<Content-Encoding> undone and, for textual content
+  (C<Content-Type> values starting with C<text/>, exactly matching
+  C<application/xml>, or ending with C<+xml>), the raw content's character set
+  decoded into Perl's Unicode string format. Note that this
+  L<does not currently|https://github.com/libwww-perl/HTTP-Message/pull/99>
+  attempt to decode declared character sets for any other content types like
+  C<application/json> or C<application/javascript>.  If the C<Content-Encoding>
+  or C<charset> of the message is unknown, this method will fail by returning
+  C<undef>.
+  
+  The following options can be specified.
+  
+  =over
+  
+  =item C<charset>
+  
+  This override the charset parameter for text content.  The value
+  C<none> can used to suppress decoding of the charset.
+  
+  =item C<default_charset>
+  
+  This override the default charset guessed by content_charset() or
+  if that fails "ISO-8859-1".
+  
+  =item C<alt_charset>
+  
+  If decoding fails because the charset specified in the Content-Type header
+  isn't recognized by Perl's Encode module, then try decoding using this charset
+  instead of failing.  The C<alt_charset> might be specified as C<none> to simply
+  return the string without any decoding of charset as alternative.
+  
+  =item C<charset_strict>
+  
+  Abort decoding if malformed characters is found in the content.  By
+  default you get the substitution character ("\x{FFFD}") in place of
+  malformed characters.
+  
+  =item C<raise_error>
+  
+  If TRUE then raise an exception if not able to decode content.  Reason
+  might be that the specified C<Content-Encoding> or C<charset> is not
+  supported.  If this option is FALSE, then decoded_content() will return
+  C<undef> on errors, but will still set $@.
+  
+  =item C<ref>
+  
+  If TRUE then a reference to decoded content is returned.  This might
+  be more efficient in cases where the decoded content is identical to
+  the raw content as no data copying is required in this case.
+  
+  =back
+  
+  =item $mess->decodable
+  
+  =item HTTP::Message::decodable()
+  
+  This returns the encoding identifiers that decoded_content() can
+  process.  In scalar context returns a comma separated string of
+  identifiers.
+  
+  This value is suitable for initializing the C<Accept-Encoding> request
+  header field.
+  
+  =item $mess->decode
+  
+  This method tries to replace the content of the message with the
+  decoded version and removes the C<Content-Encoding> header.  Returns
+  TRUE if successful and FALSE if not.
+  
+  If the message does not have a C<Content-Encoding> header this method
+  does nothing and returns TRUE.
+  
+  Note that the content of the message is still bytes after this method
+  has been called and you still need to call decoded_content() if you
+  want to process its content as a string.
+  
+  =item $mess->encode( $encoding, ... )
+  
+  Apply the given encodings to the content of the message.  Returns TRUE
+  if successful. The "identity" (non-)encoding is always supported; other
+  currently supported encodings, subject to availability of required
+  additional modules, are "gzip", "deflate", "x-bzip2", "base64" and "br".
+  
+  A successful call to this function will set the C<Content-Encoding>
+  header.
+  
+  Note that C<multipart/*> or C<message/*> messages can't be encoded and
+  this method will croak if you try.
+  
+  =item $mess->parts
+  
+  =item $mess->parts( @parts )
+  
+  =item $mess->parts( \@parts )
+  
+  Messages can be composite, i.e. contain other messages.  The composite
+  messages have a content type of C<multipart/*> or C<message/*>.  This
+  method give access to the contained messages.
+  
+  The argumentless form will return a list of C<HTTP::Message> objects.
+  If the content type of $msg is not C<multipart/*> or C<message/*> then
+  this will return the empty list.  In scalar context only the first
+  object is returned.  The returned message parts should be regarded as
+  read-only (future versions of this library might make it possible
+  to modify the parent by modifying the parts).
+  
+  If the content type of $msg is C<message/*> then there will only be
+  one part returned.
+  
+  If the content type is C<message/http>, then the return value will be
+  either an C<HTTP::Request> or an C<HTTP::Response> object.
+  
+  If a @parts argument is given, then the content of the message will be
+  modified. The array reference form is provided so that an empty list
+  can be provided.  The @parts array should contain C<HTTP::Message>
+  objects.  The @parts objects are owned by $mess after this call and
+  should not be modified or made part of other messages.
+  
+  When updating the message with this method and the old content type of
+  $mess is not C<multipart/*> or C<message/*>, then the content type is
+  set to C<multipart/mixed> and all other content headers are cleared.
+  
+  This method will croak if the content type is C<message/*> and more
+  than one part is provided.
+  
+  =item $mess->add_part( $part )
+  
+  This will add a part to a message.  The $part argument should be
+  another C<HTTP::Message> object.  If the previous content type of
+  $mess is not C<multipart/*> then the old content (together with all
+  content headers) will be made part #1 and the content type made
+  C<multipart/mixed> before the new part is added.  The $part object is
+  owned by $mess after this call and should not be modified or made part
+  of other messages.
+  
+  There is no return value.
+  
+  =item $mess->clear
+  
+  Will clear the headers and set the content to the empty string.  There
+  is no return value
+  
+  =item $mess->protocol
+  
+  =item $mess->protocol( $proto )
+  
+  Sets the HTTP protocol used for the message.  The protocol() is a string
+  like C<HTTP/1.0> or C<HTTP/1.1>.
+  
+  =item $mess->clone
+  
+  Returns a copy of the message object.
+  
+  =item $mess->as_string
+  
+  =item $mess->as_string( $eol )
+  
+  Returns the message formatted as a single string.
+  
+  The optional $eol parameter specifies the line ending sequence to use.
+  The default is "\n".  If no $eol is given then as_string will ensure
+  that the returned string is newline terminated (even when the message
+  content is not).  No extra newline is appended if an explicit $eol is
+  passed.
+  
+  =item $mess->dump( %opt )
+  
+  Returns the message formatted as a string.  In void context print the string.
+  
+  This differs from C<< $mess->as_string >> in that it escapes the bytes
+  of the content so that it's safe to print them and it limits how much
+  content to print.  The escapes syntax used is the same as for Perl's
+  double quoted strings.  If there is no content the string "(no
+  content)" is shown in its place.
+  
+  Options to influence the output can be passed as key/value pairs. The
+  following options are recognized:
+  
+  =over
+  
+  =item maxlength => $num
+  
+  How much of the content to show.  The default is 512.  Set this to 0
+  for unlimited.
+  
+  If the content is longer then the string is chopped at the limit and
+  the string "...\n(### more bytes not shown)" appended.
+  
+  =item no_content => $str
+  
+  Replaces the "(no content)" marker.
+  
+  =item prefix => $str
+  
+  A string that will be prefixed to each line of the dump.
+  
+  =back
+  
+  =back
+  
+  All methods unknown to C<HTTP::Message> itself are delegated to the
+  C<HTTP::Headers> object that is part of every message.  This allows
+  convenient access to these methods.  Refer to L<HTTP::Headers> for
+  details of these methods:
+  
+      $mess->header( $field => $val )
+      $mess->push_header( $field => $val )
+      $mess->init_header( $field => $val )
+      $mess->remove_header( $field )
+      $mess->remove_content_headers
+      $mess->header_field_names
+      $mess->scan( \&doit )
+  
+      $mess->date
+      $mess->expires
+      $mess->if_modified_since
+      $mess->if_unmodified_since
+      $mess->last_modified
+      $mess->content_type
+      $mess->content_encoding
+      $mess->content_length
+      $mess->content_language
+      $mess->title
+      $mess->user_agent
+      $mess->server
+      $mess->from
+      $mess->referer
+      $mess->www_authenticate
+      $mess->authorization
+      $mess->proxy_authorization
+      $mess->authorization_basic
+      $mess->proxy_authorization_basic
+  
+  =head1 AUTHOR
+  
+  Gisle Aas <gisle@activestate.com>
+  
+  =head1 COPYRIGHT AND LICENSE
+  
+  This software is copyright (c) 1994 by Gisle Aas.
+  
+  This is free software; you can redistribute it and/or modify it under
+  the same terms as the Perl 5 programming language system itself.
+  
+  =cut
+  
+  __END__
+  
+  
+  #ABSTRACT: HTTP style message (base class)
+  
+HTTP_MESSAGE
+
+$fatpacked{"HTTP/Request.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'HTTP_REQUEST';
+  package HTTP::Request;
+  
+  use strict;
+  use warnings;
+  
+  our $VERSION = '6.37';
+  
+  use base 'HTTP::Message';
+  
+  sub new
+  {
+      my($class, $method, $uri, $header, $content) = @_;
+      my $self = $class->SUPER::new($header, $content);
+      $self->method($method);
+      $self->uri($uri);
+      $self;
+  }
+  
+  
+  sub parse
+  {
+      my($class, $str) = @_;
+      Carp::carp('Undefined argument to parse()') if $^W && ! defined $str;
+      my $request_line;
+      if (defined $str && $str =~ s/^(.*)\n//) {
+  	$request_line = $1;
+      }
+      else {
+  	$request_line = $str;
+  	$str = "";
+      }
+  
+      my $self = $class->SUPER::parse($str);
+      if (defined $request_line) {
+          my($method, $uri, $protocol) = split(' ', $request_line);
+          $self->method($method);
+          $self->uri($uri) if defined($uri);
+          $self->protocol($protocol) if $protocol;
+      }
+      $self;
+  }
+  
+  
+  sub clone
+  {
+      my $self = shift;
+      my $clone = bless $self->SUPER::clone, ref($self);
+      $clone->method($self->method);
+      $clone->uri($self->uri);
+      $clone;
+  }
+  
+  
+  sub method
+  {
+      shift->_elem('_method', @_);
+  }
+  
+  
+  sub uri
+  {
+      my $self = shift;
+      my $old = $self->{'_uri'};
+      if (@_) {
+  	my $uri = shift;
+  	if (!defined $uri) {
+  	    # that's ok
+  	}
+  	elsif (ref $uri) {
+  	    Carp::croak("A URI can't be a " . ref($uri) . " reference")
+  		if ref($uri) eq 'HASH' or ref($uri) eq 'ARRAY';
+  	    Carp::croak("Can't use a " . ref($uri) . " object as a URI")
+  		unless $uri->can('scheme') && $uri->can('canonical');
+  	    $uri = $uri->clone;
+  	    unless ($HTTP::URI_CLASS eq "URI") {
+  		# Argh!! Hate this... old LWP legacy!
+  		eval { local $SIG{__DIE__}; $uri = $uri->abs; };
+  		die $@ if $@ && $@ !~ /Missing base argument/;
+  	    }
+  	}
+  	else {
+  	    $uri = $HTTP::URI_CLASS->new($uri);
+  	}
+  	$self->{'_uri'} = $uri;
+          delete $self->{'_uri_canonical'};
+      }
+      $old;
+  }
+  
+  *url = \&uri;  # legacy
+  
+  sub uri_canonical
   {
       my $self = shift;
   
-      return $self->{'-stacktrace'}
-          if exists $self->{'-stacktrace'};
+      my $uri = $self->{_uri};
   
-      my $text = exists $self->{'-text'} ? $self->{'-text'} : "Died";
+      if (defined (my $canon = $self->{_uri_canonical})) {
+          # early bailout if these are the exact same string;
+          # rely on stringification of the URI objects
+          return $canon if $canon eq $uri;
+      }
   
-      $text .= sprintf( " at %s line %d.\n", $self->file, $self->line )
-          unless ( $text =~ /\n$/s );
-  
-      $text;
+      # otherwise we need to refresh the memoized value
+      $self->{_uri_canonical} = $uri->canonical;
   }
   
-  sub associate
+  
+  sub accept_decodable
   {
-      my $err = shift;
-      my $obj = shift;
+      my $self = shift;
+      $self->header("Accept-Encoding", scalar($self->decodable));
+  }
   
-      return unless ref($obj);
+  sub as_string
+  {
+      my $self = shift;
+      my($eol) = @_;
+      $eol = "\n" unless defined $eol;
   
-      if ( $obj->isa('HASH') )
-      {
-          $obj->{'__Error__'} = $err;
+      my $req_line = $self->method || "-";
+      my $uri = $self->uri;
+      $uri = (defined $uri) ? $uri->as_string : "-";
+      $req_line .= " $uri";
+      my $proto = $self->protocol;
+      $req_line .= " $proto" if $proto;
+  
+      return join($eol, $req_line, $self->SUPER::as_string(@_));
+  }
+  
+  sub dump
+  {
+      my $self = shift;
+      my @pre = ($self->method || "-", $self->uri || "-");
+      if (my $prot = $self->protocol) {
+  	push(@pre, $prot);
       }
-      elsif ( $obj->isa('GLOB') )
-      {
-          ${*$obj}{'__Error__'} = $err;
+  
+      return $self->SUPER::dump(
+          preheader => join(" ", @pre),
+  	@_,
+      );
+  }
+  
+  
+  1;
+  
+  =pod
+  
+  =encoding UTF-8
+  
+  =head1 NAME
+  
+  HTTP::Request - HTTP style request message
+  
+  =head1 VERSION
+  
+  version 6.37
+  
+  =head1 SYNOPSIS
+  
+   require HTTP::Request;
+   $request = HTTP::Request->new(GET => 'http://www.example.com/');
+  
+  and usually used like this:
+  
+   $ua = LWP::UserAgent->new;
+   $response = $ua->request($request);
+  
+  =head1 DESCRIPTION
+  
+  C<HTTP::Request> is a class encapsulating HTTP style requests,
+  consisting of a request line, some headers, and a content body. Note
+  that the LWP library uses HTTP style requests even for non-HTTP
+  protocols.  Instances of this class are usually passed to the
+  request() method of an C<LWP::UserAgent> object.
+  
+  C<HTTP::Request> is a subclass of C<HTTP::Message> and therefore
+  inherits its methods.  The following additional methods are available:
+  
+  =over 4
+  
+  =item $r = HTTP::Request->new( $method, $uri )
+  
+  =item $r = HTTP::Request->new( $method, $uri, $header )
+  
+  =item $r = HTTP::Request->new( $method, $uri, $header, $content )
+  
+  Constructs a new C<HTTP::Request> object describing a request on the
+  object $uri using method $method.  The $method argument must be a
+  string.  The $uri argument can be either a string, or a reference to a
+  C<URI> object.  The optional $header argument should be a reference to
+  an C<HTTP::Headers> object or a plain array reference of key/value
+  pairs.  The optional $content argument should be a string of bytes.
+  
+  =item $r = HTTP::Request->parse( $str )
+  
+  This constructs a new request object by parsing the given string.
+  
+  =item $r->method
+  
+  =item $r->method( $val )
+  
+  This is used to get/set the method attribute.  The method should be a
+  short string like "GET", "HEAD", "PUT", "PATCH" or "POST".
+  
+  =item $r->uri
+  
+  =item $r->uri( $val )
+  
+  This is used to get/set the uri attribute.  The $val can be a
+  reference to a URI object or a plain string.  If a string is given,
+  then it should be parsable as an absolute URI.
+  
+  =item $r->header( $field )
+  
+  =item $r->header( $field => $value )
+  
+  This is used to get/set header values and it is inherited from
+  C<HTTP::Headers> via C<HTTP::Message>.  See L<HTTP::Headers> for
+  details and other similar methods that can be used to access the
+  headers.
+  
+  =item $r->accept_decodable
+  
+  This will set the C<Accept-Encoding> header to the list of encodings
+  that decoded_content() can decode.
+  
+  =item $r->content
+  
+  =item $r->content( $bytes )
+  
+  This is used to get/set the content and it is inherited from the
+  C<HTTP::Message> base class.  See L<HTTP::Message> for details and
+  other methods that can be used to access the content.
+  
+  Note that the content should be a string of bytes.  Strings in perl
+  can contain characters outside the range of a byte.  The C<Encode>
+  module can be used to turn such strings into a string of bytes.
+  
+  =item $r->as_string
+  
+  =item $r->as_string( $eol )
+  
+  Method returning a textual representation of the request.
+  
+  =back
+  
+  =head1 EXAMPLES
+  
+  Creating requests to be sent with L<LWP::UserAgent> or others can be easy. Here
+  are a few examples.
+  
+  =head2 Simple POST
+  
+  Here, we'll create a simple POST request that could be used to send JSON data
+  to an endpoint.
+  
+      #!/usr/bin/env perl
+  
+      use strict;
+      use warnings;
+  
+      use HTTP::Request ();
+      use JSON::MaybeXS qw(encode_json);
+  
+      my $url = 'https://www.example.com/api/user/123';
+      my $header = ['Content-Type' => 'application/json; charset=UTF-8'];
+      my $data = {foo => 'bar', baz => 'quux'};
+      my $encoded_data = encode_json($data);
+  
+      my $r = HTTP::Request->new('POST', $url, $header, $encoded_data);
+      # at this point, we could send it via LWP::UserAgent
+      # my $ua = LWP::UserAgent->new();
+      # my $res = $ua->request($r);
+  
+  =head2 Batch POST Request
+  
+  Some services, like Google, allow multiple requests to be sent in one batch.
+  L<https://developers.google.com/drive/v3/web/batch> for example. Using the
+  C<add_part> method from L<HTTP::Message> makes this simple.
+  
+      #!/usr/bin/env perl
+  
+      use strict;
+      use warnings;
+  
+      use HTTP::Request ();
+      use JSON::MaybeXS qw(encode_json);
+  
+      my $auth_token = 'auth_token';
+      my $batch_url = 'https://www.googleapis.com/batch';
+      my $url = 'https://www.googleapis.com/drive/v3/files/fileId/permissions?fields=id';
+      my $url_no_email = 'https://www.googleapis.com/drive/v3/files/fileId/permissions?fields=id&sendNotificationEmail=false';
+  
+      # generate a JSON post request for one of the batch entries
+      my $req1 = build_json_request($url, {
+          emailAddress => 'example@appsrocks.com',
+          role => "writer",
+          type => "user",
+      });
+  
+      # generate a JSON post request for one of the batch entries
+      my $req2 = build_json_request($url_no_email, {
+          domain => "appsrocks.com",
+          role => "reader",
+          type => "domain",
+      });
+  
+      # generate a multipart request to send all of the other requests
+      my $r = HTTP::Request->new('POST', $batch_url, [
+          'Accept-Encoding' => 'gzip',
+          # if we don't provide a boundary here, HTTP::Message will generate
+          # one for us. We could use UUID::uuid() here if we wanted.
+          'Content-Type' => 'multipart/mixed; boundary=END_OF_PART'
+      ]);
+  
+      # add the two POST requests to the main request
+      $r->add_part($req1, $req2);
+      # at this point, we could send it via LWP::UserAgent
+      # my $ua = LWP::UserAgent->new();
+      # my $res = $ua->request($r);
+      exit();
+  
+      sub build_json_request {
+          my ($url, $href) = @_;
+          my $header = ['Authorization' => "Bearer $auth_token", 'Content-Type' => 'application/json; charset=UTF-8'];
+          return HTTP::Request->new('POST', $url, $header, encode_json($href));
       }
-      $obj = ref($obj);
-      $ERROR{ ref($obj) } = $err;
+  
+  =head1 SEE ALSO
+  
+  L<HTTP::Headers>, L<HTTP::Message>, L<HTTP::Request::Common>,
+  L<HTTP::Response>
+  
+  =head1 AUTHOR
+  
+  Gisle Aas <gisle@activestate.com>
+  
+  =head1 COPYRIGHT AND LICENSE
+  
+  This software is copyright (c) 1994 by Gisle Aas.
+  
+  This is free software; you can redistribute it and/or modify it under
+  the same terms as the Perl 5 programming language system itself.
+  
+  =cut
+  
+  __END__
+  
+  
+  #ABSTRACT: HTTP style request message
+HTTP_REQUEST
+
+$fatpacked{"HTTP/Request/Common.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'HTTP_REQUEST_COMMON';
+  package HTTP::Request::Common;
+  
+  use strict;
+  use warnings;
+  
+  our $VERSION = '6.37';
+  
+  our $DYNAMIC_FILE_UPLOAD ||= 0;  # make it defined (don't know why)
+  
+  use Exporter 5.57 'import';
+  
+  our @EXPORT =qw(GET HEAD PUT PATCH POST OPTIONS);
+  our @EXPORT_OK = qw($DYNAMIC_FILE_UPLOAD DELETE);
+  
+  require HTTP::Request;
+  use Carp();
+  use File::Spec;
+  
+  my $CRLF = "\015\012";   # "\r\n" is not portable
+  
+  sub GET  { _simple_req('GET',  @_); }
+  sub HEAD { _simple_req('HEAD', @_); }
+  sub DELETE { _simple_req('DELETE', @_); }
+  sub PATCH { request_type_with_data('PATCH', @_); }
+  sub POST { request_type_with_data('POST', @_); }
+  sub PUT { request_type_with_data('PUT', @_); }
+  sub OPTIONS { request_type_with_data('OPTIONS', @_); }
+  
+  sub request_type_with_data
+  {
+      my $type = shift;
+      my $url  = shift;
+      my $req = HTTP::Request->new($type => $url);
+      my $content;
+      $content = shift if @_ and ref $_[0];
+      my($k, $v);
+      while (($k,$v) = splice(@_, 0, 2)) {
+  	if (lc($k) eq 'content') {
+  	    $content = $v;
+  	}
+  	else {
+  	    $req->push_header($k, $v);
+  	}
+      }
+      my $ct = $req->header('Content-Type');
+      unless ($ct) {
+  	$ct = 'application/x-www-form-urlencoded';
+      }
+      elsif ($ct eq 'form-data') {
+  	$ct = 'multipart/form-data';
+      }
+  
+      if (ref $content) {
+  	if ($ct =~ m,^multipart/form-data\s*(;|$),i) {
+  	    require HTTP::Headers::Util;
+  	    my @v = HTTP::Headers::Util::split_header_words($ct);
+  	    Carp::carp("Multiple Content-Type headers") if @v > 1;
+  	    @v = @{$v[0]};
+  
+  	    my $boundary;
+  	    my $boundary_index;
+  	    for (my @tmp = @v; @tmp;) {
+  		my($k, $v) = splice(@tmp, 0, 2);
+  		if ($k eq "boundary") {
+  		    $boundary = $v;
+  		    $boundary_index = @v - @tmp - 1;
+  		    last;
+  		}
+  	    }
+  
+  	    ($content, $boundary) = form_data($content, $boundary, $req);
+  
+  	    if ($boundary_index) {
+  		$v[$boundary_index] = $boundary;
+  	    }
+  	    else {
+  		push(@v, boundary => $boundary);
+  	    }
+  
+  	    $ct = HTTP::Headers::Util::join_header_words(@v);
+  	}
+  	else {
+  	    # We use a temporary URI object to format
+  	    # the application/x-www-form-urlencoded content.
+  	    require URI;
+  	    my $url = URI->new('http:');
+  	    $url->query_form(ref($content) eq "HASH" ? %$content : @$content);
+  	    $content = $url->query;
+  
+  	    # HTML/4.01 says that line breaks are represented as "CR LF" pairs (i.e., `%0D%0A')
+  	    $content =~ s/(?<!%0D)%0A/%0D%0A/g if defined($content);
+  	}
+      }
+  
+      $req->header('Content-Type' => $ct);  # might be redundant
+      if (defined($content)) {
+  	$req->header('Content-Length' =>
+  		     length($content)) unless ref($content);
+  	$req->content($content);
+      }
+      else {
+          $req->header('Content-Length' => 0);
+      }
+      $req;
+  }
+  
+  
+  sub _simple_req
+  {
+      my($method, $url) = splice(@_, 0, 2);
+      my $req = HTTP::Request->new($method => $url);
+      my($k, $v);
+      my $content;
+      while (($k,$v) = splice(@_, 0, 2)) {
+  	if (lc($k) eq 'content') {
+  	    $req->add_content($v);
+              $content++;
+  	}
+  	else {
+  	    $req->push_header($k, $v);
+  	}
+      }
+      if ($content && !defined($req->header("Content-Length"))) {
+          $req->header("Content-Length", length(${$req->content_ref}));
+      }
+      $req;
+  }
+  
+  
+  sub form_data   # RFC1867
+  {
+      my($data, $boundary, $req) = @_;
+      my @data = ref($data) eq "HASH" ? %$data : @$data;  # copy
+      my $fhparts;
+      my @parts;
+      while (my ($k,$v) = splice(@data, 0, 2)) {
+  	if (!ref($v)) {
+  	    $k =~ s/([\\\"])/\\$1/g;  # escape quotes and backslashes
+              no warnings 'uninitialized';
+  	    push(@parts,
+  		 qq(Content-Disposition: form-data; name="$k"$CRLF$CRLF$v));
+  	}
+  	else {
+  	    my($file, $usename, @headers) = @$v;
+  	    unless (defined $usename) {
+  		$usename = $file;
+  		$usename = (File::Spec->splitpath($usename))[-1] if defined($usename);
+  	    }
+              $k =~ s/([\\\"])/\\$1/g;
+  	    my $disp = qq(form-data; name="$k");
+              if (defined($usename) and length($usename)) {
+                  $usename =~ s/([\\\"])/\\$1/g;
+                  $disp .= qq(; filename="$usename");
+              }
+  	    my $content = "";
+  	    my $h = HTTP::Headers->new(@headers);
+  	    if ($file) {
+  		open(my $fh, "<", $file) or Carp::croak("Can't open file $file: $!");
+  		binmode($fh);
+  		if ($DYNAMIC_FILE_UPLOAD) {
+  		    # will read file later, close it now in order to
+                      # not accumulate to many open file handles
+                      close($fh);
+  		    $content = \$file;
+  		}
+  		else {
+  		    local($/) = undef; # slurp files
+  		    $content = <$fh>;
+  		    close($fh);
+  		}
+  		unless ($h->header("Content-Type")) {
+  		    require LWP::MediaTypes;
+  		    LWP::MediaTypes::guess_media_type($file, $h);
+  		}
+  	    }
+  	    if ($h->header("Content-Disposition")) {
+  		# just to get it sorted first
+  		$disp = $h->header("Content-Disposition");
+  		$h->remove_header("Content-Disposition");
+  	    }
+  	    if ($h->header("Content")) {
+  		$content = $h->header("Content");
+  		$h->remove_header("Content");
+  	    }
+  	    my $head = join($CRLF, "Content-Disposition: $disp",
+  			           $h->as_string($CRLF),
+  			           "");
+  	    if (ref $content) {
+  		push(@parts, [$head, $$content]);
+  		$fhparts++;
+  	    }
+  	    else {
+  		push(@parts, $head . $content);
+  	    }
+  	}
+      }
+      return ("", "none") unless @parts;
+  
+      my $content;
+      if ($fhparts) {
+  	$boundary = boundary(10) # hopefully enough randomness
+  	    unless $boundary;
+  
+  	# add the boundaries to the @parts array
+  	for (1..@parts-1) {
+  	    splice(@parts, $_*2-1, 0, "$CRLF--$boundary$CRLF");
+  	}
+  	unshift(@parts, "--$boundary$CRLF");
+  	push(@parts, "$CRLF--$boundary--$CRLF");
+  
+  	# See if we can generate Content-Length header
+  	my $length = 0;
+  	for (@parts) {
+  	    if (ref $_) {
+  	 	my ($head, $f) = @$_;
+  		my $file_size;
+  		unless ( -f $f && ($file_size = -s _) ) {
+  		    # The file is either a dynamic file like /dev/audio
+  		    # or perhaps a file in the /proc file system where
+  		    # stat may return a 0 size even though reading it
+  		    # will produce data.  So we cannot make
+  		    # a Content-Length header.
+  		    undef $length;
+  		    last;
+  		}
+  	    	$length += $file_size + length $head;
+  	    }
+  	    else {
+  		$length += length;
+  	    }
+          }
+          $length && $req->header('Content-Length' => $length);
+  
+  	# set up a closure that will return content piecemeal
+  	$content = sub {
+  	    for (;;) {
+  		unless (@parts) {
+  		    defined $length && $length != 0 &&
+  		    	Carp::croak "length of data sent did not match calculated Content-Length header.  Probably because uploaded file changed in size during transfer.";
+  		    return;
+  		}
+  		my $p = shift @parts;
+  		unless (ref $p) {
+  		    $p .= shift @parts while @parts && !ref($parts[0]);
+  		    defined $length && ($length -= length $p);
+  		    return $p;
+  		}
+  		my($buf, $fh) = @$p;
+                  unless (ref($fh)) {
+                      my $file = $fh;
+                      undef($fh);
+                      open($fh, "<", $file) || Carp::croak("Can't open file $file: $!");
+                      binmode($fh);
+                  }
+  		my $buflength = length $buf;
+  		my $n = read($fh, $buf, 2048, $buflength);
+  		if ($n) {
+  		    $buflength += $n;
+  		    unshift(@parts, ["", $fh]);
+  		}
+  		else {
+  		    close($fh);
+  		}
+  		if ($buflength) {
+  		    defined $length && ($length -= $buflength);
+  		    return $buf
+  	    	}
+  	    }
+  	};
+  
+      }
+      else {
+  	$boundary = boundary() unless $boundary;
+  
+  	my $bno = 0;
+        CHECK_BOUNDARY:
+  	{
+  	    for (@parts) {
+  		if (index($_, $boundary) >= 0) {
+  		    # must have a better boundary
+  		    $boundary = boundary(++$bno);
+  		    redo CHECK_BOUNDARY;
+  		}
+  	    }
+  	    last;
+  	}
+  	$content = "--$boundary$CRLF" .
+  	           join("$CRLF--$boundary$CRLF", @parts) .
+  		   "$CRLF--$boundary--$CRLF";
+      }
+  
+      wantarray ? ($content, $boundary) : $content;
+  }
+  
+  
+  sub boundary
+  {
+      my $size = shift || return "xYzZY";
+      require MIME::Base64;
+      my $b = MIME::Base64::encode(join("", map chr(rand(256)), 1..$size*3), "");
+      $b =~ s/[\W]/X/g;  # ensure alnum only
+      $b;
+  }
+  
+  1;
+  
+  =pod
+  
+  =encoding UTF-8
+  
+  =head1 NAME
+  
+  HTTP::Request::Common - Construct common HTTP::Request objects
+  
+  =head1 VERSION
+  
+  version 6.37
+  
+  =head1 SYNOPSIS
+  
+    use HTTP::Request::Common;
+    $ua = LWP::UserAgent->new;
+    $ua->request(GET 'http://www.sn.no/');
+    $ua->request(POST 'http://somewhere/foo', foo => bar, bar => foo);
+    $ua->request(PATCH 'http://somewhere/foo', foo => bar, bar => foo);
+    $ua->request(PUT 'http://somewhere/foo', foo => bar, bar => foo);
+    $ua->request(OPTIONS 'http://somewhere/foo', foo => bar, bar => foo);
+  
+  =head1 DESCRIPTION
+  
+  This module provides functions that return newly created C<HTTP::Request>
+  objects.  These functions are usually more convenient to use than the
+  standard C<HTTP::Request> constructor for the most common requests.
+  
+  Note that L<LWP::UserAgent> has several convenience methods, including
+  C<get>, C<head>, C<delete>, C<post> and C<put>.
+  
+  The following functions are provided:
+  
+  =over 4
+  
+  =item GET $url
+  
+  =item GET $url, Header => Value,...
+  
+  The C<GET> function returns an L<HTTP::Request> object initialized with
+  the "GET" method and the specified URL.  It is roughly equivalent to the
+  following call
+  
+    HTTP::Request->new(
+       GET => $url,
+       HTTP::Headers->new(Header => Value,...),
+    )
+  
+  but is less cluttered.  What is different is that a header named
+  C<Content> will initialize the content part of the request instead of
+  setting a header field.  Note that GET requests should normally not
+  have a content, so this hack makes more sense for the C<PUT>, C<PATCH>
+   and C<POST> functions described below.
+  
+  The C<get(...)> method of L<LWP::UserAgent> exists as a shortcut for
+  C<< $ua->request(GET ...) >>.
+  
+  =item HEAD $url
+  
+  =item HEAD $url, Header => Value,...
+  
+  Like GET() but the method in the request is "HEAD".
+  
+  The C<head(...)>  method of L<LWP::UserAgent> exists as a shortcut for
+  C<< $ua->request(HEAD ...) >>.
+  
+  =item DELETE $url
+  
+  =item DELETE $url, Header => Value,...
+  
+  Like C<GET> but the method in the request is C<DELETE>.  This function
+  is not exported by default.
+  
+  =item PATCH $url
+  
+  =item PATCH $url, Header => Value,...
+  
+  =item PATCH $url, $form_ref, Header => Value,...
+  
+  =item PATCH $url, Header => Value,..., Content => $form_ref
+  
+  =item PATCH $url, Header => Value,..., Content => $content
+  
+  The same as C<POST> below, but the method in the request is C<PATCH>.
+  
+  =item PUT $url
+  
+  =item PUT $url, Header => Value,...
+  
+  =item PUT $url, $form_ref, Header => Value,...
+  
+  =item PUT $url, Header => Value,..., Content => $form_ref
+  
+  =item PUT $url, Header => Value,..., Content => $content
+  
+  The same as C<POST> below, but the method in the request is C<PUT>
+  
+  =item OPTIONS $url
+  
+  =item OPTIONS $url, Header => Value,...
+  
+  =item OPTIONS $url, $form_ref, Header => Value,...
+  
+  =item OPTIONS $url, Header => Value,..., Content => $form_ref
+  
+  =item OPTIONS $url, Header => Value,..., Content => $content
+  
+  The same as C<POST> below, but the method in the request is C<OPTIONS>
+  
+  =item POST $url
+  
+  =item POST $url, Header => Value,...
+  
+  =item POST $url, $form_ref, Header => Value,...
+  
+  =item POST $url, Header => Value,..., Content => $form_ref
+  
+  =item POST $url, Header => Value,..., Content => $content
+  
+  C<POST>, C<PATCH> and C<PUT> all work with the same parameters.
+  
+    %data = ( title => 'something', body => something else' );
+    $ua = LWP::UserAgent->new();
+    $request = HTTP::Request::Common::POST( $url, [ %data ] );
+    $response = $ua->request($request);
+  
+  They take a second optional array or hash reference
+  parameter C<$form_ref>.  The content can also be specified
+  directly using the C<Content> pseudo-header, and you may also provide
+  the C<$form_ref> this way.
+  
+  The C<Content> pseudo-header steals a bit of the header field namespace as
+  there is no way to directly specify a header that is actually called
+  "Content".  If you really need this you must update the request
+  returned in a separate statement.
+  
+  The C<$form_ref> argument can be used to pass key/value pairs for the
+  form content.  By default we will initialize a request using the
+  C<application/x-www-form-urlencoded> content type.  This means that
+  you can emulate an HTML E<lt>form> POSTing like this:
+  
+    POST 'http://www.perl.org/survey.cgi',
+         [ name   => 'Gisle Aas',
+           email  => 'gisle@aas.no',
+           gender => 'M',
+           born   => '1964',
+           perc   => '3%',
+         ];
+  
+  This will create an L<HTTP::Request> object that looks like this:
+  
+    POST http://www.perl.org/survey.cgi
+    Content-Length: 66
+    Content-Type: application/x-www-form-urlencoded
+  
+    name=Gisle%20Aas&email=gisle%40aas.no&gender=M&born=1964&perc=3%25
+  
+  Multivalued form fields can be specified by either repeating the field
+  name or by passing the value as an array reference.
+  
+  The POST method also supports the C<multipart/form-data> content used
+  for I<Form-based File Upload> as specified in RFC 1867.  You trigger
+  this content format by specifying a content type of C<'form-data'> as
+  one of the request headers.  If one of the values in the C<$form_ref> is
+  an array reference, then it is treated as a file part specification
+  with the following interpretation:
+  
+    [ $file, $filename, Header => Value... ]
+    [ undef, $filename, Header => Value,..., Content => $content ]
+  
+  The first value in the array ($file) is the name of a file to open.
+  This file will be read and its content placed in the request.  The
+  routine will croak if the file can't be opened.  Use an C<undef> as
+  $file value if you want to specify the content directly with a
+  C<Content> header.  The $filename is the filename to report in the
+  request.  If this value is undefined, then the basename of the $file
+  will be used.  You can specify an empty string as $filename if you
+  want to suppress sending the filename when you provide a $file value.
+  
+  If a $file is provided by no C<Content-Type> header, then C<Content-Type>
+  and C<Content-Encoding> will be filled in automatically with the values
+  returned by C<LWP::MediaTypes::guess_media_type()>
+  
+  Sending my F<~/.profile> to the survey used as example above can be
+  achieved by this:
+  
+    POST 'http://www.perl.org/survey.cgi',
+         Content_Type => 'form-data',
+         Content      => [ name  => 'Gisle Aas',
+                           email => 'gisle@aas.no',
+                           gender => 'M',
+                           born   => '1964',
+                           init   => ["$ENV{HOME}/.profile"],
+                         ]
+  
+  This will create an L<HTTP::Request> object that almost looks this (the
+  boundary and the content of your F<~/.profile> is likely to be
+  different):
+  
+    POST http://www.perl.org/survey.cgi
+    Content-Length: 388
+    Content-Type: multipart/form-data; boundary="6G+f"
+  
+    --6G+f
+    Content-Disposition: form-data; name="name"
+  
+    Gisle Aas
+    --6G+f
+    Content-Disposition: form-data; name="email"
+  
+    gisle@aas.no
+    --6G+f
+    Content-Disposition: form-data; name="gender"
+  
+    M
+    --6G+f
+    Content-Disposition: form-data; name="born"
+  
+    1964
+    --6G+f
+    Content-Disposition: form-data; name="init"; filename=".profile"
+    Content-Type: text/plain
+  
+    PATH=/local/perl/bin:$PATH
+    export PATH
+  
+    --6G+f--
+  
+  If you set the C<$DYNAMIC_FILE_UPLOAD> variable (exportable) to some TRUE
+  value, then you get back a request object with a subroutine closure as
+  the content attribute.  This subroutine will read the content of any
+  files on demand and return it in suitable chunks.  This allow you to
+  upload arbitrary big files without using lots of memory.  You can even
+  upload infinite files like F</dev/audio> if you wish; however, if
+  the file is not a plain file, there will be no C<Content-Length> header
+  defined for the request.  Not all servers (or server
+  applications) like this.  Also, if the file(s) change in size between
+  the time the C<Content-Length> is calculated and the time that the last
+  chunk is delivered, the subroutine will C<Croak>.
+  
+  The C<post(...)>  method of L<LWP::UserAgent> exists as a shortcut for
+  C<< $ua->request(POST ...) >>.
+  
+  =back
+  
+  =head1 SEE ALSO
+  
+  L<HTTP::Request>, L<LWP::UserAgent>
+  
+  Also, there are some examples in L<HTTP::Request/"EXAMPLES"> that you might
+  find useful. For example, batch requests are explained there.
+  
+  =head1 AUTHOR
+  
+  Gisle Aas <gisle@activestate.com>
+  
+  =head1 COPYRIGHT AND LICENSE
+  
+  This software is copyright (c) 1994 by Gisle Aas.
+  
+  This is free software; you can redistribute it and/or modify it under
+  the same terms as the Perl 5 programming language system itself.
+  
+  =cut
+  
+  __END__
+  
+  
+  #ABSTRACT: Construct common HTTP::Request objects
+HTTP_REQUEST_COMMON
+
+$fatpacked{"HTTP/Response.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'HTTP_RESPONSE';
+  package HTTP::Response;
+  
+  use strict;
+  use warnings;
+  
+  our $VERSION = '6.37';
+  
+  use base 'HTTP::Message';
+  
+  use HTTP::Status ();
+  
+  
+  sub new
+  {
+      my($class, $rc, $msg, $header, $content) = @_;
+      my $self = $class->SUPER::new($header, $content);
+      $self->code($rc);
+      $self->message($msg);
+      $self;
+  }
+  
+  
+  sub parse
+  {
+      my($class, $str) = @_;
+      Carp::carp('Undefined argument to parse()') if $^W && ! defined $str;
+      my $status_line;
+      if (defined $str && $str =~ s/^(.*)\n//) {
+  	$status_line = $1;
+      }
+      else {
+  	$status_line = $str;
+  	$str = "";
+      }
+  
+      $status_line =~ s/\r\z// if defined $status_line;
+  
+      my $self = $class->SUPER::parse($str);
+      if (defined $status_line) {
+          my($protocol, $code, $message);
+          if ($status_line =~ /^\d{3} /) {
+             # Looks like a response created by HTTP::Response->new
+             ($code, $message) = split(' ', $status_line, 2);
+          } else {
+             ($protocol, $code, $message) = split(' ', $status_line, 3);
+          }
+          $self->protocol($protocol) if $protocol;
+          $self->code($code) if defined($code);
+          $self->message($message) if defined($message);
+      }
+      $self;
+  }
+  
+  
+  sub clone
+  {
+      my $self = shift;
+      my $clone = bless $self->SUPER::clone, ref($self);
+      $clone->code($self->code);
+      $clone->message($self->message);
+      $clone->request($self->request->clone) if $self->request;
+      # we don't clone previous
+      $clone;
+  }
+  
+  
+  sub code      { shift->_elem('_rc',      @_); }
+  sub message   { shift->_elem('_msg',     @_); }
+  sub previous  { shift->_elem('_previous',@_); }
+  sub request   { shift->_elem('_request', @_); }
+  
+  
+  sub status_line
+  {
+      my $self = shift;
+      my $code = $self->{'_rc'}  || "000";
+      my $mess = $self->{'_msg'} || HTTP::Status::status_message($code) || "Unknown code";
+      return "$code $mess";
+  }
+  
+  
+  sub base
+  {
+      my $self = shift;
+      my $base = (
+  	$self->header('Content-Base'),        # used to be HTTP/1.1
+  	$self->header('Content-Location'),    # HTTP/1.1
+  	$self->header('Base'),                # HTTP/1.0
+      )[0];
+      if ($base && $base =~ /^$URI::scheme_re:/o) {
+  	# already absolute
+  	return $HTTP::URI_CLASS->new($base);
+      }
+  
+      my $req = $self->request;
+      if ($req) {
+          # if $base is undef here, the return value is effectively
+          # just a copy of $self->request->uri.
+          return $HTTP::URI_CLASS->new_abs($base, $req->uri);
+      }
+  
+      # can't find an absolute base
+      return undef;
+  }
+  
+  
+  sub redirects {
+      my $self = shift;
+      my @r;
+      my $r = $self;
+      while (my $p = $r->previous) {
+          push(@r, $p);
+          $r = $p;
+      }
+      return @r unless wantarray;
+      return reverse @r;
+  }
+  
+  
+  sub filename
+  {
+      my $self = shift;
+      my $file;
+  
+      my $cd = $self->header('Content-Disposition');
+      if ($cd) {
+  	require HTTP::Headers::Util;
+  	if (my @cd = HTTP::Headers::Util::split_header_words($cd)) {
+  	    my ($disposition, undef, %cd_param) = @{$cd[-1]};
+  	    $file = $cd_param{filename};
+  
+  	    # RFC 2047 encoded?
+  	    if ($file && $file =~ /^=\?(.+?)\?(.+?)\?(.+)\?=$/) {
+  		my $charset = $1;
+  		my $encoding = uc($2);
+  		my $encfile = $3;
+  
+  		if ($encoding eq 'Q' || $encoding eq 'B') {
+  		    local($SIG{__DIE__});
+  		    eval {
+  			if ($encoding eq 'Q') {
+  			    $encfile =~ s/_/ /g;
+  			    require MIME::QuotedPrint;
+  			    $encfile = MIME::QuotedPrint::decode($encfile);
+  			}
+  			else { # $encoding eq 'B'
+  			    require MIME::Base64;
+  			    $encfile = MIME::Base64::decode($encfile);
+  			}
+  
+  			require Encode;
+  			require Encode::Locale;
+  			Encode::from_to($encfile, $charset, "locale_fs");
+  		    };
+  
+  		    $file = $encfile unless $@;
+  		}
+  	    }
+  	}
+      }
+  
+      unless (defined($file) && length($file)) {
+  	my $uri;
+  	if (my $cl = $self->header('Content-Location')) {
+  	    $uri = URI->new($cl);
+  	}
+  	elsif (my $request = $self->request) {
+  	    $uri = $request->uri;
+  	}
+  
+  	if ($uri) {
+  	    $file = ($uri->path_segments)[-1];
+  	}
+      }
+  
+      if ($file) {
+  	$file =~ s,.*[\\/],,;  # basename
+      }
+  
+      if ($file && !length($file)) {
+  	$file = undef;
+      }
+  
+      $file;
+  }
+  
+  
+  sub as_string
+  {
+      my $self = shift;
+      my($eol) = @_;
+      $eol = "\n" unless defined $eol;
+  
+      my $status_line = $self->status_line;
+      my $proto = $self->protocol;
+      $status_line = "$proto $status_line" if $proto;
+  
+      return join($eol, $status_line, $self->SUPER::as_string(@_));
+  }
+  
+  
+  sub dump
+  {
+      my $self = shift;
+  
+      my $status_line = $self->status_line;
+      my $proto = $self->protocol;
+      $status_line = "$proto $status_line" if $proto;
+  
+      return $self->SUPER::dump(
+  	preheader => $status_line,
+          @_,
+      );
+  }
+  
+  
+  sub is_info     { HTTP::Status::is_info     (shift->{'_rc'}); }
+  sub is_success  { HTTP::Status::is_success  (shift->{'_rc'}); }
+  sub is_redirect { HTTP::Status::is_redirect (shift->{'_rc'}); }
+  sub is_error    { HTTP::Status::is_error    (shift->{'_rc'}); }
+  sub is_client_error { HTTP::Status::is_client_error (shift->{'_rc'}); }
+  sub is_server_error { HTTP::Status::is_server_error (shift->{'_rc'}); }
+  
+  
+  sub error_as_HTML
+  {
+      my $self = shift;
+      my $title = 'An Error Occurred';
+      my $body  = $self->status_line;
+      $body =~ s/&/&amp;/g;
+      $body =~ s/</&lt;/g;
+      return <<EOM;
+  <html>
+  <head><title>$title</title></head>
+  <body>
+  <h1>$title</h1>
+  <p>$body</p>
+  </body>
+  </html>
+  EOM
+  }
+  
+  
+  sub current_age
+  {
+      my $self = shift;
+      my $time = shift;
+  
+      # Implementation of RFC 2616 section 13.2.3
+      # (age calculations)
+      my $response_time = $self->client_date;
+      my $date = $self->date;
+  
+      my $age = 0;
+      if ($response_time && $date) {
+  	$age = $response_time - $date;  # apparent_age
+  	$age = 0 if $age < 0;
+      }
+  
+      my $age_v = $self->header('Age');
+      if ($age_v && $age_v > $age) {
+  	$age = $age_v;   # corrected_received_age
+      }
+  
+      if ($response_time) {
+  	my $request = $self->request;
+  	if ($request) {
+  	    my $request_time = $request->date;
+  	    if ($request_time && $request_time < $response_time) {
+  		# Add response_delay to age to get 'corrected_initial_age'
+  		$age += $response_time - $request_time;
+  	    }
+  	}
+  	$age += ($time || time) - $response_time;
+      }
+      return $age;
+  }
+  
+  
+  sub freshness_lifetime
+  {
+      my($self, %opt) = @_;
+  
+      # First look for the Cache-Control: max-age=n header
+      for my $cc ($self->header('Cache-Control')) {
+  	for my $cc_dir (split(/\s*,\s*/, $cc)) {
+  	    return $1 if $cc_dir =~ /^max-age\s*=\s*(\d+)/i;
+  	}
+      }
+  
+      # Next possibility is to look at the "Expires" header
+      my $date = $self->date || $self->client_date || $opt{time} || time;
+      if (my $expires = $self->expires) {
+  	return $expires - $date;
+      }
+  
+      # Must apply heuristic expiration
+      return undef if exists $opt{heuristic_expiry} && !$opt{heuristic_expiry};
+  
+      # Default heuristic expiration parameters
+      $opt{h_min} ||= 60;
+      $opt{h_max} ||= 24 * 3600;
+      $opt{h_lastmod_fraction} ||= 0.10; # 10% since last-mod suggested by RFC2616
+      $opt{h_default} ||= 3600;
+  
+      # Should give a warning if more than 24 hours according to
+      # RFC 2616 section 13.2.4.  Here we just make this the default
+      # maximum value.
+  
+      if (my $last_modified = $self->last_modified) {
+  	my $h_exp = ($date - $last_modified) * $opt{h_lastmod_fraction};
+  	return $opt{h_min} if $h_exp < $opt{h_min};
+  	return $opt{h_max} if $h_exp > $opt{h_max};
+  	return $h_exp;
+      }
+  
+      # default when all else fails
+      return $opt{h_min} if $opt{h_min} > $opt{h_default};
+      return $opt{h_default};
+  }
+  
+  
+  sub is_fresh
+  {
+      my($self, %opt) = @_;
+      $opt{time} ||= time;
+      my $f = $self->freshness_lifetime(%opt);
+      return undef unless defined($f);
+      return $f > $self->current_age($opt{time});
+  }
+  
+  
+  sub fresh_until
+  {
+      my($self, %opt) = @_;
+      $opt{time} ||= time;
+      my $f = $self->freshness_lifetime(%opt);
+      return undef unless defined($f);
+      return $f - $self->current_age($opt{time}) + $opt{time};
+  }
+  
+  1;
+  
+  =pod
+  
+  =encoding UTF-8
+  
+  =head1 NAME
+  
+  HTTP::Response - HTTP style response message
+  
+  =head1 VERSION
+  
+  version 6.37
+  
+  =head1 SYNOPSIS
+  
+  Response objects are returned by the request() method of the C<LWP::UserAgent>:
+  
+      # ...
+      $response = $ua->request($request);
+      if ($response->is_success) {
+          print $response->decoded_content;
+      }
+      else {
+          print STDERR $response->status_line, "\n";
+      }
+  
+  =head1 DESCRIPTION
+  
+  The C<HTTP::Response> class encapsulates HTTP style responses.  A
+  response consists of a response line, some headers, and a content
+  body. Note that the LWP library uses HTTP style responses even for
+  non-HTTP protocol schemes.  Instances of this class are usually
+  created and returned by the request() method of an C<LWP::UserAgent>
+  object.
+  
+  C<HTTP::Response> is a subclass of C<HTTP::Message> and therefore
+  inherits its methods.  The following additional methods are available:
+  
+  =over 4
+  
+  =item $r = HTTP::Response->new( $code )
+  
+  =item $r = HTTP::Response->new( $code, $msg )
+  
+  =item $r = HTTP::Response->new( $code, $msg, $header )
+  
+  =item $r = HTTP::Response->new( $code, $msg, $header, $content )
+  
+  Constructs a new C<HTTP::Response> object describing a response with
+  response code $code and optional message $msg.  The optional $header
+  argument should be a reference to an C<HTTP::Headers> object or a
+  plain array reference of key/value pairs.  The optional $content
+  argument should be a string of bytes.  The meanings of these arguments are
+  described below.
+  
+  =item $r = HTTP::Response->parse( $str )
+  
+  This constructs a new response object by parsing the given string.
+  
+  =item $r->code
+  
+  =item $r->code( $code )
+  
+  This is used to get/set the code attribute.  The code is a 3 digit
+  number that encode the overall outcome of an HTTP response.  The
+  C<HTTP::Status> module provide constants that provide mnemonic names
+  for the code attribute.
+  
+  =item $r->message
+  
+  =item $r->message( $message )
+  
+  This is used to get/set the message attribute.  The message is a short
+  human readable single line string that explains the response code.
+  
+  =item $r->header( $field )
+  
+  =item $r->header( $field => $value )
+  
+  This is used to get/set header values and it is inherited from
+  C<HTTP::Headers> via C<HTTP::Message>.  See L<HTTP::Headers> for
+  details and other similar methods that can be used to access the
+  headers.
+  
+  =item $r->content
+  
+  =item $r->content( $bytes )
+  
+  This is used to get/set the raw content and it is inherited from the
+  C<HTTP::Message> base class.  See L<HTTP::Message> for details and
+  other methods that can be used to access the content.
+  
+  =item $r->decoded_content( %options )
+  
+  This will return the content after any C<Content-Encoding> and
+  charsets have been decoded.  See L<HTTP::Message> for details.
+  
+  =item $r->request
+  
+  =item $r->request( $request )
+  
+  This is used to get/set the request attribute.  The request attribute
+  is a reference to the request that caused this response.  It does
+  not have to be the same request passed to the $ua->request() method,
+  because there might have been redirects and authorization retries in
+  between.
+  
+  =item $r->previous
+  
+  =item $r->previous( $response )
+  
+  This is used to get/set the previous attribute.  The previous
+  attribute is used to link together chains of responses.  You get
+  chains of responses if the first response is redirect or unauthorized.
+  The value is C<undef> if this is the first response in a chain.
+  
+  Note that the method $r->redirects is provided as a more convenient
+  way to access the response chain.
+  
+  =item $r->status_line
+  
+  Returns the string "E<lt>code> E<lt>message>".  If the message attribute
+  is not set then the official name of E<lt>code> (see L<HTTP::Status>)
+  is substituted.
+  
+  =item $r->base
+  
+  Returns the base URI for this response.  The return value will be a
+  reference to a URI object.
+  
+  The base URI is obtained from one the following sources (in priority
+  order):
+  
+  =over 4
+  
+  =item 1.
+  
+  Embedded in the document content, for instance <BASE HREF="...">
+  in HTML documents.
+  
+  =item 2.
+  
+  A "Content-Base:" or a "Content-Location:" header in the response.
+  
+  For backwards compatibility with older HTTP implementations we will
+  also look for the "Base:" header.
+  
+  =item 3.
+  
+  The URI used to request this response. This might not be the original
+  URI that was passed to $ua->request() method, because we might have
+  received some redirect responses first.
+  
+  =back
+  
+  If none of these sources provide an absolute URI, undef is returned.
+  
+  When the LWP protocol modules produce the HTTP::Response object, then any base
+  URI embedded in the document (step 1) will already have initialized the
+  "Content-Base:" header. (See L<LWP::UserAgent/parse_head>).  This means that
+  this method only performs the last 2 steps (the content is not always available
+  either).
+  
+  =item $r->filename
+  
+  Returns a filename for this response.  Note that doing sanity checks
+  on the returned filename (eg. removing characters that cannot be used
+  on the target filesystem where the filename would be used, and
+  laundering it for security purposes) are the caller's responsibility;
+  the only related thing done by this method is that it makes a simple
+  attempt to return a plain filename with no preceding path segments.
+  
+  The filename is obtained from one the following sources (in priority
+  order):
+  
+  =over 4
+  
+  =item 1.
+  
+  A "Content-Disposition:" header in the response.  Proper decoding of
+  RFC 2047 encoded filenames requires the C<MIME::QuotedPrint> (for "Q"
+  encoding), C<MIME::Base64> (for "B" encoding), and C<Encode> modules.
+  
+  =item 2.
+  
+  A "Content-Location:" header in the response.
+  
+  =item 3.
+  
+  The URI used to request this response. This might not be the original
+  URI that was passed to $ua->request() method, because we might have
+  received some redirect responses first.
+  
+  =back
+  
+  If a filename cannot be derived from any of these sources, undef is
+  returned.
+  
+  =item $r->as_string
+  
+  =item $r->as_string( $eol )
+  
+  Returns a textual representation of the response.
+  
+  =item $r->is_info
+  
+  =item $r->is_success
+  
+  =item $r->is_redirect
+  
+  =item $r->is_error
+  
+  =item $r->is_client_error
+  
+  =item $r->is_server_error
+  
+  These methods indicate if the response was informational, successful, a
+  redirection, or an error.  See L<HTTP::Status> for the meaning of these.
+  
+  =item $r->error_as_HTML
+  
+  Returns a string containing a complete HTML document indicating what
+  error occurred.  This method should only be called when $r->is_error
+  is TRUE.
+  
+  =item $r->redirects
+  
+  Returns the list of redirect responses that lead up to this response
+  by following the $r->previous chain.  The list order is oldest first.
+  
+  In scalar context return the number of redirect responses leading up
+  to this one.
+  
+  =item $r->current_age
+  
+  Calculates the "current age" of the response as specified by RFC 2616
+  section 13.2.3.  The age of a response is the time since it was sent
+  by the origin server.  The returned value is a number representing the
+  age in seconds.
+  
+  =item $r->freshness_lifetime( %opt )
+  
+  Calculates the "freshness lifetime" of the response as specified by
+  RFC 2616 section 13.2.4.  The "freshness lifetime" is the length of
+  time between the generation of a response and its expiration time.
+  The returned value is the number of seconds until expiry.
+  
+  If the response does not contain an "Expires" or a "Cache-Control"
+  header, then this function will apply some simple heuristic based on
+  the "Last-Modified" header to determine a suitable lifetime.  The
+  following options might be passed to control the heuristics:
+  
+  =over
+  
+  =item heuristic_expiry => $bool
+  
+  If passed as a FALSE value, don't apply heuristics and just return
+  C<undef> when "Expires" or "Cache-Control" is lacking.
+  
+  =item h_lastmod_fraction => $num
+  
+  This number represent the fraction of the difference since the
+  "Last-Modified" timestamp to make the expiry time.  The default is
+  C<0.10>, the suggested typical setting of 10% in RFC 2616.
+  
+  =item h_min => $sec
+  
+  This is the lower limit of the heuristic expiry age to use.  The
+  default is C<60> (1 minute).
+  
+  =item h_max => $sec
+  
+  This is the upper limit of the heuristic expiry age to use.  The
+  default is C<86400> (24 hours).
+  
+  =item h_default => $sec
+  
+  This is the expiry age to use when nothing else applies.  The default
+  is C<3600> (1 hour) or "h_min" if greater.
+  
+  =back
+  
+  =item $r->is_fresh( %opt )
+  
+  Returns TRUE if the response is fresh, based on the values of
+  freshness_lifetime() and current_age().  If the response is no longer
+  fresh, then it has to be re-fetched or re-validated by the origin
+  server.
+  
+  Options might be passed to control expiry heuristics, see the
+  description of freshness_lifetime().
+  
+  =item $r->fresh_until( %opt )
+  
+  Returns the time (seconds since epoch) when this entity is no longer fresh.
+  
+  Options might be passed to control expiry heuristics, see the
+  description of freshness_lifetime().
+  
+  =back
+  
+  =head1 SEE ALSO
+  
+  L<HTTP::Headers>, L<HTTP::Message>, L<HTTP::Status>, L<HTTP::Request>
+  
+  =head1 AUTHOR
+  
+  Gisle Aas <gisle@activestate.com>
+  
+  =head1 COPYRIGHT AND LICENSE
+  
+  This software is copyright (c) 1994 by Gisle Aas.
+  
+  This is free software; you can redistribute it and/or modify it under
+  the same terms as the Perl 5 programming language system itself.
+  
+  =cut
+  
+  __END__
+  
+  
+  #ABSTRACT: HTTP style response message
+  
+HTTP_RESPONSE
+
+$fatpacked{"HTTP/Status.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'HTTP_STATUS';
+  package HTTP::Status;
+  
+  use strict;
+  use warnings;
+  
+  our $VERSION = '6.37';
+  
+  use Exporter 5.57 'import';
+  
+  our @EXPORT = qw(is_info is_success is_redirect is_error status_message);
+  our @EXPORT_OK = qw(is_client_error is_server_error is_cacheable_by_default);
+  
+  # Note also addition of mnemonics to @EXPORT below
+  
+  # Unmarked codes are from RFC 7231 (2017-12-20)
+  # See also:
+  # https://www.iana.org/assignments/http-status-codes/http-status-codes.xhtml
+  
+  my %StatusCode = (
+      100 => 'Continue',
+      101 => 'Switching Protocols',
+      102 => 'Processing',                      # RFC 2518: WebDAV
+      103 => 'Early Hints',                     # RFC 8297: Indicating Hints
+  #   104 .. 199
+      200 => 'OK',
+      201 => 'Created',
+      202 => 'Accepted',
+      203 => 'Non-Authoritative Information',
+      204 => 'No Content',
+      205 => 'Reset Content',
+      206 => 'Partial Content',                 # RFC 7233: Range Requests
+      207 => 'Multi-Status',                    # RFC 4918: WebDAV
+      208 => 'Already Reported',                # RFC 5842: WebDAV bindings
+  #   209 .. 225
+      226 => 'IM Used',                         # RFC 3229: Delta encoding
+  #   227 .. 299
+      300 => 'Multiple Choices',
+      301 => 'Moved Permanently',
+      302 => 'Found',
+      303 => 'See Other',
+      304 => 'Not Modified',                    # RFC 7232: Conditional Request
+      305 => 'Use Proxy',
+      307 => 'Temporary Redirect',
+      308 => 'Permanent Redirect',              # RFC 7528: Permanent Redirect
+  #   309 .. 399
+      400 => 'Bad Request',
+      401 => 'Unauthorized',                    # RFC 7235: Authentication
+      402 => 'Payment Required',
+      403 => 'Forbidden',
+      404 => 'Not Found',
+      405 => 'Method Not Allowed',
+      406 => 'Not Acceptable',
+      407 => 'Proxy Authentication Required',   # RFC 7235: Authentication
+      408 => 'Request Timeout',
+      409 => 'Conflict',
+      410 => 'Gone',
+      411 => 'Length Required',
+      412 => 'Precondition Failed',             # RFC 7232: Conditional Request
+      413 => 'Payload Too Large',
+      414 => 'URI Too Long',
+      415 => 'Unsupported Media Type',
+      416 => 'Range Not Satisfiable',           # RFC 7233: Range Requests
+      417 => 'Expectation Failed',
+  #   418 .. 420
+      421 => 'Misdirected Request',             # RFC 7540: HTTP/2
+      422 => 'Unprocessable Entity',            # RFC 4918: WebDAV
+      423 => 'Locked',                          # RFC 4918: WebDAV
+      424 => 'Failed Dependency',               # RFC 4918: WebDAV
+      425 => 'Too Early',                       # RFC 8470: Using Early Data in HTTP
+      426 => 'Upgrade Required',
+  #   427
+      428 => 'Precondition Required',           # RFC 6585: Additional Codes
+      429 => 'Too Many Requests',               # RFC 6585: Additional Codes
+  #   430
+      431 => 'Request Header Fields Too Large', # RFC 6585: Additional Codes
+  #   432 .. 450
+      451 => 'Unavailable For Legal Reasons',   # RFC 7725: Legal Obstacles
+  #   452 .. 499
+      500 => 'Internal Server Error',
+      501 => 'Not Implemented',
+      502 => 'Bad Gateway',
+      503 => 'Service Unavailable',
+      504 => 'Gateway Timeout',
+      505 => 'HTTP Version Not Supported',
+      506 => 'Variant Also Negotiates',         # RFC 2295: Transparant Ngttn
+      507 => 'Insufficient Storage',            # RFC 4918: WebDAV
+      508 => 'Loop Detected',                   # RFC 5842: WebDAV bindings
+  #   509
+      510 => 'Not Extended',                    # RFC 2774: Extension Framework
+      511 => 'Network Authentication Required', # RFC 6585: Additional Codes
+  );
+  
+  # keep some unofficial codes that used to be in this distribution
+  %StatusCode = (
+      %StatusCode,
+      418 => 'I\'m a teapot',                   # RFC 2324: HTCPC/1.0  1-april
+      449 => 'Retry with',                      #           microsoft
+      509 => 'Bandwidth Limit Exceeded',        #           Apache / cPanel
+  );
+  
+  my $mnemonicCode = '';
+  my ($code, $message);
+  while (($code, $message) = each %StatusCode) {
+      # create mnemonic subroutines
+      $message =~ s/I'm/I am/;
+      $message =~ tr/a-z \-/A-Z__/;
+      $mnemonicCode .= "sub HTTP_$message () { $code }\n";
+      $mnemonicCode .= "*RC_$message = \\&HTTP_$message;\n";  # legacy
+      $mnemonicCode .= "push(\@EXPORT_OK, 'HTTP_$message');\n";
+      $mnemonicCode .= "push(\@EXPORT, 'RC_$message');\n";
+  }
+  eval $mnemonicCode; # only one eval for speed
+  die if $@;
+  
+  # backwards compatibility
+  *RC_MOVED_TEMPORARILY = \&RC_FOUND;  # 302 was renamed in the standard
+  push(@EXPORT, "RC_MOVED_TEMPORARILY");
+  
+  my %compat = (
+      REQUEST_ENTITY_TOO_LARGE      => \&HTTP_PAYLOAD_TOO_LARGE,
+      REQUEST_URI_TOO_LARGE         => \&HTTP_URI_TOO_LONG,
+      REQUEST_RANGE_NOT_SATISFIABLE => \&HTTP_RANGE_NOT_SATISFIABLE,
+      NO_CODE                       => \&HTTP_TOO_EARLY,
+      UNORDERED_COLLECTION          => \&HTTP_TOO_EARLY,
+  );
+  
+  foreach my $name (keys %compat) {
+      push(@EXPORT, "RC_$name");
+      push(@EXPORT_OK, "HTTP_$name");
+      no strict 'refs';
+      *{"RC_$name"} = $compat{$name};
+      *{"HTTP_$name"} = $compat{$name};
+  }
+  
+  our %EXPORT_TAGS = (
+     constants => [grep /^HTTP_/, @EXPORT_OK],
+     is => [grep /^is_/, @EXPORT, @EXPORT_OK],
+  );
+  
+  
+  sub status_message  ($) { $StatusCode{$_[0]}; }
+  
+  sub is_info                 ($) { $_[0] && $_[0] >= 100 && $_[0] < 200; }
+  sub is_success              ($) { $_[0] && $_[0] >= 200 && $_[0] < 300; }
+  sub is_redirect             ($) { $_[0] && $_[0] >= 300 && $_[0] < 400; }
+  sub is_error                ($) { $_[0] && $_[0] >= 400 && $_[0] < 600; }
+  sub is_client_error         ($) { $_[0] && $_[0] >= 400 && $_[0] < 500; }
+  sub is_server_error         ($) { $_[0] && $_[0] >= 500 && $_[0] < 600; }
+  sub is_cacheable_by_default ($) { $_[0] && ( $_[0] == 200 # OK
+                                            || $_[0] == 203 # Non-Authoritative Information
+                                            || $_[0] == 204 # No Content
+                                            || $_[0] == 206 # Not Acceptable
+                                            || $_[0] == 300 # Multiple Choices
+                                            || $_[0] == 301 # Moved Permanently
+                                            || $_[0] == 308 # Permanent Redirect
+                                            || $_[0] == 404 # Not Found
+                                            || $_[0] == 405 # Method Not Allowed
+                                            || $_[0] == 410 # Gone
+                                            || $_[0] == 414 # Request-URI Too Large
+                                            || $_[0] == 451 # Unavailable For Legal Reasons
+                                            || $_[0] == 501 # Not Implemented
+                                              );
+  }
+  
+  1;
+  
+  =pod
+  
+  =encoding UTF-8
+  
+  =head1 NAME
+  
+  HTTP::Status - HTTP Status code processing
+  
+  =head1 VERSION
+  
+  version 6.37
+  
+  =head1 SYNOPSIS
+  
+   use HTTP::Status qw(:constants :is status_message);
+  
+   if ($rc != HTTP_OK) {
+       print status_message($rc), "\n";
+   }
+  
+   if (is_success($rc)) { ... }
+   if (is_error($rc)) { ... }
+   if (is_redirect($rc)) { ... }
+  
+  =head1 DESCRIPTION
+  
+  I<HTTP::Status> is a library of routines for defining and
+  classifying HTTP status codes for libwww-perl.  Status codes are
+  used to encode the overall outcome of an HTTP response message.  Codes
+  correspond to those defined in RFC 2616 and RFC 2518.
+  
+  =head1 CONSTANTS
+  
+  The following constant functions can be used as mnemonic status code
+  names.  None of these are exported by default.  Use the C<:constants>
+  tag to import them all.
+  
+     HTTP_CONTINUE                        (100)
+     HTTP_SWITCHING_PROTOCOLS             (101)
+     HTTP_PROCESSING                      (102)
+     HTTP_EARLY_HINTS                     (103)
+  
+     HTTP_OK                              (200)
+     HTTP_CREATED                         (201)
+     HTTP_ACCEPTED                        (202)
+     HTTP_NON_AUTHORITATIVE_INFORMATION   (203)
+     HTTP_NO_CONTENT                      (204)
+     HTTP_RESET_CONTENT                   (205)
+     HTTP_PARTIAL_CONTENT                 (206)
+     HTTP_MULTI_STATUS                    (207)
+     HTTP_ALREADY_REPORTED                (208)
+  
+     HTTP_IM_USED                         (226)
+  
+     HTTP_MULTIPLE_CHOICES                (300)
+     HTTP_MOVED_PERMANENTLY               (301)
+     HTTP_FOUND                           (302)
+     HTTP_SEE_OTHER                       (303)
+     HTTP_NOT_MODIFIED                    (304)
+     HTTP_USE_PROXY                       (305)
+     HTTP_TEMPORARY_REDIRECT              (307)
+     HTTP_PERMANENT_REDIRECT              (308)
+  
+     HTTP_BAD_REQUEST                     (400)
+     HTTP_UNAUTHORIZED                    (401)
+     HTTP_PAYMENT_REQUIRED                (402)
+     HTTP_FORBIDDEN                       (403)
+     HTTP_NOT_FOUND                       (404)
+     HTTP_METHOD_NOT_ALLOWED              (405)
+     HTTP_NOT_ACCEPTABLE                  (406)
+     HTTP_PROXY_AUTHENTICATION_REQUIRED   (407)
+     HTTP_REQUEST_TIMEOUT                 (408)
+     HTTP_CONFLICT                        (409)
+     HTTP_GONE                            (410)
+     HTTP_LENGTH_REQUIRED                 (411)
+     HTTP_PRECONDITION_FAILED             (412)
+     HTTP_PAYLOAD_TOO_LARGE               (413)
+     HTTP_URI_TOO_LONG                    (414)
+     HTTP_UNSUPPORTED_MEDIA_TYPE          (415)
+     HTTP_RANGE_NOT_SATISFIABLE           (416)
+     HTTP_EXPECTATION_FAILED              (417)
+     HTTP_MISDIRECTED REQUEST             (421)
+     HTTP_UNPROCESSABLE_ENTITY            (422)
+     HTTP_LOCKED                          (423)
+     HTTP_FAILED_DEPENDENCY               (424)
+     HTTP_TOO_EARLY                       (425)
+     HTTP_UPGRADE_REQUIRED                (426)
+     HTTP_PRECONDITION_REQUIRED           (428)
+     HTTP_TOO_MANY_REQUESTS               (429)
+     HTTP_REQUEST_HEADER_FIELDS_TOO_LARGE (431)
+     HTTP_UNAVAILABLE_FOR_LEGAL_REASONS   (451)
+  
+     HTTP_INTERNAL_SERVER_ERROR           (500)
+     HTTP_NOT_IMPLEMENTED                 (501)
+     HTTP_BAD_GATEWAY                     (502)
+     HTTP_SERVICE_UNAVAILABLE             (503)
+     HTTP_GATEWAY_TIMEOUT                 (504)
+     HTTP_HTTP_VERSION_NOT_SUPPORTED      (505)
+     HTTP_VARIANT_ALSO_NEGOTIATES         (506)
+     HTTP_INSUFFICIENT_STORAGE            (507)
+     HTTP_LOOP_DETECTED                   (508)
+     HTTP_NOT_EXTENDED                    (510)
+     HTTP_NETWORK_AUTHENTICATION_REQUIRED (511)
+  
+  =head1 FUNCTIONS
+  
+  The following additional functions are provided.  Most of them are
+  exported by default.  The C<:is> import tag can be used to import all
+  the classification functions.
+  
+  =over 4
+  
+  =item status_message( $code )
+  
+  The status_message() function will translate status codes to human
+  readable strings. The string is the same as found in the constant
+  names above. If the $code is not registered in the L<list of IANA HTTP Status
+  Codes|https://www.iana.org/assignments/http-status-codes/http-status-codes.xhtml>
+  then C<undef> is returned.
+  
+  =item is_info( $code )
+  
+  Return TRUE if C<$code> is an I<Informational> status code (1xx).  This
+  class of status code indicates a provisional response which can't have
+  any content.
+  
+  =item is_success( $code )
+  
+  Return TRUE if C<$code> is a I<Successful> status code (2xx).
+  
+  =item is_redirect( $code )
+  
+  Return TRUE if C<$code> is a I<Redirection> status code (3xx). This class of
+  status code indicates that further action needs to be taken by the
+  user agent in order to fulfill the request.
+  
+  =item is_error( $code )
+  
+  Return TRUE if C<$code> is an I<Error> status code (4xx or 5xx).  The function
+  returns TRUE for both client and server error status codes.
+  
+  =item is_client_error( $code )
+  
+  Return TRUE if C<$code> is a I<Client Error> status code (4xx). This class
+  of status code is intended for cases in which the client seems to have
+  erred.
+  
+  This function is B<not> exported by default.
+  
+  =item is_server_error( $code )
+  
+  Return TRUE if C<$code> is a I<Server Error> status code (5xx). This class
+  of status codes is intended for cases in which the server is aware
+  that it has erred or is incapable of performing the request.
+  
+  This function is B<not> exported by default.
+  
+  =item is_cacheable_by_default( $code )
+  
+  Return TRUE if C<$code> indicates that a response is cacheable by default, and
+  it can be reused by a cache with heuristic expiration. All other status codes
+  are not cacheable by default. See L<RFC 7231 - HTTP/1.1 Semantics and Content,
+  Section 6.1. Overview of Status Codes|https://tools.ietf.org/html/rfc7231#section-6.1>.
+  
+  This function is B<not> exported by default.
+  
+  =back
+  
+  =head1 SEE ALSO
+  
+  L<IANA HTTP Status Codes|https://www.iana.org/assignments/http-status-codes/http-status-codes.xhtml>
+  
+  =head1 BUGS
+  
+  For legacy reasons all the C<HTTP_> constants are exported by default
+  with the prefix C<RC_>.  It's recommended to use explicit imports and
+  the C<:constants> tag instead of relying on this.
+  
+  =head1 AUTHOR
+  
+  Gisle Aas <gisle@activestate.com>
+  
+  =head1 COPYRIGHT AND LICENSE
+  
+  This software is copyright (c) 1994 by Gisle Aas.
+  
+  This is free software; you can redistribute it and/or modify it under
+  the same terms as the Perl 5 programming language system itself.
+  
+  =cut
+  
+  __END__
+  
+  
+  #ABSTRACT: HTTP Status code processing
+HTTP_STATUS
+
+$fatpacked{"LWP.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'LWP';
+  package LWP;
+  
+  our $VERSION = '6.67';
+  
+  require LWP::UserAgent;  # this should load everything you need
+  
+  1;
+  
+  __END__
+  
+  =pod
+  
+  =encoding utf-8
+  
+  =head1 NAME
+  
+  LWP - The World-Wide Web library for Perl
+  
+  =head1 SYNOPSIS
+  
+    use LWP;
+    print "This is libwww-perl-$LWP::VERSION\n";
+  
+  
+  =head1 DESCRIPTION
+  
+  The libwww-perl collection is a set of Perl modules which provides a
+  simple and consistent application programming interface (API) to the
+  World-Wide Web.  The main focus of the library is to provide classes
+  and functions that allow you to write WWW clients. The library also
+  contain modules that are of more general use and even classes that
+  help you implement simple HTTP servers.
+  
+  Most modules in this library provide an object oriented API.  The user
+  agent, requests sent and responses received from the WWW server are
+  all represented by objects.  This makes a simple and powerful
+  interface to these services.  The interface is easy to extend
+  and customize for your own needs.
+  
+  The main features of the library are:
+  
+  =over 3
+  
+  =item *
+  
+  Contains various reusable components (modules) that can be
+  used separately or together.
+  
+  =item *
+  
+  Provides an object oriented model of HTTP-style communication.  Within
+  this framework we currently support access to C<http>, C<https>, C<gopher>,
+  C<ftp>, C<news>, C<file>, and C<mailto> resources.
+  
+  =item *
+  
+  Provides a full object oriented interface or
+  a very simple procedural interface.
+  
+  =item *
+  
+  Supports the basic and digest authorization schemes.
+  
+  =item *
+  
+  Supports transparent redirect handling.
+  
+  =item *
+  
+  Supports access through proxy servers.
+  
+  =item *
+  
+  Provides parser for F<robots.txt> files and a framework for constructing robots.
+  
+  =item *
+  
+  Supports parsing of HTML forms.
+  
+  =item *
+  
+  Implements HTTP content negotiation algorithm that can
+  be used both in protocol modules and in server scripts (like CGI
+  scripts).
+  
+  =item *
+  
+  Supports HTTP cookies.
+  
+  =item *
+  
+  Some simple command line clients, for instance C<lwp-request> and C<lwp-download>.
+  
+  =back
+  
+  
+  =head1 HTTP STYLE COMMUNICATION
+  
+  
+  The libwww-perl library is based on HTTP style communication. This
+  section tries to describe what that means.
+  
+  Let us start with this quote from the HTTP specification document
+  L<http://www.w3.org/Protocols/>:
+  
+  =over 3
+  
+  =item *
+  
+  The HTTP protocol is based on a request/response paradigm. A client
+  establishes a connection with a server and sends a request to the
+  server in the form of a request method, URI, and protocol version,
+  followed by a MIME-like message containing request modifiers, client
+  information, and possible body content. The server responds with a
+  status line, including the message's protocol version and a success or
+  error code, followed by a MIME-like message containing server
+  information, entity meta-information, and possible body content.
+  
+  =back
+  
+  What this means to libwww-perl is that communication always take place
+  through these steps: First a I<request> object is created and
+  configured. This object is then passed to a server and we get a
+  I<response> object in return that we can examine. A request is always
+  independent of any previous requests, i.e. the service is stateless.
+  The same simple model is used for any kind of service we want to
+  access.
+  
+  For example, if we want to fetch a document from a remote file server,
+  then we send it a request that contains a name for that document and
+  the response will contain the document itself.  If we access a search
+  engine, then the content of the request will contain the query
+  parameters and the response will contain the query result.  If we want
+  to send a mail message to somebody then we send a request object which
+  contains our message to the mail server and the response object will
+  contain an acknowledgment that tells us that the message has been
+  accepted and will be forwarded to the recipient(s).
+  
+  It is as simple as that!
+  
+  
+  =head2 The Request Object
+  
+  The libwww-perl request object has the class name L<HTTP::Request>.
+  The fact that the class name uses C<HTTP::> as a
+  prefix only implies that we use the HTTP model of communication.  It
+  does not limit the kind of services we can try to pass this I<request>
+  to.  For instance, we will send L<HTTP::Request>s both to ftp and
+  gopher servers, as well as to the local file system.
+  
+  The main attributes of the request objects are:
+  
+  =over 3
+  
+  =item *
+  
+  B<method> is a short string that tells what kind of
+  request this is.  The most common methods are B<GET>, B<PUT>,
+  B<POST> and B<HEAD>.
+  
+  =item *
+  
+  B<uri> is a string denoting the protocol, server and
+  the name of the "document" we want to access.  The B<uri> might
+  also encode various other parameters.
+  
+  =item *
+  
+  B<headers> contains additional information about the
+  request and can also used to describe the content.  The headers
+  are a set of keyword/value pairs.
+  
+  =item *
+  
+  B<content> is an arbitrary amount of data.
+  
+  =back
+  
+  =head2 The Response Object
+  
+  The libwww-perl response object has the class name L<HTTP::Response>.
+  The main attributes of objects of this class are:
+  
+  =over 3
+  
+  =item *
+  
+  B<code> is a numerical value that indicates the overall
+  outcome of the request.
+  
+  =item *
+  
+  B<message> is a short, human readable string that
+  corresponds to the I<code>.
+  
+  =item *
+  
+  B<headers> contains additional information about the
+  response and describe the content.
+  
+  =item *
+  
+  B<content> is an arbitrary amount of data.
+  
+  =back
+  
+  Since we don't want to handle all possible I<code> values directly in
+  our programs, a libwww-perl response object has methods that can be
+  used to query what kind of response this is.  The most commonly used
+  response classification methods are:
+  
+  =over 3
+  
+  =item is_success()
+  
+  The request was successfully received, understood or accepted.
+  
+  =item is_error()
+  
+  The request failed.  The server or the resource might not be
+  available, access to the resource might be denied or other things might
+  have failed for some reason.
+  
+  =back
+  
+  =head2 The User Agent
+  
+  Let us assume that we have created a I<request> object. What do we
+  actually do with it in order to receive a I<response>?
+  
+  The answer is that you pass it to a I<user agent> object and this
+  object takes care of all the things that need to be done
+  (like low-level communication and error handling) and returns
+  a I<response> object. The user agent represents your
+  application on the network and provides you with an interface that
+  can accept I<requests> and return I<responses>.
+  
+  The user agent is an interface layer between
+  your application code and the network.  Through this interface you are
+  able to access the various servers on the network.
+  
+  The class name for the user agent is L<LWP::UserAgent>.  Every
+  libwww-perl application that wants to communicate should create at
+  least one object of this class. The main method provided by this
+  object is request(). This method takes an L<HTTP::Request> object as
+  argument and (eventually) returns a L<HTTP::Response> object.
+  
+  The user agent has many other attributes that let you
+  configure how it will interact with the network and with your
+  application.
+  
+  =over 3
+  
+  =item *
+  
+  B<timeout> specifies how much time we give remote servers to
+  respond before the library disconnects and creates an
+  internal I<timeout> response.
+  
+  =item *
+  
+  B<agent> specifies the name that your application uses when it
+  presents itself on the network.
+  
+  =item *
+  
+  B<from> can be set to the e-mail address of the person
+  responsible for running the application.  If this is set, then the
+  address will be sent to the servers with every request.
+  
+  =item *
+  
+  B<parse_head> specifies whether we should initialize response
+  headers from the C<< <head> >> section of HTML documents.
+  
+  =item *
+  
+  B<proxy> and B<no_proxy> specify if and when to go through
+  a proxy server. L<http://www.w3.org/History/1994/WWW/Proxies/>
+  
+  =item *
+  
+  B<credentials> provides a way to set up user names and
+  passwords needed to access certain services.
+  
+  =back
+  
+  Many applications want even more control over how they interact
+  with the network and they get this by sub-classing
+  L<LWP::UserAgent>.  The library includes a
+  sub-class, L<LWP::RobotUA>, for robot applications.
+  
+  =head2 An Example
+  
+  This example shows how the user agent, a request and a response are
+  represented in actual perl code:
+  
+    # Create a user agent object
+    use LWP::UserAgent;
+    my $ua = LWP::UserAgent->new;
+    $ua->agent("MyApp/0.1 ");
+  
+    # Create a request
+    my $req = HTTP::Request->new(POST => 'http://search.cpan.org/search');
+    $req->content_type('application/x-www-form-urlencoded');
+    $req->content('query=libwww-perl&mode=dist');
+  
+    # Pass request to the user agent and get a response back
+    my $res = $ua->request($req);
+  
+    # Check the outcome of the response
+    if ($res->is_success) {
+        print $res->content;
+    }
+    else {
+        print $res->status_line, "\n";
+    }
+  
+  The C<$ua> is created once when the application starts up.  New request
+  objects should normally created for each request sent.
+  
+  
+  =head1 NETWORK SUPPORT
+  
+  This section discusses the various protocol schemes and
+  the HTTP style methods that headers may be used for each.
+  
+  For all requests, a "User-Agent" header is added and initialized from
+  the C<< $ua->agent >> attribute before the request is handed to the network
+  layer.  In the same way, a "From" header is initialized from the
+  $ua->from attribute.
+  
+  For all responses, the library adds a header called "Client-Date".
+  This header holds the time when the response was received by
+  your application.  The format and semantics of the header are the
+  same as the server created "Date" header.  You may also encounter other
+  "Client-XXX" headers.  They are all generated by the library
+  internally and are not received from the servers.
+  
+  =head2 HTTP Requests
+  
+  HTTP requests are just handed off to an HTTP server and it
+  decides what happens.  Few servers implement methods beside the usual
+  "GET", "HEAD", "POST" and "PUT", but CGI-scripts may implement
+  any method they like.
+  
+  If the server is not available then the library will generate an
+  internal error response.
+  
+  The library automatically adds a "Host" and a "Content-Length" header
+  to the HTTP request before it is sent over the network.
+  
+  For a GET request you might want to add an "If-Modified-Since" or
+  "If-None-Match" header to make the request conditional.
+  
+  For a POST request you should add the "Content-Type" header.  When you
+  try to emulate HTML E<lt>FORM> handling you should usually let the value
+  of the "Content-Type" header be "application/x-www-form-urlencoded".
+  See L<lwpcook> for examples of this.
+  
+  The libwww-perl HTTP implementation currently support the HTTP/1.1
+  and HTTP/1.0 protocol.
+  
+  The library allows you to access proxy server through HTTP.  This
+  means that you can set up the library to forward all types of request
+  through the HTTP protocol module.  See L<LWP::UserAgent> for
+  documentation of this.
+  
+  
+  =head2 HTTPS Requests
+  
+  HTTPS requests are HTTP requests over an encrypted network connection
+  using the SSL protocol developed by Netscape.  Everything about HTTP
+  requests above also apply to HTTPS requests.  In addition the library
+  will add the headers "Client-SSL-Cipher", "Client-SSL-Cert-Subject" and
+  "Client-SSL-Cert-Issuer" to the response.  These headers denote the
+  encryption method used and the name of the server owner.
+  
+  The request can contain the header "If-SSL-Cert-Subject" in order to
+  make the request conditional on the content of the server certificate.
+  If the certificate subject does not match, no request is sent to the
+  server and an internally generated error response is returned.  The
+  value of the "If-SSL-Cert-Subject" header is interpreted as a Perl
+  regular expression.
+  
+  
+  =head2 FTP Requests
+  
+  The library currently supports GET, HEAD and PUT requests.  GET
+  retrieves a file or a directory listing from an FTP server.  PUT
+  stores a file on a ftp server.
+  
+  You can specify a ftp account for servers that want this in addition
+  to user name and password.  This is specified by including an "Account"
+  header in the request.
+  
+  User name/password can be specified using basic authorization or be
+  encoded in the URL.  Failed logins return an UNAUTHORIZED response with
+  "WWW-Authenticate: Basic" and can be treated like basic authorization
+  for HTTP.
+  
+  The library supports ftp ASCII transfer mode by specifying the "type=a"
+  parameter in the URL. It also supports transfer of ranges for FTP transfers
+  using the "Range" header.
+  
+  Directory listings are by default returned unprocessed (as returned
+  from the ftp server) with the content media type reported to be
+  "text/ftp-dir-listing". The L<File::Listing> module provides methods
+  for parsing of these directory listing.
+  
+  The ftp module is also able to convert directory listings to HTML and
+  this can be requested via the standard HTTP content negotiation
+  mechanisms (add an "Accept: text/html" header in the request if you
+  want this).
+  
+  For normal file retrievals, the "Content-Type" is guessed based on the
+  file name suffix. See L<LWP::MediaTypes>.
+  
+  The "If-Modified-Since" request header works for servers that implement
+  the C<MDTM> command.  It will probably not work for directory listings though.
+  
+  Example:
+  
+    $req = HTTP::Request->new(GET => 'ftp://me:passwd@ftp.some.where.com/');
+    $req->header(Accept => "text/html, */*;q=0.1");
+  
+  =head2 News Requests
+  
+  Access to the USENET News system is implemented through the NNTP
+  protocol.  The name of the news server is obtained from the
+  NNTP_SERVER environment variable and defaults to "news".  It is not
+  possible to specify the hostname of the NNTP server in news: URLs.
+  
+  The library supports GET and HEAD to retrieve news articles through the
+  NNTP protocol.  You can also post articles to newsgroups by using
+  (surprise!) the POST method.
+  
+  GET on newsgroups is not implemented yet.
+  
+  Examples:
+  
+    $req = HTTP::Request->new(GET => 'news:abc1234@a.sn.no');
+  
+    $req = HTTP::Request->new(POST => 'news:comp.lang.perl.test');
+    $req->header(Subject => 'This is a test',
+                 From    => 'me@some.where.org');
+    $req->content(<<EOT);
+    This is the content of the message that we are sending to
+    the world.
+    EOT
+  
+  
+  =head2 Gopher Request
+  
+  The library supports the GET and HEAD methods for gopher requests.  All
+  request header values are ignored.  HEAD cheats and returns a
+  response without even talking to server.
+  
+  Gopher menus are always converted to HTML.
+  
+  The response "Content-Type" is generated from the document type
+  encoded (as the first letter) in the request URL path itself.
+  
+  Example:
+  
+    $req = HTTP::Request->new(GET => 'gopher://gopher.sn.no/');
+  
+  
+  
+  =head2 File Request
+  
+  The library supports GET and HEAD methods for file requests.  The
+  "If-Modified-Since" header is supported.  All other headers are
+  ignored.  The I<host> component of the file URL must be empty or set
+  to "localhost".  Any other I<host> value will be treated as an error.
+  
+  Directories are always converted to an HTML document.  For normal
+  files, the "Content-Type" and "Content-Encoding" in the response are
+  guessed based on the file suffix.
+  
+  Example:
+  
+    $req = HTTP::Request->new(GET => 'file:/etc/passwd');
+  
+  
+  =head2 Mailto Request
+  
+  You can send (aka "POST") mail messages using the library.  All
+  headers specified for the request are passed on to the mail system.
+  The "To" header is initialized from the mail address in the URL.
+  
+  Example:
+  
+    $req = HTTP::Request->new(POST => 'mailto:libwww@perl.org');
+    $req->header(Subject => "subscribe");
+    $req->content("Please subscribe me to the libwww-perl mailing list!\n");
+  
+  =head2 CPAN Requests
+  
+  URLs with scheme C<cpan:> are redirected to a suitable CPAN
+  mirror.  If you have your own local mirror of CPAN you might tell LWP
+  to use it for C<cpan:> URLs by an assignment like this:
+  
+    $LWP::Protocol::cpan::CPAN = "file:/local/CPAN/";
+  
+  Suitable CPAN mirrors are also picked up from the configuration for
+  the CPAN.pm, so if you have used that module a suitable mirror should
+  be picked automatically.  If neither of these apply, then a redirect
+  to the generic CPAN http location is issued.
+  
+  Example request to download the newest perl:
+  
+    $req = HTTP::Request->new(GET => "cpan:src/latest.tar.gz");
+  
+  
+  =head1 OVERVIEW OF CLASSES AND PACKAGES
+  
+  This table should give you a quick overview of the classes provided by the
+  library. Indentation shows class inheritance.
+  
+   LWP::MemberMixin   -- Access to member variables of Perl5 classes
+     LWP::UserAgent   -- WWW user agent class
+       LWP::RobotUA   -- When developing a robot applications
+     LWP::Protocol          -- Interface to various protocol schemes
+       LWP::Protocol::http  -- http:// access
+       LWP::Protocol::file  -- file:// access
+       LWP::Protocol::ftp   -- ftp:// access
+       ...
+  
+   LWP::Authen::Basic -- Handle 401 and 407 responses
+   LWP::Authen::Digest
+  
+   HTTP::Headers      -- MIME/RFC822 style header (used by HTTP::Message)
+   HTTP::Message      -- HTTP style message
+     HTTP::Request    -- HTTP request
+     HTTP::Response   -- HTTP response
+   HTTP::Daemon       -- A HTTP server class
+  
+   WWW::RobotRules    -- Parse robots.txt files
+     WWW::RobotRules::AnyDBM_File -- Persistent RobotRules
+  
+   Net::HTTP          -- Low level HTTP client
+  
+  The following modules provide various functions and definitions.
+  
+   LWP                -- This file.  Library version number and documentation.
+   LWP::MediaTypes    -- MIME types configuration (text/html etc.)
+   LWP::Simple        -- Simplified procedural interface for common functions
+   HTTP::Status       -- HTTP status code (200 OK etc)
+   HTTP::Date         -- Date parsing module for HTTP date formats
+   HTTP::Negotiate    -- HTTP content negotiation calculation
+   File::Listing      -- Parse directory listings
+   HTML::Form         -- Processing for <form>s in HTML documents
+  
+  
+  =head1 MORE DOCUMENTATION
+  
+  All modules contain detailed information on the interfaces they
+  provide.  The L<lwpcook> manpage is the libwww-perl cookbook that contain
+  examples of typical usage of the library.  You might want to take a
+  look at how the scripts L<lwp-request>, L<lwp-download>, L<lwp-dump>
+  and L<lwp-mirror> are implemented.
+  
+  =head1 ENVIRONMENT
+  
+  The following environment variables are used by LWP:
+  
+  =over
+  
+  =item HOME
+  
+  The L<LWP::MediaTypes> functions will look for the F<.media.types> and
+  F<.mime.types> files relative to you home directory.
+  
+  =item http_proxy
+  
+  =item ftp_proxy
+  
+  =item xxx_proxy
+  
+  =item no_proxy
+  
+  These environment variables can be set to enable communication through
+  a proxy server.  See the description of the C<env_proxy> method in
+  L<LWP::UserAgent>.
+  
+  =item PERL_LWP_ENV_PROXY
+  
+  If set to a TRUE value, then the L<LWP::UserAgent> will by default call
+  C<env_proxy> during initialization.  This makes LWP honor the proxy variables
+  described above.
+  
+  =item PERL_LWP_SSL_VERIFY_HOSTNAME
+  
+  The default C<verify_hostname> setting for L<LWP::UserAgent>.  If
+  not set the default will be 1.  Set it as 0 to disable hostname
+  verification (the default prior to libwww-perl 5.840.
+  
+  =item PERL_LWP_SSL_CA_FILE
+  
+  =item PERL_LWP_SSL_CA_PATH
+  
+  The file and/or directory
+  where the trusted Certificate Authority certificates
+  is located.  See L<LWP::UserAgent> for details.
+  
+  =item PERL_HTTP_URI_CLASS
+  
+  Used to decide what URI objects to instantiate.  The default is L<URI>.
+  You might want to set it to L<URI::URL> for compatibility with old times.
+  
+  =back
+  
+  =head1 AUTHORS
+  
+  LWP was made possible by contributions from Adam Newby, Albert
+  Dvornik, Alexandre Duret-Lutz, Andreas Gustafsson, Andreas König,
+  Andrew Pimlott, Andy Lester, Ben Coleman, Benjamin Low, Ben Low, Ben
+  Tilly, Blair Zajac, Bob Dalgleish, BooK, Brad Hughes, Brian
+  J. Murrell, Brian McCauley, Charles C. Fu, Charles Lane, Chris Nandor,
+  Christian Gilmore, Chris W. Unger, Craig Macdonald, Dale Couch, Dan
+  Kubb, Dave Dunkin, Dave W. Smith, David Coppit, David Dick, David
+  D. Kilzer, Doug MacEachern, Edward Avis, erik, Gary Shea, Gisle Aas,
+  Graham Barr, Gurusamy Sarathy, Hans de Graaff, Harald Joerg, Harry
+  Bochner, Hugo, Ilya Zakharevich, INOUE Yoshinari, Ivan Panchenko, Jack
+  Shirazi, James Tillman, Jan Dubois, Jared Rhine, Jim Stern, Joao
+  Lopes, John Klar, Johnny Lee, Josh Kronengold, Josh Rai, Joshua
+  Chamas, Joshua Hoblitt, Kartik Subbarao, Keiichiro Nagano, Ken
+  Williams, KONISHI Katsuhiro, Lee T Lindley, Liam Quinn, Marc Hedlund,
+  Marc Langheinrich, Mark D. Anderson, Marko Asplund, Mark Stosberg,
+  Markus B Krüger, Markus Laker, Martijn Koster, Martin Thurn, Matthew
+  Eldridge, Matthew.van.Eerde, Matt Sergeant, Michael A. Chase, Michael
+  Quaranta, Michael Thompson, Mike Schilli, Moshe Kaminsky, Nathan
+  Torkington, Nicolai Langfeldt, Norton Allen, Olly Betts, Paul
+  J. Schinder, peterm, Philip Guenther, Daniel Buenzli, Pon Hwa Lin,
+  Radoslaw Zielinski, Radu Greab, Randal L. Schwartz, Richard Chen,
+  Robin Barker, Roy Fielding, Sander van Zoest, Sean M. Burke,
+  shildreth, Slaven Rezic, Steve A Fink, Steve Hay, Steven Butler,
+  Steve_Kilbane, Takanori Ugai, Thomas Lotterer, Tim Bunce, Tom Hughes,
+  Tony Finch, Ville Skyttä, Ward Vandewege, William York, Yale Huang,
+  and Yitzchak Scott-Thoennes.
+  
+  LWP owes a lot in motivation, design, and code, to the libwww-perl
+  library for Perl4 by Roy Fielding, which included work from Alberto
+  Accomazzi, James Casey, Brooks Cutter, Martijn Koster, Oscar
+  Nierstrasz, Mel Melchner, Gertjan van Oosten, Jared Rhine, Jack
+  Shirazi, Gene Spafford, Marc VanHeyningen, Steven E. Brenner, Marion
+  Hakanson, Waldemar Kebsch, Tony Sanders, and Larry Wall; see the
+  libwww-perl-0.40 library for details.
+  
+  =head1 COPYRIGHT
+  
+    Copyright 1995-2009, Gisle Aas
+    Copyright 1995, Martijn Koster
+  
+  This library is free software; you can redistribute it and/or
+  modify it under the same terms as Perl itself.
+  
+  =head1 AVAILABILITY
+  
+  The latest version of this library is likely to be available from CPAN
+  as well as:
+  
+    http://github.com/libwww-perl/libwww-perl
+  
+  The best place to discuss this code is on the <libwww@perl.org>
+  mailing list.
+  
+  =cut
+LWP
+
+$fatpacked{"LWP/Authen/Basic.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'LWP_AUTHEN_BASIC';
+  package LWP::Authen::Basic;
+  
+  use strict;
+  
+  our $VERSION = '6.67';
+  
+  require Encode;
+  require MIME::Base64;
+  
+  sub auth_header {
+      my($class, $user, $pass, $request, $ua, $h) = @_;
+  
+      my $userpass = "$user:$pass";
+      # https://tools.ietf.org/html/rfc7617#section-2.1
+      my $charset = uc($h->{auth_param}->{charset} || "");
+      $userpass = Encode::encode($charset, $userpass)
+          if ($charset eq "UTF-8");
+  
+      return "Basic " . MIME::Base64::encode($userpass, "");
+  }
+  
+  sub _reauth_requested {
+      return 0;
+  }
+  
+  sub authenticate
+  {
+      my($class, $ua, $proxy, $auth_param, $response,
+         $request, $arg, $size) = @_;
+  
+      my $realm = $auth_param->{realm} || "";
+      my $url = $proxy ? $request->{proxy} : $request->uri_canonical;
+      return $response unless $url;
+      my $host_port = $url->host_port;
+      my $auth_header = $proxy ? "Proxy-Authorization" : "Authorization";
+  
+      my @m = $proxy ? (m_proxy => $url) : (m_host_port => $host_port);
+      push(@m, realm => $realm);
+  
+      my $h = $ua->get_my_handler("request_prepare", @m, sub {
+          $_[0]{callback} = sub {
+              my($req, $ua, $h) = @_;
+              my($user, $pass) = $ua->credentials($host_port, $h->{realm});
+  	    if (defined $user) {
+  		my $auth_value = $class->auth_header($user, $pass, $req, $ua, $h);
+  		$req->header($auth_header => $auth_value);
+  	    }
+          };
+      });
+      $h->{auth_param} = $auth_param;
+  
+      my $reauth_requested
+          = $class->_reauth_requested($auth_param, $ua, $request, $auth_header);
+      if (   !$proxy
+          && (!$request->header($auth_header) || $reauth_requested)
+          && $ua->credentials($host_port, $realm))
+      {
+          # we can make sure this handler applies and retry
+          add_path($h, $url->path)
+              unless $reauth_requested;  # Do not clobber up path list for retries
+          return $ua->request($request->clone, $arg, $size, $response);
+      }
+  
+      my($user, $pass) = $ua->get_basic_credentials($realm, $url, $proxy);
+      unless (defined $user and defined $pass) {
+  	$ua->set_my_handler("request_prepare", undef, @m);  # delete handler
+  	return $response;
+      }
+  
+      # check that the password has changed
+      my ($olduser, $oldpass) = $ua->credentials($host_port, $realm);
+      return $response if (defined $olduser and defined $oldpass and
+                           $user eq $olduser and $pass eq $oldpass);
+  
+      $ua->credentials($host_port, $realm, $user, $pass);
+      add_path($h, $url->path) unless $proxy;
+      return $ua->request($request->clone, $arg, $size, $response);
+  }
+  
+  sub add_path {
+      my($h, $path) = @_;
+      $path =~ s,[^/]+\z,,;
+      push(@{$h->{m_path_prefix}}, $path);
+  }
+  
+  1;
+LWP_AUTHEN_BASIC
+
+$fatpacked{"LWP/Authen/Digest.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'LWP_AUTHEN_DIGEST';
+  package LWP::Authen::Digest;
+  
+  use strict;
+  use parent 'LWP::Authen::Basic';
+  
+  our $VERSION = '6.67';
+  
+  require Digest::MD5;
+  
+  sub _reauth_requested {
+      my ($class, $auth_param, $ua, $request, $auth_header) = @_;
+      my $ret = defined($$auth_param{stale}) && lc($$auth_param{stale}) eq 'true';
+      if ($ret) {
+          my $hdr = $request->header($auth_header);
+          $hdr =~ tr/,/;/;    # "," is used to separate auth-params!!
+          ($hdr) = HTTP::Headers::Util::split_header_words($hdr);
+          my $nonce = {@$hdr}->{nonce};
+          delete $$ua{authen_md5_nonce_count}{$nonce};
+      }
+      return $ret;
+  }
+  
+  sub auth_header {
+      my($class, $user, $pass, $request, $ua, $h) = @_;
+  
+      my $auth_param = $h->{auth_param};
+  
+      my $nc = sprintf "%08X", ++$ua->{authen_md5_nonce_count}{$auth_param->{nonce}};
+      my $cnonce = sprintf "%8x", time;
+  
+      my $uri = $request->uri->path_query;
+      $uri = "/" unless length $uri;
+  
+      my $md5 = Digest::MD5->new;
+  
+      my(@digest);
+      $md5->add(join(":", $user, $auth_param->{realm}, $pass));
+      push(@digest, $md5->hexdigest);
+      $md5->reset;
+  
+      push(@digest, $auth_param->{nonce});
+  
+      if ($auth_param->{qop}) {
+  	push(@digest, $nc, $cnonce, ($auth_param->{qop} =~ m|^auth[,;]auth-int$|) ? 'auth' : $auth_param->{qop});
+      }
+  
+      $md5->add(join(":", $request->method, $uri));
+      push(@digest, $md5->hexdigest);
+      $md5->reset;
+  
+      $md5->add(join(":", @digest));
+      my($digest) = $md5->hexdigest;
+      $md5->reset;
+  
+      my %resp = map { $_ => $auth_param->{$_} } qw(realm nonce opaque);
+      @resp{qw(username uri response algorithm)} = ($user, $uri, $digest, "MD5");
+  
+      if (($auth_param->{qop} || "") =~ m|^auth([,;]auth-int)?$|) {
+  	@resp{qw(qop cnonce nc)} = ("auth", $cnonce, $nc);
+      }
+  
+      my(@order) = qw(username realm qop algorithm uri nonce nc cnonce response opaque);
+      my @pairs;
+      for (@order) {
+  	next unless defined $resp{$_};
+  
+  	# RFC2617 says that qop-value and nc-value should be unquoted.
+  	if ( $_ eq 'qop' || $_ eq 'nc' ) {
+  		push(@pairs, "$_=" . $resp{$_});
+  	}
+  	else {
+  		push(@pairs, "$_=" . qq("$resp{$_}"));
+  	}
+      }
+  
+      my $auth_value  = "Digest " . join(", ", @pairs);
+      return $auth_value;
+  }
+  
+  1;
+LWP_AUTHEN_DIGEST
+
+$fatpacked{"LWP/Authen/Ntlm.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'LWP_AUTHEN_NTLM';
+  package LWP::Authen::Ntlm;
+  
+  use strict;
+  
+  our $VERSION = '6.67';
+  
+  use Authen::NTLM "1.02";
+  use MIME::Base64 "2.12";
+  
+  sub authenticate {
+      my($class, $ua, $proxy, $auth_param, $response,
+         $request, $arg, $size) = @_;
+  
+      my($user, $pass) = $ua->get_basic_credentials($auth_param->{realm},
+                                                    $request->uri, $proxy);
+  
+      unless(defined $user and defined $pass) {
+  		return $response;
+  	}
+  
+  	if (!$ua->conn_cache()) {
+  		warn "The keep_alive option must be enabled for NTLM authentication to work.  NTLM authentication aborted.\n";
+  		return $response;
+  	}
+  
+  	my($domain, $username) = split(/\\/, $user);
+  
+  	ntlm_domain($domain);
+  	ntlm_user($username);
+  	ntlm_password($pass);
+  
+      my $auth_header = $proxy ? "Proxy-Authorization" : "Authorization";
+  
+  	# my ($challenge) = $response->header('WWW-Authenticate');
+  	my $challenge;
+  	foreach ($response->header('WWW-Authenticate')) {
+  		last if /^NTLM/ && ($challenge=$_);
+  	}
+  
+  	if ($challenge eq 'NTLM') {
+  		# First phase, send handshake
+  	    my $auth_value = "NTLM " . ntlm();
+  		ntlm_reset();
+  
+  	    # Need to check this isn't a repeated fail!
+  	    my $r = $response;
+  		my $retry_count = 0;
+  	    while ($r) {
+  			my $auth = $r->request->header($auth_header);
+  			++$retry_count if ($auth && $auth eq $auth_value);
+  			if ($retry_count > 2) {
+  				    # here we know this failed before
+  				    $response->header("Client-Warning" =>
+  						      "Credentials for '$user' failed before");
+  				    return $response;
+  			}
+  			$r = $r->previous;
+  	    }
+  
+  	    my $referral = $request->clone;
+  	    $referral->header($auth_header => $auth_value);
+  	    return $ua->request($referral, $arg, $size, $response);
+  	}
+  
+  	else {
+  		# Second phase, use the response challenge (unless non-401 code
+  		#  was returned, in which case, we just send back the response
+  		#  object, as is
+  		my $auth_value;
+  		if ($response->code ne '401') {
+  			return $response;
+  		}
+  		else {
+  			my $challenge;
+  			foreach ($response->header('WWW-Authenticate')) {
+  				last if /^NTLM/ && ($challenge=$_);
+  			}
+  			$challenge =~ s/^NTLM //;
+  			ntlm();
+  			$auth_value = "NTLM " . ntlm($challenge);
+  			ntlm_reset();
+  		}
+  
+  	    my $referral = $request->clone;
+  	    $referral->header($auth_header => $auth_value);
+  	    my $response2 = $ua->request($referral, $arg, $size, $response);
+  		return $response2;
+  	}
+  }
+  
+  1;
+  __END__
+  
+  =pod
+  
+  =head1 NAME
+  
+  LWP::Authen::Ntlm - Library for enabling NTLM authentication (Microsoft) in LWP
+  
+  =head1 SYNOPSIS
+  
+   use LWP::UserAgent;
+   use HTTP::Request::Common;
+   my $url = 'http://www.company.com/protected_page.html';
+  
+   # Set up the ntlm client and then the base64 encoded ntlm handshake message
+   my $ua = LWP::UserAgent->new(keep_alive=>1);
+   $ua->credentials('www.company.com:80', '', "MyDomain\\MyUserCode", 'MyPassword');
+  
+   $request = GET $url;
+   print "--Performing request now...-----------\n";
+   $response = $ua->request($request);
+   print "--Done with request-------------------\n";
+  
+   if ($response->is_success) {print "It worked!->" . $response->code . "\n"}
+   else {print "It didn't work!->" . $response->code . "\n"}
+  
+  =head1 DESCRIPTION
+  
+  L<LWP::Authen::Ntlm> allows LWP to authenticate against servers that are using the
+  NTLM authentication scheme popularized by Microsoft.  This type of authentication is
+  common on intranets of Microsoft-centric organizations.
+  
+  The module takes advantage of the Authen::NTLM module by Mark Bush.  Since there
+  is also another Authen::NTLM module available from CPAN by Yee Man Chan with an
+  entirely different interface, it is necessary to ensure that you have the correct
+  NTLM module.
+  
+  In addition, there have been problems with incompatibilities between different
+  versions of L<Mime::Base64>, which Bush's L<Authen::NTLM> makes use of.  Therefore, it is
+  necessary to ensure that your Mime::Base64 module supports exporting of the
+  C<encode_base64> and C<decode_base64> functions.
+  
+  =head1 USAGE
+  
+  The module is used indirectly through LWP, rather than including it directly in your
+  code.  The LWP system will invoke the NTLM authentication when it encounters the
+  authentication scheme while attempting to retrieve a URL from a server.  In order
+  for the NTLM authentication to work, you must have a few things set up in your
+  code prior to attempting to retrieve the URL:
+  
+  =over 4
+  
+  =item *
+  
+  Enable persistent HTTP connections
+  
+  To do this, pass the C<< "keep_alive=>1" >> option to the L<LWP::UserAgent> when creating it, like this:
+  
+      my $ua = LWP::UserAgent->new(keep_alive=>1);
+  
+  =item *
+  
+  Set the credentials on the UserAgent object
+  
+  The credentials must be set like this:
+  
+     $ua->credentials('www.company.com:80', '', "MyDomain\\MyUserCode", 'MyPassword');
+  
+  Note that you cannot use the L<HTTP::Request> object's C<authorization_basic()> method to set
+  the credentials.  Note, too, that the C<'www.company.com:80'> portion only sets credentials
+  on the specified port AND it is case-sensitive (this is due to the way LWP is coded, and
+  has nothing to do with LWP::Authen::Ntlm)
+  
+  =back
+  
+  =head1 AVAILABILITY
+  
+  General queries regarding LWP should be made to the LWP Mailing List.
+  
+  Questions specific to LWP::Authen::Ntlm can be forwarded to jtillman@bigfoot.com
+  
+  =head1 COPYRIGHT
+  
+  Copyright (c) 2002 James Tillman. All rights reserved. This
+  program is free software; you can redistribute it and/or modify it
+  under the same terms as Perl itself.
+  
+  =head1 SEE ALSO
+  
+  L<LWP>, L<LWP::UserAgent>, L<lwpcook>.
+  
+  =cut
+LWP_AUTHEN_NTLM
+
+$fatpacked{"LWP/ConnCache.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'LWP_CONNCACHE';
+  package LWP::ConnCache;
+  
+  use strict;
+  
+  our $VERSION = '6.67';
+  our $DEBUG;
+  
+  sub new {
+      my($class, %cnf) = @_;
+  
+      my $total_capacity = 1;
+      if (exists $cnf{total_capacity}) {
+          $total_capacity = delete $cnf{total_capacity};
+      }
+      if (%cnf && $^W) {
+  	require Carp;
+  	Carp::carp("Unrecognised options: @{[sort keys %cnf]}")
+      }
+      my $self = bless { cc_conns => [] }, $class;
+      $self->total_capacity($total_capacity);
+      $self;
+  }
+  
+  
+  sub deposit {
+      my($self, $type, $key, $conn) = @_;
+      push(@{$self->{cc_conns}}, [$conn, $type, $key, time]);
+      $self->enforce_limits($type);
+      return;
+  }
+  
+  
+  sub withdraw {
+      my($self, $type, $key) = @_;
+      my $conns = $self->{cc_conns};
+      for my $i (0 .. @$conns - 1) {
+  	my $c = $conns->[$i];
+  	next unless $c->[1] eq $type && $c->[2] eq $key;
+  	splice(@$conns, $i, 1);  # remove it
+  	return $c->[0];
+      }
+      return undef;
+  }
+  
+  
+  sub total_capacity {
+      my $self = shift;
+      my $old = $self->{cc_limit_total};
+      if (@_) {
+  	$self->{cc_limit_total} = shift;
+  	$self->enforce_limits;
+      }
+      $old;
+  }
+  
+  
+  sub capacity {
+      my $self = shift;
+      my $type = shift;
+      my $old = $self->{cc_limit}{$type};
+      if (@_) {
+  	$self->{cc_limit}{$type} = shift;
+  	$self->enforce_limits($type);
+      }
+      $old;
+  }
+  
+  
+  sub enforce_limits {
+      my($self, $type) = @_;
+      my $conns = $self->{cc_conns};
+  
+      my @types = $type ? ($type) : ($self->get_types);
+      for $type (@types) {
+  	next unless $self->{cc_limit};
+  	my $limit = $self->{cc_limit}{$type};
+  	next unless defined $limit;
+  	for my $i (reverse 0 .. @$conns - 1) {
+  	    next unless $conns->[$i][1] eq $type;
+  	    if (--$limit < 0) {
+  		$self->dropping(splice(@$conns, $i, 1), "$type capacity exceeded");
+  	    }
+  	}
+      }
+  
+      if (defined(my $total = $self->{cc_limit_total})) {
+  	while (@$conns > $total) {
+  	    $self->dropping(shift(@$conns), "Total capacity exceeded");
+  	}
+      }
+  }
+  
+  
+  sub dropping {
+      my($self, $c, $reason) = @_;
+      print "DROPPING @$c [$reason]\n" if $DEBUG;
+  }
+  
+  
+  sub drop {
+      my($self, $checker, $reason) = @_;
+      if (ref($checker) ne "CODE") {
+  	# make it so
+  	if (!defined $checker) {
+  	    $checker = sub { 1 };  # drop all of them
+  	}
+  	elsif (_looks_like_number($checker)) {
+  	    my $age_limit = $checker;
+  	    my $time_limit = time - $age_limit;
+  	    $reason ||= "older than $age_limit";
+  	    $checker = sub { $_[3] < $time_limit };
+  	}
+  	else {
+  	    my $type = $checker;
+  	    $reason ||= "drop $type";
+  	    $checker = sub { $_[1] eq $type };  # match on type
+  	}
+      }
+      $reason ||= "drop";
+  
+      local $SIG{__DIE__};  # don't interfere with eval below
+      local $@;
+      my @c;
+      for (@{$self->{cc_conns}}) {
+  	my $drop;
+  	eval {
+  	    if (&$checker(@$_)) {
+  		$self->dropping($_, $reason);
+  		$drop++;
+  	    }
+  	};
+  	push(@c, $_) unless $drop;
+      }
+      @{$self->{cc_conns}} = @c;
+  }
+  
+  
+  sub prune {
+      my $self = shift;
+      $self->drop(sub { !shift->ping }, "ping");
+  }
+  
+  
+  sub get_types {
+      my $self = shift;
+      my %t;
+      $t{$_->[1]}++ for @{$self->{cc_conns}};
+      return keys %t;
+  }
+  
+  
+  sub get_connections {
+      my($self, $type) = @_;
+      my @c;
+      for (@{$self->{cc_conns}}) {
+  	push(@c, $_->[0]) if !$type || ($type && $type eq $_->[1]);
+      }
+      @c;
+  }
+  
+  
+  sub _looks_like_number {
+      $_[0] =~ /^([+-]?)(?=\d|\.\d)\d*(\.\d*)?([Ee]([+-]?\d+))?$/;
+  }
+  
+  1;
+  
+  
+  __END__
+  
+  =pod
+  
+  =head1 NAME
+  
+  LWP::ConnCache - Connection cache manager
+  
+  =head1 NOTE
+  
+  This module is experimental.  Details of its interface is likely to
+  change in the future.
+  
+  =head1 SYNOPSIS
+  
+   use LWP::ConnCache;
+   my $cache = LWP::ConnCache->new;
+   $cache->deposit($type, $key, $sock);
+   $sock = $cache->withdraw($type, $key);
+  
+  =head1 DESCRIPTION
+  
+  The C<LWP::ConnCache> class is the standard connection cache manager
+  for L<LWP::UserAgent>.
+  
+  =head1 METHODS
+  
+  The following basic methods are provided:
+  
+  =head2 new
+  
+      my $cache = LWP::ConnCache->new( %options )
+  
+  This method constructs a new L<LWP::ConnCache> object.  The only
+  option currently accepted is C<total_capacity>.  If specified it
+  initializes the L<LWP::ConnCache/total_capacity> option. It defaults to C<1>.
+  
+  =head2 total_capacity
+  
+      my $cap = $cache->total_capacity;
+      $cache->total_capacity(0); # drop all immediately
+      $cache->total_capacity(undef); # no limit
+      $cache->total_capacity($number);
+  
+  Get/sets the number of connection that will be cached.  Connections
+  will start to be dropped when this limit is reached.  If set to C<0>,
+  then all connections are immediately dropped.  If set to C<undef>,
+  then there is no limit.
+  
+  =head2 capacity
+  
+      my $http_capacity = $cache->capacity('http');
+      $cache->capacity('http', 2 );
+  
+  Get/set a limit for the number of connections of the specified type
+  that can be cached.  The first parameter is a short string like
+  C<"http"> or C<"ftp">.
+  
+  =head2 drop
+  
+      $cache->drop(); # Drop ALL connections
+      # which is just a synonym for:
+      $cache->drop(sub{1}); # Drop ALL connections
+      # drop all connections older than 22 seconds and add a reason for it!
+      $cache->drop(22, "Older than 22 secs dropped");
+      # which is just a synonym for:
+      $cache->drop(sub {
+          my ($conn, $type, $key, $deposit_time) = @_;
+          if ($deposit_time < 22) {
+              # true values drop the connection
+              return 1;
+          }
+          # false values don't drop the connection
+          return 0;
+      }, "Older than 22 secs dropped" );
+  
+  Drop connections by some criteria.  The $checker argument is a
+  subroutine that is called for each connection.  If the routine returns
+  a TRUE value then the connection is dropped.  The routine is called
+  with C<($conn, $type, $key, $deposit_time)> as arguments.
+  
+  Shortcuts: If the C<$checker> argument is absent (or C<undef>) all cached
+  connections are dropped.  If the $checker is a number then all
+  connections untouched that the given number of seconds or more are
+  dropped.  If $checker is a string then all connections of the given
+  type are dropped.
+  
+  The C<reason> is passed on to the L<LWP::ConnCache/dropped> method.
+  
+  =head2 prune
+  
+      $cache->prune();
+  
+  Calling this method will drop all connections that are dead.  This is
+  tested by calling the L<LWP::ConnCache/ping> method on the connections. If
+  the L<LWP::ConnCache/ping> method exists and returns a false value, then the
+  connection is dropped.
+  
+  =head2 get_types
+  
+      my @types = $cache->get_types();
+  
+  This returns all the C<type> fields used for the currently cached
+  connections.
+  
+  =head2 get_connections
+  
+      my @conns = $cache->get_connections(); # all connections
+      my @conns = $cache->get_connections('http'); # connections for http
+  
+  This returns all connection objects of the specified type.  If no type
+  is specified then all connections are returned.  In scalar context the
+  number of cached connections of the specified type is returned.
+  
+  =head1 PROTOCOL METHODS
+  
+  The following methods are called by low-level protocol modules to
+  try to save away connections and to get them back.
+  
+  =head2 deposit
+  
+      $cache->deposit($type, $key, $conn);
+  
+  This method adds a new connection to the cache.  As a result, other
+  already cached connections might be dropped.  Multiple connections with
+  the same type/key might be added.
+  
+  =head2 withdraw
+  
+      my $conn = $cache->withdraw($type, $key);
+  
+  This method tries to fetch back a connection that was previously
+  deposited.  If no cached connection with the specified $type/$key is
+  found, then C<undef> is returned.  There is not guarantee that a
+  deposited connection can be withdrawn, as the cache manger is free to
+  drop connections at any time.
+  
+  =head1 INTERNAL METHODS
+  
+  The following methods are called internally.  Subclasses might want to
+  override them.
+  
+  =head2 enforce_limits
+  
+      $conn->enforce_limits([$type])
+  
+  This method is called with after a new connection is added (deposited)
+  in the cache or capacity limits are adjusted.  The default
+  implementation drops connections until the specified capacity limits
+  are not exceeded.
+  
+  =head2 dropping
+  
+      $conn->dropping($conn_record, $reason)
+  
+  This method is called when a connection is dropped.  The record
+  belonging to the dropped connection is passed as the first argument
+  and a string describing the reason for the drop is passed as the
+  second argument.  The default implementation makes some noise if the
+  C<$LWP::ConnCache::DEBUG> variable is set and nothing more.
+  
+  =head1 SUBCLASSING
+  
+  For specialized cache policy it makes sense to subclass
+  C<LWP::ConnCache> and perhaps override the L<LWP::ConnCache/deposit>,
+  L<LWP::ConnCache/enforce_limits>, and L<LWP::ConnCache/dropping> methods.
+  
+  The object itself is a hash.  Keys prefixed with C<cc_> are reserved
+  for the base class.
+  
+  =head1 SEE ALSO
+  
+  L<LWP::UserAgent>
+  
+  =head1 COPYRIGHT
+  
+  Copyright 2001 Gisle Aas.
+  
+  This library is free software; you can redistribute it and/or
+  modify it under the same terms as Perl itself.
+  
+  =cut
+LWP_CONNCACHE
+
+$fatpacked{"LWP/Debug.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'LWP_DEBUG';
+  package LWP::Debug;    # legacy
+  
+  our $VERSION = '6.67';
+  
+  require Exporter;
+  our @ISA       = qw(Exporter);
+  our @EXPORT_OK = qw(level trace debug conns);
+  
+  use Carp ();
+  
+  my @levels = qw(trace debug conns);
+  our %current_level = ();
+  
+  sub import {
+      my $pack    = shift;
+      my $callpkg = caller(0);
+      my @symbols = ();
+      my @levels  = ();
+      for (@_) {
+          if (/^[-+]/) {
+              push(@levels, $_);
+          }
+          else {
+              push(@symbols, $_);
+          }
+      }
+      Exporter::export($pack, $callpkg, @symbols);
+      level(@levels);
+  }
+  
+  sub level {
+      for (@_) {
+          if ($_ eq '+') {    # all on
+                              # switch on all levels
+              %current_level = map { $_ => 1 } @levels;
+          }
+          elsif ($_ eq '-') {    # all off
+              %current_level = ();
+          }
+          elsif (/^([-+])(\w+)$/) {
+              $current_level{$2} = $1 eq '+';
+          }
+          else {
+              Carp::croak("Illegal level format $_");
+          }
+      }
+  }
+  
+  sub trace { _log(@_) if $current_level{'trace'}; }
+  sub debug { _log(@_) if $current_level{'debug'}; }
+  sub conns { _log(@_) if $current_level{'conns'}; }
+  
+  sub _log {
+      my $msg = shift;
+      $msg .= "\n" unless $msg =~ /\n$/;    # ensure trailing "\n"
+  
+      my ($package, $filename, $line, $sub) = caller(2);
+      print STDERR "$sub: $msg";
+  }
+  
+  1;
+  
+  __END__
+  
+  =pod
+  
+  =head1 NAME
+  
+  LWP::Debug - deprecated
+  
+  =head1 DESCRIPTION
+  
+  This module has been deprecated.  Please see L<LWP::ConsoleLogger> for your
+  debugging needs.
+  
+  LWP::Debug is used to provide tracing facilities, but these are not used
+  by LWP any more.  The code in this module is kept around
+  (undocumented) so that 3rd party code that happens to use the old
+  interfaces continue to run.
+  
+  One useful feature that LWP::Debug provided (in an imprecise and
+  troublesome way) was network traffic monitoring.  The following
+  section provides some hints about recommended replacements.
+  
+  =head2 Network traffic monitoring
+  
+  The best way to monitor the network traffic that LWP generates is to
+  use an external TCP monitoring program.  The
+  L<WireShark|http://www.wireshark.org/> program is highly recommended for this.
+  
+  Another approach it to use a debugging HTTP proxy server and make
+  LWP direct all its traffic via this one.  Call C<< $ua->proxy >> to
+  set it up and then just use LWP as before.
+  
+  For less precise monitoring needs just setting up a few simple
+  handlers might do.  The following example sets up handlers to dump the
+  request and response objects that pass through LWP:
+  
+    use LWP::UserAgent;
+    $ua = LWP::UserAgent->new;
+    $ua->default_header('Accept-Encoding' => scalar HTTP::Message::decodable());
+  
+    $ua->add_handler("request_send",  sub { shift->dump; return });
+    $ua->add_handler("response_done", sub { shift->dump; return });
+  
+    $ua->get("http://www.example.com");
+  
+  =head1 SEE ALSO
+  
+  L<LWP::ConsoleLogger>, L<LWP::ConsoleLogger::Everywhere>, L<LWP::UserAgent>
+  
+  =cut
+LWP_DEBUG
+
+$fatpacked{"LWP/Debug/TraceHTTP.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'LWP_DEBUG_TRACEHTTP';
+  package LWP::Debug::TraceHTTP;
+  
+  # Just call:
+  #
+  #   require LWP::Debug::TraceHTTP;
+  #   LWP::Protocol::implementor('http', 'LWP::Debug::TraceHTTP');
+  #
+  # to use this module to trace all calls to the HTTP socket object in
+  # programs that use LWP.
+  
+  use strict;
+  use parent 'LWP::Protocol::http';
+  
+  our $VERSION = '6.67';
+  
+  package # hide from PAUSE
+      LWP::Debug::TraceHTTP::Socket;
+  
+  use Data::Dump 1.13;
+  use Data::Dump::Trace qw(autowrap mcall);
+  
+  autowrap("LWP::Protocol::http::Socket" => "sock");
+  
+  sub new {
+      my $class = shift;
+      return mcall("LWP::Protocol::http::Socket" => "new", undef, @_);
+  }
+  
+  1;
+LWP_DEBUG_TRACEHTTP
+
+$fatpacked{"LWP/DebugFile.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'LWP_DEBUGFILE';
+  package LWP::DebugFile;
+  
+  our $VERSION = '6.67';
+  
+  # legacy stub
+  
+  1;
+LWP_DEBUGFILE
+
+$fatpacked{"LWP/MemberMixin.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'LWP_MEMBERMIXIN';
+  package LWP::MemberMixin;
+  
+  our $VERSION = '6.67';
+  
+  sub _elem {
+      my $self = shift;
+      my $elem = shift;
+      my $old  = $self->{$elem};
+      $self->{$elem} = shift if @_;
+      return $old;
+  }
+  
+  1;
+  
+  __END__
+  
+  =pod
+  
+  =head1 NAME
+  
+  LWP::MemberMixin - Member access mixin class
+  
+  =head1 SYNOPSIS
+  
+   package Foo;
+   use parent qw(LWP::MemberMixin);
+  
+  =head1 DESCRIPTION
+  
+  A mixin class to get methods that provide easy access to member
+  variables in the C<%$self>.
+  Ideally there should be better Perl language support for this.
+  
+  =head1 METHODS
+  
+  There is only one method provided:
+  
+  =head2 _elem
+  
+      _elem($elem [, $val])
+  
+  Internal method to get/set the value of member variable
+  C<$elem>. If C<$val> is present it is used as the new value
+  for the member variable.  If it is not present the current
+  value is not touched. In both cases the previous value of
+  the member variable is returned.
+  
+  =cut
+LWP_MEMBERMIXIN
+
+$fatpacked{"LWP/Protocol.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'LWP_PROTOCOL';
+  package LWP::Protocol;
+  
+  use parent 'LWP::MemberMixin';
+  
+  our $VERSION = '6.67';
+  
+  use strict;
+  use Carp ();
+  use HTTP::Status ();
+  use HTTP::Response ();
+  use Scalar::Util qw(openhandle);
+  use Try::Tiny qw(try catch);
+  
+  my %ImplementedBy = (); # scheme => classname
+  
+  sub new
+  {
+      my($class, $scheme, $ua) = @_;
+  
+      my $self = bless {
+  	scheme => $scheme,
+  	ua => $ua,
+  
+  	# historical/redundant
+          max_size => $ua->{max_size},
+      }, $class;
+  
+      $self;
+  }
+  
+  
+  sub create
+  {
+      my($scheme, $ua) = @_;
+      my $impclass = LWP::Protocol::implementor($scheme) or
+  	Carp::croak("Protocol scheme '$scheme' is not supported");
+  
+      # hand-off to scheme specific implementation sub-class
+      my $protocol = $impclass->new($scheme, $ua);
+  
+      return $protocol;
+  }
+  
+  
+  sub implementor
+  {
+      my($scheme, $impclass) = @_;
+  
+      if ($impclass) {
+  	$ImplementedBy{$scheme} = $impclass;
+      }
+      my $ic = $ImplementedBy{$scheme};
+      return $ic if $ic;
+  
+      return '' unless $scheme =~ /^([.+\-\w]+)$/;  # check valid URL schemes
+      $scheme = $1; # untaint
+      $scheme =~ tr/.+-/_/;  # make it a legal module name
+  
+      # scheme not yet known, look for a 'use'd implementation
+      $ic = "LWP::Protocol::$scheme";  # default location
+      $ic = "LWP::Protocol::nntp" if $scheme eq 'news'; #XXX ugly hack
+      no strict 'refs';
+      # check we actually have one for the scheme:
+      unless (@{"${ic}::ISA"}) {
+          # try to autoload it
+          try {
+              (my $class = $ic) =~ s{::}{/}g;
+              $class .= '.pm' unless $class =~ /\.pm$/;
+              require $class;
+          }
+          catch {
+              my $error = $_;
+              if ($error =~ /Can't locate/) {
+                  $ic = '';
+              }
+              else {
+                  die "$error\n";
+              }
+          };
+      }
+      $ImplementedBy{$scheme} = $ic if $ic;
+      $ic;
+  }
+  
+  
+  sub request
+  {
+      my($self, $request, $proxy, $arg, $size, $timeout) = @_;
+      Carp::croak('LWP::Protocol::request() needs to be overridden in subclasses');
+  }
+  
+  
+  # legacy
+  sub timeout    { shift->_elem('timeout',    @_); }
+  sub max_size   { shift->_elem('max_size',   @_); }
+  
+  
+  sub collect
+  {
+      my ($self, $arg, $response, $collector) = @_;
+      my $content;
+      my($ua, $max_size) = @{$self}{qw(ua max_size)};
+  
+      # This can't be moved to Try::Tiny due to the closures within causing
+      # leaks on any version of Perl prior to 5.18.
+      # https://perl5.git.perl.org/perl.git/commitdiff/a0d2bbd5c
+      my $error = do { #catch
+          local $@;
+          local $\; # protect the print below from surprises
+          eval { # try
+              if (!defined($arg) || !$response->is_success) {
+                  $response->{default_add_content} = 1;
+              }
+              elsif (defined(openhandle($arg)) || !ref($arg) && length($arg)) {
+                  my $existing_fh = defined(openhandle($arg));
+                  my $mode = $existing_fh ? '>&=' : '>';
+                  open(my $fh, $mode, $arg) or die "Can't write to '$arg': $!";
+                  binmode($fh);
+                  push(@{$response->{handlers}{response_data}}, {
+                      callback => sub {
+                          print $fh $_[3] or die "Can't write to '$arg': $!";
+                          1;
+                      },
+                  });
+                  push(@{$response->{handlers}{response_done}}, {
+                      callback => sub {
+                          unless ($existing_fh) {
+                              close($fh) or die "Can't write to '$arg': $!";
+                          }
+                          undef($fh);
+                      },
+                  });
+              }
+              elsif (ref($arg) eq 'CODE') {
+                  push(@{$response->{handlers}{response_data}}, {
+                      callback => sub {
+                          &$arg($_[3], $_[0], $self);
+                          1;
+                      },
+                  });
+              }
+              else {
+                  die "Unexpected collect argument '$arg'";
+              }
+  
+              $ua->run_handlers("response_header", $response);
+  
+              if (delete $response->{default_add_content}) {
+                  push(@{$response->{handlers}{response_data}}, {
+                      callback => sub {
+                          $_[0]->add_content($_[3]);
+                          1;
+                      },
+                  });
+              }
+  
+  
+              my $content_size = 0;
+              my $length = $response->content_length;
+              my %skip_h;
+  
+              while ($content = &$collector, length $$content) {
+                  for my $h ($ua->handlers("response_data", $response)) {
+                      next if $skip_h{$h};
+                      unless ($h->{callback}->($response, $ua, $h, $$content)) {
+                          # XXX remove from $response->{handlers}{response_data} if present
+                          $skip_h{$h}++;
+                      }
+                  }
+                  $content_size += length($$content);
+                  $ua->progress(($length ? ($content_size / $length) : "tick"), $response);
+                  if (defined($max_size) && $content_size > $max_size) {
+                      $response->push_header("Client-Aborted", "max_size");
+                      last;
+                  }
+              }
+              1;
+          };
+          $@;
+      };
+  
+      if ($error) {
+          chomp($error);
+          $response->push_header('X-Died' => $error);
+          $response->push_header("Client-Aborted", "die");
+      };
+      delete $response->{handlers}{response_data};
+      delete $response->{handlers} unless %{$response->{handlers}};
+      return $response;
+  }
+  
+  
+  sub collect_once
+  {
+      my($self, $arg, $response) = @_;
+      my $content = \ $_[3];
+      my $first = 1;
+      $self->collect($arg, $response, sub {
+  	return $content if $first--;
+  	return \ "";
+      });
+  }
+  
+  1;
+  
+  
+  __END__
+  
+  =pod
+  
+  =head1 NAME
+  
+  LWP::Protocol - Base class for LWP protocols
+  
+  =head1 SYNOPSIS
+  
+   package LWP::Protocol::foo;
+   use parent qw(LWP::Protocol);
+  
+  =head1 DESCRIPTION
+  
+  This class is used as the base class for all protocol implementations
+  supported by the LWP library.
+  
+  When creating an instance of this class using
+  C<LWP::Protocol::create($url)>, and you get an initialized subclass
+  appropriate for that access method. In other words, the
+  L<LWP::Protocol/create> function calls the constructor for one of its
+  subclasses.
+  
+  All derived C<LWP::Protocol> classes need to override the C<request()>
+  method which is used to service a request. The overridden method can
+  make use of the C<collect()> method to collect together chunks of data
+  as it is received.
+  
+  =head1 METHODS
+  
+  The following methods and functions are provided:
+  
+  =head2 new
+  
+      my $prot = LWP::Protocol->new();
+  
+  The LWP::Protocol constructor is inherited by subclasses. As this is a
+  virtual base class this method should B<not> be called directly.
+  
+  =head2 create
+  
+      my $prot = LWP::Protocol::create($scheme)
+  
+  Create an object of the class implementing the protocol to handle the
+  given scheme. This is a function, not a method. It is more an object
+  factory than a constructor. This is the function user agents should
+  use to access protocols.
+  
+  =head2 implementor
+  
+      my $class = LWP::Protocol::implementor($scheme, [$class])
+  
+  Get and/or set implementor class for a scheme.  Returns C<''> if the
+  specified scheme is not supported.
+  
+  =head2 request
+  
+      $response = $protocol->request($request, $proxy, undef);
+      $response = $protocol->request($request, $proxy, '/tmp/sss');
+      $response = $protocol->request($request, $proxy, \&callback, 1024);
+      $response = $protocol->request($request, $proxy, $fh);
+  
+  Dispatches a request over the protocol, and returns a response
+  object. This method needs to be overridden in subclasses.  Refer to
+  L<LWP::UserAgent> for description of the arguments.
+  
+  =head2 collect
+  
+      my $res = $prot->collect(undef, $response, $collector); # stored in $response
+      my $res = $prot->collect($filename, $response, $collector);
+      my $res = $prot->collect(sub { ... }, $response, $collector);
+  
+  Collect the content of a request, and process it appropriately into a scalar,
+  file, or by calling a callback. If the first parameter is undefined, then the
+  content is stored within the C<$response>. If it's a simple scalar, then it's
+  interpreted as a file name and the content is written to this file.  If it's a
+  code reference, then content is passed to this routine.
+  If it is a filehandle, or similar, such as a L<File::Temp> object,
+  content will be written to it.
+  
+  The collector is a routine that will be called and which is
+  responsible for returning pieces (as ref to scalar) of the content to
+  process.  The C<$collector> signals C<EOF> by returning a reference to an
+  empty string.
+  
+  The return value is the L<HTTP::Response> object reference.
+  
+  B<Note:> We will only use the callback or file argument if
+  C<< $response->is_success() >>.  This avoids sending content data for
+  redirects and authentication responses to the callback which would be
+  confusing.
+  
+  =head2 collect_once
+  
+      $prot->collect_once($arg, $response, $content)
+  
+  Can be called when the whole response content is available as content. This
+  will invoke L<LWP::Protocol/collect> with a collector callback that
+  returns a reference to C<$content> the first time and an empty string the
+  next.
+  
+  =head1 SEE ALSO
+  
+  Inspect the F<LWP/Protocol/file.pm> and F<LWP/Protocol/http.pm> files
+  for examples of usage.
+  
+  =head1 COPYRIGHT
+  
+  Copyright 1995-2001 Gisle Aas.
+  
+  This library is free software; you can redistribute it and/or
+  modify it under the same terms as Perl itself.
+  
+  =cut
+LWP_PROTOCOL
+
+$fatpacked{"LWP/Protocol/cpan.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'LWP_PROTOCOL_CPAN';
+  package LWP::Protocol::cpan;
+  
+  use strict;
+  
+  use parent qw(LWP::Protocol);
+  
+  our $VERSION = '6.67';
+  
+  require URI;
+  require HTTP::Status;
+  require HTTP::Response;
+  
+  our $CPAN;
+  
+  unless ($CPAN) {
+      # Try to find local CPAN mirror via $CPAN::Config
+      eval {
+  	require CPAN::Config;
+  	if($CPAN::Config) {
+  	    my $urls = $CPAN::Config->{urllist};
+  	    if (ref($urls) eq "ARRAY") {
+  		my $file;
+  		for (@$urls) {
+  		    if (/^file:/) {
+  			$file = $_;
+  			last;
+  		    }
+  		}
+  
+  		if ($file) {
+  		    $CPAN = $file;
+  		}
+  		else {
+  		    $CPAN = $urls->[0];
+  		}
+  	    }
+  	}
+      };
+  
+      $CPAN ||= "http://cpan.org/";  # last resort
+  }
+  
+  # ensure that we don't chop of last part
+  $CPAN .= "/" unless $CPAN =~ m,/$,;
+  
+  
+  sub request {
+      my($self, $request, $proxy, $arg, $size) = @_;
+      # check proxy
+      if (defined $proxy)
+      {
+  	return HTTP::Response->new(HTTP::Status::RC_BAD_REQUEST,
+  				   'You can not proxy with cpan');
+      }
+  
+      # check method
+      my $method = $request->method;
+      unless ($method eq 'GET' || $method eq 'HEAD') {
+  	return HTTP::Response->new(HTTP::Status::RC_BAD_REQUEST,
+  				   'Library does not allow method ' .
+  				   "$method for 'cpan:' URLs");
+      }
+  
+      my $path = $request->uri->path;
+      $path =~ s,^/,,;
+  
+      my $response = HTTP::Response->new(HTTP::Status::RC_FOUND);
+      $response->header("Location" => URI->new_abs($path, $CPAN));
+      $response;
+  }
+  
+  1;
+LWP_PROTOCOL_CPAN
+
+$fatpacked{"LWP/Protocol/data.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'LWP_PROTOCOL_DATA';
+  package LWP::Protocol::data;
+  
+  # Implements access to data:-URLs as specified in RFC 2397
+  
+  use strict;
+  
+  our $VERSION = '6.67';
+  
+  require HTTP::Response;
+  require HTTP::Status;
+  
+  use parent qw(LWP::Protocol);
+  
+  use HTTP::Date qw(time2str);
+  require LWP;  # needs version number
+  
+  sub request
+  {
+      my($self, $request, $proxy, $arg, $size) = @_;
+  
+      # check proxy
+      if (defined $proxy)
+      {
+  	return HTTP::Response->new( HTTP::Status::RC_BAD_REQUEST,
+  				  'You can not proxy with data');
+      }
+  
+      # check method
+      my $method = $request->method;
+      unless ($method eq 'GET' || $method eq 'HEAD') {
+  	return HTTP::Response->new( HTTP::Status::RC_BAD_REQUEST,
+  				  'Library does not allow method ' .
+  				  "$method for 'data:' URLs");
+      }
+  
+      my $url = $request->uri;
+      my $response = HTTP::Response->new( HTTP::Status::RC_OK, "Document follows");
+  
+      my $media_type = $url->media_type;
+  
+      my $data = $url->data;
+      $response->header('Content-Type'   => $media_type,
+  		      'Content-Length' => length($data),
+  		      'Date'           => time2str(time),
+  		      'Server'         => "libwww-perl-internal/$LWP::VERSION"
+  		     );
+  
+      $data = "" if $method eq "HEAD";
+      return $self->collect_once($arg, $response, $data);
+  }
+  
+  1;
+LWP_PROTOCOL_DATA
+
+$fatpacked{"LWP/Protocol/file.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'LWP_PROTOCOL_FILE';
+  package LWP::Protocol::file;
+  
+  use parent qw(LWP::Protocol);
+  
+  use strict;
+  
+  our $VERSION = '6.67';
+  
+  require LWP::MediaTypes;
+  require HTTP::Request;
+  require HTTP::Response;
+  require HTTP::Status;
+  require HTTP::Date;
+  
+  
+  sub request
+  {
+      my($self, $request, $proxy, $arg, $size) = @_;
+  
+      $size = 4096 unless defined $size and $size > 0;
+  
+      # check proxy
+      if (defined $proxy)
+      {
+  	return HTTP::Response->new( HTTP::Status::RC_BAD_REQUEST,
+  				  'You can not proxy through the filesystem');
+      }
+  
+      # check method
+      my $method = $request->method;
+      unless ($method eq 'GET' || $method eq 'HEAD') {
+  	return HTTP::Response->new( HTTP::Status::RC_BAD_REQUEST,
+  				  'Library does not allow method ' .
+  				  "$method for 'file:' URLs");
+      }
+  
+      # check url
+      my $url = $request->uri;
+  
+      my $scheme = $url->scheme;
+      if ($scheme ne 'file') {
+  	return HTTP::Response->new( HTTP::Status::RC_INTERNAL_SERVER_ERROR,
+  			   "LWP::Protocol::file::request called for '$scheme'");
+      }
+  
+      # URL OK, look at file
+      my $path  = $url->file;
+  
+      # test file exists and is readable
+      unless (-e $path) {
+  	return HTTP::Response->new( HTTP::Status::RC_NOT_FOUND,
+  				  "File `$path' does not exist");
+      }
+      unless (-r _) {
+  	return HTTP::Response->new( HTTP::Status::RC_FORBIDDEN,
+  				  'User does not have read permission');
+      }
+  
+      # looks like file exists
+      my($dev,$ino,$mode,$nlink,$uid,$gid,$rdev,$filesize,
+         $atime,$mtime,$ctime,$blksize,$blocks)
+  	    = stat(_);
+  
+      # XXX should check Accept headers?
+  
+      # check if-modified-since
+      my $ims = $request->header('If-Modified-Since');
+      if (defined $ims) {
+  	my $time = HTTP::Date::str2time($ims);
+  	if (defined $time and $time >= $mtime) {
+  	    return HTTP::Response->new( HTTP::Status::RC_NOT_MODIFIED,
+  				      "$method $path");
+  	}
+      }
+  
+      # Ok, should be an OK response by now...
+      my $response = HTTP::Response->new( HTTP::Status::RC_OK );
+  
+      # fill in response headers
+      $response->header('Last-Modified', HTTP::Date::time2str($mtime));
+  
+      if (-d _) {         # If the path is a directory, process it
+  	# generate the HTML for directory
+  	opendir(D, $path) or
+  	   return HTTP::Response->new( HTTP::Status::RC_INTERNAL_SERVER_ERROR,
+  				     "Cannot read directory '$path': $!");
+  	my(@files) = sort readdir(D);
+  	closedir(D);
+  
+  	# Make directory listing
+  	require URI::Escape;
+  	require HTML::Entities;
+          my $pathe = $path . ( $^O eq 'MacOS' ? ':' : '/');
+  	for (@files) {
+  	    my $furl = URI::Escape::uri_escape($_);
+              if ( -d "$pathe$_" ) {
+                  $furl .= '/';
+                  $_ .= '/';
+              }
+  	    my $desc = HTML::Entities::encode($_);
+  	    $_ = qq{<LI><A HREF="$furl">$desc</A>};
+  	}
+  	# Ensure that the base URL is "/" terminated
+  	my $base = $url->clone;
+  	unless ($base->path =~ m|/$|) {
+  	    $base->path($base->path . "/");
+  	}
+  	my $html = join("\n",
+  			"<HTML>\n<HEAD>",
+  			"<TITLE>Directory $path</TITLE>",
+  			"<BASE HREF=\"$base\">",
+  			"</HEAD>\n<BODY>",
+  			"<H1>Directory listing of $path</H1>",
+  			"<UL>", @files, "</UL>",
+  			"</BODY>\n</HTML>\n");
+  
+  	$response->header('Content-Type',   'text/html');
+  	$response->header('Content-Length', length $html);
+  	$html = "" if $method eq "HEAD";
+  
+  	return $self->collect_once($arg, $response, $html);
+  
+      }
+  
+      # path is a regular file
+      $response->header('Content-Length', $filesize);
+      LWP::MediaTypes::guess_media_type($path, $response);
+  
+      # read the file
+      if ($method ne "HEAD") {
+  	open(my $fh, '<', $path) or return new
+  	    HTTP::Response(HTTP::Status::RC_INTERNAL_SERVER_ERROR,
+  			   "Cannot read file '$path': $!");
+  	binmode($fh);
+  	$response =  $self->collect($arg, $response, sub {
+  	    my $content = "";
+  	    my $bytes = sysread($fh, $content, $size);
+  	    return \$content if $bytes > 0;
+  	    return \ "";
+  	});
+  	close($fh);
+      }
+  
+      $response;
+  }
+  
+  1;
+LWP_PROTOCOL_FILE
+
+$fatpacked{"LWP/Protocol/ftp.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'LWP_PROTOCOL_FTP';
+  package LWP::Protocol::ftp;
+  
+  # Implementation of the ftp protocol (RFC 959). We let the Net::FTP
+  # package do all the dirty work.
+  use parent qw(LWP::Protocol);
+  use strict;
+  
+  our $VERSION = '6.67';
+  
+  use Carp            ();
+  use HTTP::Status    ();
+  use HTTP::Negotiate ();
+  use HTTP::Response  ();
+  use LWP::MediaTypes ();
+  use File::Listing   ();
+  
+  
+  {
+  
+      package # hide from PAUSE
+          LWP::Protocol::MyFTP;
+  
+      use strict;
+      use parent qw(Net::FTP);
+  
+      sub new {
+          my $class = shift;
+  
+          my $self = $class->SUPER::new(@_) || return undef;
+  
+          my $mess = $self->message;    # welcome message
+          $mess =~ s|\n.*||s;           # only first line left
+          $mess =~ s|\s*ready\.?$||;
+  
+          # Make the version number more HTTP like
+          $mess =~ s|\s*\(Version\s*|/| and $mess =~ s|\)$||;
+          ${*$self}{myftp_server} = $mess;
+  
+          #$response->header("Server", $mess);
+  
+          $self;
+      }
+  
+      sub http_server {
+          my $self = shift;
+          ${*$self}{myftp_server};
+      }
+  
+      sub home {
+          my $self = shift;
+          my $old  = ${*$self}{myftp_home};
+          if (@_) {
+              ${*$self}{myftp_home} = shift;
+          }
+          $old;
+      }
+  
+      sub go_home {
+          my $self = shift;
+          $self->cwd(${*$self}{myftp_home});
+      }
+  
+      sub request_count {
+          my $self = shift;
+          ++${*$self}{myftp_reqcount};
+      }
+  
+      sub ping {
+          my $self = shift;
+          return $self->go_home;
+      }
+  }
+  
+  sub _connect {
+      my ($self, $host, $port, $user, $account, $password, $timeout) = @_;
+  
+      my $key;
+      my $conn_cache = $self->{ua}{conn_cache};
+      if ($conn_cache) {
+          $key = "$host:$port:$user";
+          $key .= ":$account" if defined($account);
+          if (my $ftp = $conn_cache->withdraw("ftp", $key)) {
+              if ($ftp->ping) {
+  
+                  # save it again
+                  $conn_cache->deposit("ftp", $key, $ftp);
+                  return $ftp;
+              }
+          }
+      }
+  
+      # try to make a connection
+      my $ftp = LWP::Protocol::MyFTP->new(
+          $host,
+          Port      => $port,
+          Timeout   => $timeout,
+          LocalAddr => $self->{ua}{local_address},
+      );
+  
+      # XXX Should be some what to pass on 'Passive' (header??)
+      unless ($ftp) {
+          $@ =~ s/^Net::FTP: //;
+          return HTTP::Response->new(HTTP::Status::RC_INTERNAL_SERVER_ERROR, $@);
+      }
+  
+      unless ($ftp->login($user, $password, $account)) {
+  
+          # Unauthorized.  Let's fake a RC_UNAUTHORIZED response
+          my $mess = scalar($ftp->message);
+          $mess =~ s/\n$//;
+          my $res = HTTP::Response->new(HTTP::Status::RC_UNAUTHORIZED, $mess);
+          $res->header("Server",           $ftp->http_server);
+          $res->header("WWW-Authenticate", qq(Basic Realm="FTP login"));
+          return $res;
+      }
+  
+      my $home = $ftp->pwd;
+      $ftp->home($home);
+  
+      $conn_cache->deposit("ftp", $key, $ftp) if $conn_cache;
+  
+      return $ftp;
+  }
+  
+  
+  sub request {
+      my ($self, $request, $proxy, $arg, $size, $timeout) = @_;
+  
+      $size = 4096 unless $size;
+  
+      # check proxy
+      if (defined $proxy) {
+          return HTTP::Response->new(HTTP::Status::RC_BAD_REQUEST,
+              'You can not proxy through the ftp');
+      }
+  
+      my $url = $request->uri;
+      if ($url->scheme ne 'ftp') {
+          my $scheme = $url->scheme;
+          return HTTP::Response->new(HTTP::Status::RC_INTERNAL_SERVER_ERROR,
+              "LWP::Protocol::ftp::request called for '$scheme'");
+      }
+  
+      # check method
+      my $method = $request->method;
+  
+      unless ($method eq 'GET' || $method eq 'HEAD' || $method eq 'PUT') {
+          return HTTP::Response->new(HTTP::Status::RC_BAD_REQUEST,
+              'Library does not allow method ' . "$method for 'ftp:' URLs");
+      }
+  
+      my $host     = $url->host;
+      my $port     = $url->port;
+      my $user     = $url->user;
+      my $password = $url->password;
+  
+      # If a basic authorization header is present than we prefer these over
+      # the username/password specified in the URL.
+      {
+          my ($u, $p) = $request->authorization_basic;
+          if (defined $u) {
+              $user     = $u;
+              $password = $p;
+          }
+      }
+  
+      # We allow the account to be specified in the "Account" header
+      my $account = $request->header('Account');
+  
+      my $ftp
+          = $self->_connect($host, $port, $user, $account, $password, $timeout);
+      return $ftp if ref($ftp) eq "HTTP::Response";    # ugh!
+  
+      # Create an initial response object
+      my $response = HTTP::Response->new(HTTP::Status::RC_OK, "OK");
+      $response->header(Server               => $ftp->http_server);
+      $response->header('Client-Request-Num' => $ftp->request_count);
+      $response->request($request);
+  
+      # Get & fix the path
+      my @path = grep {length} $url->path_segments;
+      my $remote_file = pop(@path);
+      $remote_file = '' unless defined $remote_file;
+  
+      my $type;
+      if (ref $remote_file) {
+          my @params;
+          ($remote_file, @params) = @$remote_file;
+          for (@params) {
+              $type = $_ if s/^type=//;
+          }
+      }
+  
+      if ($type && $type eq 'a') {
+          $ftp->ascii;
+      }
+      else {
+          $ftp->binary;
+      }
+  
+      for (@path) {
+          unless ($ftp->cwd($_)) {
+              return HTTP::Response->new(HTTP::Status::RC_NOT_FOUND,
+                  "Can't chdir to $_");
+          }
+      }
+  
+      if ($method eq 'GET' || $method eq 'HEAD') {
+          if (my $mod_time = $ftp->mdtm($remote_file)) {
+              $response->last_modified($mod_time);
+              if (my $ims = $request->if_modified_since) {
+                  if ($mod_time <= $ims) {
+                      $response->code(HTTP::Status::RC_NOT_MODIFIED);
+                      $response->message("Not modified");
+                      return $response;
+                  }
+              }
+          }
+  
+          # We'll use this later to abort the transfer if necessary.
+          # if $max_size is defined, we need to abort early. Otherwise, it's
+          # a normal transfer
+          my $max_size = undef;
+  
+          # Set resume location, if the client requested it
+          if ($request->header('Range') && $ftp->supported('REST')) {
+              my $range_info = $request->header('Range');
+  
+              # Change bytes=2772992-6781209 to just 2772992
+              my ($start_byte, $end_byte) = $range_info =~ /.*=\s*(\d+)-(\d+)?/;
+              if (defined $start_byte && !defined $end_byte) {
+  
+                  # open range -- only the start is specified
+  
+                  $ftp->restart($start_byte);
+  
+                  # don't define $max_size, we don't want to abort early
+              }
+              elsif (defined $start_byte
+                  && defined $end_byte
+                  && $start_byte >= 0
+                  && $end_byte >= $start_byte)
+              {
+  
+                  $ftp->restart($start_byte);
+                  $max_size = $end_byte - $start_byte;
+              }
+              else {
+  
+                  return HTTP::Response->new(HTTP::Status::RC_BAD_REQUEST,
+                      'Incorrect syntax for Range request');
+              }
+          }
+          elsif ($request->header('Range') && !$ftp->supported('REST')) {
+              return HTTP::Response->new(HTTP::Status::RC_NOT_IMPLEMENTED,
+                  "Server does not support resume."
+              );
+          }
+  
+          my $data;    # the data handle
+          if (length($remote_file) and $data = $ftp->retr($remote_file)) {
+              my ($type, @enc) = LWP::MediaTypes::guess_media_type($remote_file);
+              $response->header('Content-Type', $type) if $type;
+              for (@enc) {
+                  $response->push_header('Content-Encoding', $_);
+              }
+              my $mess = $ftp->message;
+              if ($mess =~ /\((\d+)\s+bytes\)/) {
+                  $response->header('Content-Length', "$1");
+              }
+  
+              if ($method ne 'HEAD') {
+  
+                  # Read data from server
+                  $response = $self->collect(
+                      $arg,
+                      $response,
+                      sub {
+                          my $content = '';
+                          my $result = $data->read($content, $size);
+  
+                          # Stop early if we need to.
+                          if (defined $max_size) {
+  
+                          # We need an interface to Net::FTP::dataconn for getting
+                          # the number of bytes already read
+                              my $bytes_received = $data->bytes_read();
+  
+                             # We were already over the limit. (Should only happen
+                             # once at the end.)
+                              if ($bytes_received - length($content) > $max_size)
+                              {
+                                  $content = '';
+                              }
+  
+                              # We just went over the limit
+                              elsif ($bytes_received > $max_size) {
+  
+                                  # Trim content
+                                  $content = substr($content, 0,
+                                      $max_size
+                                          - ($bytes_received - length($content)));
+                              }
+  
+                              # We're under the limit
+                              else {
+                              }
+                          }
+  
+                          return \$content;
+                      }
+                  );
+              }
+  
+              # abort is needed for HEAD, it's == close if the transfer has
+              # already completed.
+              unless ($data->abort) {
+  
+                  # Something did not work too well.  Note that we treat
+                  # responses to abort() with code 0 in case of HEAD as ok
+                  # (at least wu-ftpd 2.6.1(1) does that).
+                  if ($method ne 'HEAD' || $ftp->code != 0) {
+                      $response->code(HTTP::Status::RC_INTERNAL_SERVER_ERROR);
+                      $response->message("FTP close response: "
+                              . $ftp->code . " "
+                              . $ftp->message);
+                  }
+              }
+          }
+          elsif (!length($remote_file) || ($ftp->code >= 400 && $ftp->code < 600))
+          {
+              # not a plain file, try to list instead
+              if (length($remote_file) && !$ftp->cwd($remote_file)) {
+                  return HTTP::Response->new(HTTP::Status::RC_NOT_FOUND,
+                      "File '$remote_file' not found"
+                  );
+              }
+  
+              # It should now be safe to try to list the directory
+              my @lsl = $ftp->dir;
+  
+              # Try to figure out if the user want us to convert the
+              # directory listing to HTML.
+              my @variants = (
+                  ['html', 0.60, 'text/html'],
+                  ['dir',  1.00, 'text/ftp-dir-listing']
+              );
+  
+              #$HTTP::Negotiate::DEBUG=1;
+              my $prefer = HTTP::Negotiate::choose(\@variants, $request);
+  
+              my $content = '';
+  
+              if (!defined($prefer)) {
+                  return HTTP::Response->new(HTTP::Status::RC_NOT_ACCEPTABLE,
+                      "Neither HTML nor directory listing wanted");
+              }
+              elsif ($prefer eq 'html') {
+                  $response->header('Content-Type' => 'text/html');
+                  $content = "<HEAD><TITLE>File Listing</TITLE>\n";
+                  my $base = $request->uri->clone;
+                  my $path = $base->path;
+                  $base->path("$path/") unless $path =~ m|/$|;
+                  $content .= qq(<BASE HREF="$base">\n</HEAD>\n);
+                  $content .= "<BODY>\n<UL>\n";
+                  for (File::Listing::parse_dir(\@lsl, 'GMT')) {
+                      my ($name, $type, $size, $mtime, $mode) = @$_;
+                      $content .= qq(  <LI> <a href="$name">$name</a>);
+                      $content .= " $size bytes" if $type eq 'f';
+                      $content .= "\n";
+                  }
+                  $content .= "</UL></body>\n";
+              }
+              else {
+                  $response->header('Content-Type', 'text/ftp-dir-listing');
+                  $content = join("\n", @lsl, '');
+              }
+  
+              $response->header('Content-Length', length($content));
+  
+              if ($method ne 'HEAD') {
+                  $response = $self->collect_once($arg, $response, $content);
+              }
+          }
+          else {
+              my $res = HTTP::Response->new(HTTP::Status::RC_BAD_REQUEST,
+                  "FTP return code " . $ftp->code);
+              $res->content_type("text/plain");
+              $res->content($ftp->message);
+              return $res;
+          }
+      }
+      elsif ($method eq 'PUT') {
+  
+          # method must be PUT
+          unless (length($remote_file)) {
+              return HTTP::Response->new(HTTP::Status::RC_BAD_REQUEST,
+                  "Must have a file name to PUT to"
+              );
+          }
+          my $data;
+          if ($data = $ftp->stor($remote_file)) {
+              my $content = $request->content;
+              my $bytes   = 0;
+              if (defined $content) {
+                  if (ref($content) eq 'SCALAR') {
+                      $bytes = $data->write($$content, length($$content));
+                  }
+                  elsif (ref($content) eq 'CODE') {
+                      my ($buf, $n);
+                      while (length($buf = &$content)) {
+                          $n = $data->write($buf, length($buf));
+                          last unless $n;
+                          $bytes += $n;
+                      }
+                  }
+                  elsif (!ref($content)) {
+                      if (defined $content && length($content)) {
+                          $bytes = $data->write($content, length($content));
+                      }
+                  }
+                  else {
+                      die "Bad content";
+                  }
+              }
+              $data->close;
+  
+              $response->code(HTTP::Status::RC_CREATED);
+              $response->header('Content-Type', 'text/plain');
+              $response->content("$bytes bytes stored as $remote_file on $host\n")
+  
+          }
+          else {
+              my $res = HTTP::Response->new(HTTP::Status::RC_BAD_REQUEST,
+                  "FTP return code " . $ftp->code);
+              $res->content_type("text/plain");
+              $res->content($ftp->message);
+              return $res;
+          }
+      }
+      else {
+          return HTTP::Response->new(HTTP::Status::RC_BAD_REQUEST,
+              "Illegal method $method");
+      }
+  
+      $response;
+  }
+  
+  1;
+  
+  __END__
+  
+  # This is what RFC 1738 has to say about FTP access:
+  # --------------------------------------------------
+  #
+  # 3.2. FTP
+  #
+  #    The FTP URL scheme is used to designate files and directories on
+  #    Internet hosts accessible using the FTP protocol (RFC959).
+  #
+  #    A FTP URL follow the syntax described in Section 3.1.  If :<port> is
+  #    omitted, the port defaults to 21.
+  #
+  # 3.2.1. FTP Name and Password
+  #
+  #    A user name and password may be supplied; they are used in the ftp
+  #    "USER" and "PASS" commands after first making the connection to the
+  #    FTP server.  If no user name or password is supplied and one is
+  #    requested by the FTP server, the conventions for "anonymous" FTP are
+  #    to be used, as follows:
+  #
+  #         The user name "anonymous" is supplied.
+  #
+  #         The password is supplied as the Internet e-mail address
+  #         of the end user accessing the resource.
+  #
+  #    If the URL supplies a user name but no password, and the remote
+  #    server requests a password, the program interpreting the FTP URL
+  #    should request one from the user.
+  #
+  # 3.2.2. FTP url-path
+  #
+  #    The url-path of a FTP URL has the following syntax:
+  #
+  #         <cwd1>/<cwd2>/.../<cwdN>/<name>;type=<typecode>
+  #
+  #    Where <cwd1> through <cwdN> and <name> are (possibly encoded) strings
+  #    and <typecode> is one of the characters "a", "i", or "d".  The part
+  #    ";type=<typecode>" may be omitted. The <cwdx> and <name> parts may be
+  #    empty. The whole url-path may be omitted, including the "/"
+  #    delimiting it from the prefix containing user, password, host, and
+  #    port.
+  #
+  #    The url-path is interpreted as a series of FTP commands as follows:
+  #
+  #       Each of the <cwd> elements is to be supplied, sequentially, as the
+  #       argument to a CWD (change working directory) command.
+  #
+  #       If the typecode is "d", perform a NLST (name list) command with
+  #       <name> as the argument, and interpret the results as a file
+  #       directory listing.
+  #
+  #       Otherwise, perform a TYPE command with <typecode> as the argument,
+  #       and then access the file whose name is <name> (for example, using
+  #       the RETR command.)
+  #
+  #    Within a name or CWD component, the characters "/" and ";" are
+  #    reserved and must be encoded. The components are decoded prior to
+  #    their use in the FTP protocol.  In particular, if the appropriate FTP
+  #    sequence to access a particular file requires supplying a string
+  #    containing a "/" as an argument to a CWD or RETR command, it is
+  #    necessary to encode each "/".
+  #
+  #    For example, the URL <URL:ftp://myname@host.dom/%2Fetc/motd> is
+  #    interpreted by FTP-ing to "host.dom", logging in as "myname"
+  #    (prompting for a password if it is asked for), and then executing
+  #    "CWD /etc" and then "RETR motd". This has a different meaning from
+  #    <URL:ftp://myname@host.dom/etc/motd> which would "CWD etc" and then
+  #    "RETR motd"; the initial "CWD" might be executed relative to the
+  #    default directory for "myname". On the other hand,
+  #    <URL:ftp://myname@host.dom//etc/motd>, would "CWD " with a null
+  #    argument, then "CWD etc", and then "RETR motd".
+  #
+  #    FTP URLs may also be used for other operations; for example, it is
+  #    possible to update a file on a remote file server, or infer
+  #    information about it from the directory listings. The mechanism for
+  #    doing so is not spelled out here.
+  #
+  # 3.2.3. FTP Typecode is Optional
+  #
+  #    The entire ;type=<typecode> part of a FTP URL is optional. If it is
+  #    omitted, the client program interpreting the URL must guess the
+  #    appropriate mode to use. In general, the data content type of a file
+  #    can only be guessed from the name, e.g., from the suffix of the name;
+  #    the appropriate type code to be used for transfer of the file can
+  #    then be deduced from the data content of the file.
+  #
+  # 3.2.4 Hierarchy
+  #
+  #    For some file systems, the "/" used to denote the hierarchical
+  #    structure of the URL corresponds to the delimiter used to construct a
+  #    file name hierarchy, and thus, the filename will look similar to the
+  #    URL path. This does NOT mean that the URL is a Unix filename.
+  #
+  # 3.2.5. Optimization
+  #
+  #    Clients accessing resources via FTP may employ additional heuristics
+  #    to optimize the interaction. For some FTP servers, for example, it
+  #    may be reasonable to keep the control connection open while accessing
+  #    multiple URLs from the same server. However, there is no common
+  #    hierarchical model to the FTP protocol, so if a directory change
+  #    command has been given, it is impossible in general to deduce what
+  #    sequence should be given to navigate to another directory for a
+  #    second retrieval, if the paths are different.  The only reliable
+  #    algorithm is to disconnect and reestablish the control connection.
+LWP_PROTOCOL_FTP
+
+$fatpacked{"LWP/Protocol/gopher.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'LWP_PROTOCOL_GOPHER';
+  package LWP::Protocol::gopher;
+  
+  # Implementation of the gopher protocol (RFC 1436)
+  #
+  # This code is based on 'wwwgopher.pl,v 0.10 1994/10/17 18:12:34 shelden'
+  # which in turn is a vastly modified version of Oscar's http'get()
+  # dated 28/3/94 in <ftp://cui.unige.ch/PUBLIC/oscar/scripts/http.pl>
+  # including contributions from Marc van Heyningen and Martijn Koster.
+  
+  use strict;
+  
+  our $VERSION = '6.67';
+  
+  require HTTP::Response;
+  require HTTP::Status;
+  require IO::Socket;
+  require IO::Select;
+  
+  use parent qw(LWP::Protocol);
+  
+  
+  my %gopher2mimetype = (
+      '0' => 'text/plain',                # 0 file
+      '1' => 'text/html',                 # 1 menu
+  					# 2 CSO phone-book server
+  					# 3 Error
+      '4' => 'application/mac-binhex40',  # 4 BinHexed Macintosh file
+      '5' => 'application/zip',           # 5 DOS binary archive of some sort
+      '6' => 'application/octet-stream',  # 6 UNIX uuencoded file.
+      '7' => 'text/html',                 # 7 Index-Search server
+  					# 8 telnet session
+      '9' => 'application/octet-stream',  # 9 binary file
+      'h' => 'text/html',                 # html
+      'g' => 'image/gif',                 # gif
+      'I' => 'image/*',                   # some kind of image
+  );
+  
+  my %gopher2encoding = (
+      '6' => 'x_uuencode',                # 6 UNIX uuencoded file.
+  );
+  
+  sub request
+  {
+      my($self, $request, $proxy, $arg, $size, $timeout) = @_;
+  
+      $size = 4096 unless $size;
+  
+      # check proxy
+      if (defined $proxy) {
+  	return HTTP::Response->new(HTTP::Status::RC_BAD_REQUEST,
+  				   'You can not proxy through the gopher');
+      }
+  
+      my $url = $request->uri;
+      die "bad scheme" if $url->scheme ne 'gopher';
+  
+  
+      my $method = $request->method;
+      unless ($method eq 'GET' || $method eq 'HEAD') {
+  	return HTTP::Response->new(HTTP::Status::RC_BAD_REQUEST,
+  				   'Library does not allow method ' .
+  				   "$method for 'gopher:' URLs");
+      }
+  
+      my $gophertype = $url->gopher_type;
+      unless (exists $gopher2mimetype{$gophertype}) {
+  	return HTTP::Response->new(HTTP::Status::RC_NOT_IMPLEMENTED,
+  				   'Library does not support gophertype ' .
+  				   $gophertype);
+      }
+  
+      my $response = HTTP::Response->new(HTTP::Status::RC_OK, "OK");
+      $response->header('Content-type' => $gopher2mimetype{$gophertype}
+  					|| 'text/plain');
+      $response->header('Content-Encoding' => $gopher2encoding{$gophertype})
+  	if exists $gopher2encoding{$gophertype};
+  
+      if ($method eq 'HEAD') {
+  	# XXX: don't even try it so we set this header
+  	$response->header('Client-Warning' => 'Client answer only');
+  	return $response;
+      }
+  
+      if ($gophertype eq '7' && ! $url->search) {
+        # the url is the prompt for a gopher search; supply boiler-plate
+        return $self->collect_once($arg, $response, <<"EOT");
+  <HEAD>
+  <TITLE>Gopher Index</TITLE>
+  <ISINDEX>
+  </HEAD>
+  <BODY>
+  <H1>$url<BR>Gopher Search</H1>
+  This is a searchable Gopher index.
+  Use the search function of your browser to enter search terms.
+  </BODY>
+  EOT
+      }
+  
+      my $host = $url->host;
+      my $port = $url->port;
+  
+      my $requestLine = "";
+  
+      my $selector = $url->selector;
+      if (defined $selector) {
+  	$requestLine .= $selector;
+  	my $search = $url->search;
+  	if (defined $search) {
+  	    $requestLine .= "\t$search";
+  	    my $string = $url->string;
+  	    if (defined $string) {
+  		$requestLine .= "\t$string";
+  	    }
+  	}
+      }
+      $requestLine .= "\015\012";
+  
+      # potential request headers are just ignored
+  
+      # Ok, lets make the request
+      my $socket = IO::Socket::INET->new(PeerAddr => $host,
+  				       PeerPort => $port,
+  				       LocalAddr => $self->{ua}{local_address},
+  				       Proto    => 'tcp',
+  				       Timeout  => $timeout);
+      die "Can't connect to $host:$port" unless $socket;
+      my $sel = IO::Select->new($socket);
+  
+      {
+  	die "write timeout" if $timeout && !$sel->can_write($timeout);
+  	my $n = syswrite($socket, $requestLine, length($requestLine));
+  	die $! unless defined($n);
+  	die "short write" if $n != length($requestLine);
+      }
+  
+      my $user_arg = $arg;
+  
+      # must handle menus in a special way since they are to be
+      # converted to HTML.  Undefing $arg ensures that the user does
+      # not see the data before we get a change to convert it.
+      $arg = undef if $gophertype eq '1' || $gophertype eq '7';
+  
+      # collect response
+      my $buf = '';
+      $response = $self->collect($arg, $response, sub {
+  	die "read timeout" if $timeout && !$sel->can_read($timeout);
+          my $n = sysread($socket, $buf, $size);
+  	die $! unless defined($n);
+  	return \$buf;
+        } );
+  
+      # Convert menu to HTML and return data to user.
+      if ($gophertype eq '1' || $gophertype eq '7') {
+  	my $content = menu2html($response->content);
+  	if (defined $user_arg) {
+  	    $response = $self->collect_once($user_arg, $response, $content);
+  	}
+  	else {
+  	    $response->content($content);
+  	}
+      }
+  
+      $response;
+  }
+  
+  
+  sub gopher2url
+  {
+      my($gophertype, $path, $host, $port) = @_;
+  
+      my $url;
+  
+      if ($gophertype eq '8' || $gophertype eq 'T') {
+  	# telnet session
+  	$url = $HTTP::URI_CLASS->new($gophertype eq '8' ? 'telnet:':'tn3270:');
+  	$url->user($path) if defined $path;
+      }
+      else {
+  	$path = URI::Escape::uri_escape($path);
+  	$url = $HTTP::URI_CLASS->new("gopher:/$gophertype$path");
+      }
+      $url->host($host);
+      $url->port($port);
+      $url;
+  }
+  
+  sub menu2html {
+      my($menu) = @_;
+  
+      $menu =~ tr/\015//d;  # remove carriage return
+      my $tmp = <<"EOT";
+  <HTML>
+  <HEAD>
+     <TITLE>Gopher menu</TITLE>
+  </HEAD>
+  <BODY>
+  <H1>Gopher menu</H1>
+  EOT
+      for (split("\n", $menu)) {
+  	last if /^\./;
+  	my($pretty, $path, $host, $port) = split("\t");
+  
+  	$pretty =~ s/^(.)//;
+  	my $type = $1;
+  
+  	my $url = gopher2url($type, $path, $host, $port)->as_string;
+  	$tmp .= qq{<A HREF="$url">$pretty</A><BR>\n};
+      }
+      $tmp .= "</BODY>\n</HTML>\n";
+      $tmp;
+  }
+  
+  1;
+LWP_PROTOCOL_GOPHER
+
+$fatpacked{"LWP/Protocol/http.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'LWP_PROTOCOL_HTTP';
+  package LWP::Protocol::http;
+  
+  use strict;
+  
+  our $VERSION = '6.67';
+  
+  require HTTP::Response;
+  require HTTP::Status;
+  require Net::HTTP;
+  
+  use parent qw(LWP::Protocol);
+  
+  our @EXTRA_SOCK_OPTS;
+  my $CRLF = "\015\012";
+  
+  sub _new_socket
+  {
+      my($self, $host, $port, $timeout) = @_;
+  
+      # IPv6 literal IP address should be [bracketed] to remove
+      # ambiguity between ip address and port number.
+      if ( ($host =~ /:/) && ($host !~ /^\[/) ) {
+        $host = "[$host]";
+      }
+  
+      local($^W) = 0;  # IO::Socket::INET can be noisy
+      my $sock = $self->socket_class->new(PeerAddr => $host,
+  					PeerPort => $port,
+  					LocalAddr => $self->{ua}{local_address},
+  					Proto    => 'tcp',
+  					Timeout  => $timeout,
+  					KeepAlive => !!$self->{ua}{conn_cache},
+  					SendTE    => $self->{ua}{send_te},
+  					$self->_extra_sock_opts($host, $port),
+  				       );
+  
+      unless ($sock) {
+  	# IO::Socket::INET leaves additional error messages in $@
+  	my $status = "Can't connect to $host:$port";
+  	if ($@ =~ /\bconnect: (.*)/ ||
+  	    $@ =~ /\b(Bad hostname)\b/ ||
+  	    $@ =~ /\b(nodename nor servname provided, or not known)\b/ ||
+  	    $@ =~ /\b(certificate verify failed)\b/ ||
+  	    $@ =~ /\b(Crypt-SSLeay can't verify hostnames)\b/
+  	) {
+  	    $status .= " ($1)";
+  	} elsif ($@) {
+  	    $status .= " ($@)";
+  	}
+  	die "$status\n\n$@";
+      }
+  
+      # perl 5.005's IO::Socket does not have the blocking method.
+      eval { $sock->blocking(0); };
+  
+      $sock;
+  }
+  
+  sub socket_type
+  {
+      return "http";
+  }
+  
+  sub socket_class
+  {
+      my $self = shift;
+      (ref($self) || $self) . "::Socket";
+  }
+  
+  sub _extra_sock_opts  # to be overridden by subclass
+  {
+      return @EXTRA_SOCK_OPTS;
+  }
+  
+  sub _check_sock
+  {
+      #my($self, $req, $sock) = @_;
+  }
+  
+  sub _get_sock_info
+  {
+      my($self, $res, $sock) = @_;
+      if (defined(my $peerhost = $sock->peerhost)) {
+          $res->header("Client-Peer" => "$peerhost:" . $sock->peerport);
+      }
+  }
+  
+  sub _fixup_header
+  {
+      my($self, $h, $url, $proxy) = @_;
+  
+      # Extract 'Host' header
+      my $hhost = $url->authority;
+      if ($hhost =~ s/^([^\@]*)\@//) {  # get rid of potential "user:pass@"
+  	# add authorization header if we need them.  HTTP URLs do
+  	# not really support specification of user and password, but
+  	# we allow it.
+  	if (defined($1) && not $h->header('Authorization')) {
+  	    require URI::Escape;
+  	    $h->authorization_basic(map URI::Escape::uri_unescape($_),
+  				    split(":", $1, 2));
+  	}
+      }
+      $h->init_header('Host' => $hhost);
+  
+      if ($proxy && $url->scheme ne 'https') {
+  	# Check the proxy URI's userinfo() for proxy credentials
+  	# export http_proxy="http://proxyuser:proxypass@proxyhost:port".
+  	# For https only the initial CONNECT requests needs authorization.
+  	my $p_auth = $proxy->userinfo();
+  	if(defined $p_auth) {
+  	    require URI::Escape;
+  	    $h->proxy_authorization_basic(map URI::Escape::uri_unescape($_),
+  					  split(":", $p_auth, 2))
+  	}
+      }
+  }
+  
+  sub hlist_remove {
+      my($hlist, $k) = @_;
+      $k = lc $k;
+      for (my $i = @$hlist - 2; $i >= 0; $i -= 2) {
+  	next unless lc($hlist->[$i]) eq $k;
+  	splice(@$hlist, $i, 2);
+      }
+  }
+  
+  sub request
+  {
+      my($self, $request, $proxy, $arg, $size, $timeout) = @_;
+  
+      $size ||= 4096;
+  
+      # check method
+      my $method = $request->method;
+      unless ($method =~ /^[A-Za-z0-9_!\#\$%&\'*+\-.^\`|~]+$/) {  # HTTP token
+  	return HTTP::Response->new( HTTP::Status::RC_BAD_REQUEST,
+  				  'Library does not allow method ' .
+  				  "$method for 'http:' URLs");
+      }
+  
+      my $url = $request->uri;
+  
+      # Proxying SSL with a http proxy needs issues a CONNECT request to build a
+      # tunnel and then upgrades the tunnel to SSL. But when doing keep-alive the
+      # https request does not need to be the first request in the connection, so
+      # we need to distinguish between
+      # - not yet connected (create socket and ssl upgrade)
+      # - connected but not inside ssl tunnel (ssl upgrade)
+      # - inside ssl tunnel to the target - once we are in the tunnel to the
+      #   target we cannot only reuse the tunnel for more https requests with the
+      #   same target
+  
+      my $ssl_tunnel = $proxy && $url->scheme eq 'https'
+  	&& $url->host.":".$url->port;
+  
+      my ($host,$port) = $proxy
+  	? ($proxy->host,$proxy->port)
+  	: ($url->host,$url->port);
+      my $fullpath =
+  	$method eq 'CONNECT' ? $url->host . ":" . $url->port :
+  	$proxy && ! $ssl_tunnel ? $url->as_string :
+  	do {
+  	    my $path = $url->path_query;
+  	    $path = "/$path" if $path !~m{^/};
+  	    $path
+  	};
+  
+      my $socket;
+      my $conn_cache = $self->{ua}{conn_cache};
+      my $cache_key;
+      if ( $conn_cache ) {
+  	$cache_key = "$host:$port";
+  	# For https we reuse the socket immediately only if it has an established
+  	# tunnel to the target. Otherwise a CONNECT request followed by an SSL
+  	# upgrade need to be done first. The request itself might reuse an
+  	# existing non-ssl connection to the proxy
+  	$cache_key .= "!".$ssl_tunnel if $ssl_tunnel;
+  	if ( $socket = $conn_cache->withdraw($self->socket_type,$cache_key)) {
+  	    if ($socket->can_read(0)) {
+  		# if the socket is readable, then either the peer has closed the
+  		# connection or there are some garbage bytes on it.  In either
+  		# case we abandon it.
+  		$socket->close;
+  		$socket = undef;
+  	    } # else use $socket
+  	    else {
+  		$socket->timeout($timeout);
+  	    }
+  	}
+      }
+  
+      if ( ! $socket && $ssl_tunnel ) {
+  	my $proto_https = LWP::Protocol::create('https',$self->{ua})
+  	    or die "no support for scheme https found";
+  
+  	# only if ssl socket class is IO::Socket::SSL we can upgrade
+  	# a plain socket to SSL. In case of Net::SSL we fall back to
+  	# the old version
+  	if ( my $upgrade_sub = $proto_https->can('_upgrade_sock')) {
+  	    my $response = $self->request(
+  		HTTP::Request->new('CONNECT',"http://$ssl_tunnel"),
+  		$proxy,
+  		undef,$size,$timeout
+  	    );
+  	    $response->is_success or die
+  		"establishing SSL tunnel failed: ".$response->status_line;
+  	    $socket = $upgrade_sub->($proto_https,
+  		$response->{client_socket},$url)
+  		or die "SSL upgrade failed: $@";
+  	} else {
+  	    $socket = $proto_https->_new_socket($url->host,$url->port,$timeout);
+  	}
+      }
+  
+      if ( ! $socket ) {
+  	# connect to remote site w/o reusing established socket
+  	$socket = $self->_new_socket($host, $port, $timeout );
+      }
+  
+      my $http_version = "";
+      if (my $proto = $request->protocol) {
+  	if ($proto =~ /^(?:HTTP\/)?(1.\d+)$/) {
+  	    $http_version = $1;
+  	    $socket->http_version($http_version);
+  	    $socket->send_te(0) if $http_version eq "1.0";
+  	}
+      }
+  
+      $self->_check_sock($request, $socket);
+  
+      my @h;
+      my $request_headers = $request->headers->clone;
+      $self->_fixup_header($request_headers, $url, $proxy);
+  
+      $request_headers->scan(sub {
+  			       my($k, $v) = @_;
+  			       $k =~ s/^://;
+  			       $v =~ tr/\n/ /;
+  			       push(@h, $k, $v);
+  			   });
+  
+      my $content_ref = $request->content_ref;
+      $content_ref = $$content_ref if ref($$content_ref);
+      my $chunked;
+      my $has_content;
+  
+      if (ref($content_ref) eq 'CODE') {
+  	my $clen = $request_headers->header('Content-Length');
+  	$has_content++ if $clen;
+  	unless (defined $clen) {
+  	    push(@h, "Transfer-Encoding" => "chunked");
+  	    $has_content++;
+  	    $chunked++;
+  	}
+      }
+      else {
+  	# Set (or override) Content-Length header
+  	my $clen = $request_headers->header('Content-Length');
+  	if (defined($$content_ref) && length($$content_ref)) {
+  	    $has_content = length($$content_ref);
+  	    if (!defined($clen) || $clen ne $has_content) {
+  		if (defined $clen) {
+  		    warn "Content-Length header value was wrong, fixed";
+  		    hlist_remove(\@h, 'Content-Length');
+  		}
+  		push(@h, 'Content-Length' => $has_content);
+  	    }
+  	}
+  	elsif ($clen) {
+  	    warn "Content-Length set when there is no content, fixed";
+  	    hlist_remove(\@h, 'Content-Length');
+  	}
+      }
+  
+      my $write_wait = 0;
+      $write_wait = 2
+  	if ($request_headers->header("Expect") || "") =~ /100-continue/;
+  
+      my $req_buf = $socket->format_request($method, $fullpath, @h);
+      #print "------\n$req_buf\n------\n";
+  
+      if (!$has_content || $write_wait || $has_content > 8*1024) {
+        WRITE:
+          {
+              # Since this just writes out the header block it should almost
+              # always succeed to send the whole buffer in a single write call.
+              my $n = $socket->syswrite($req_buf, length($req_buf));
+              unless (defined $n) {
+                  redo WRITE if $!{EINTR};
+                  if ($!{EWOULDBLOCK} || $!{EAGAIN}) {
+                      select(undef, undef, undef, 0.1);
+                      redo WRITE;
+                  }
+                  die "write failed: $!";
+              }
+              if ($n) {
+                  substr($req_buf, 0, $n, "");
+              }
+              else {
+                  select(undef, undef, undef, 0.5);
+              }
+              redo WRITE if length $req_buf;
+          }
+      }
+  
+      my($code, $mess, @junk);
+      my $drop_connection;
+  
+      if ($has_content) {
+  	my $eof;
+  	my $wbuf;
+  	my $woffset = 0;
+        INITIAL_READ:
+  	if ($write_wait) {
+  	    # skip filling $wbuf when waiting for 100-continue
+  	    # because if the response is a redirect or auth required
+  	    # the request will be cloned and there is no way
+  	    # to reset the input stream
+  	    # return here via the label after the 100-continue is read
+  	}
+  	elsif (ref($content_ref) eq 'CODE') {
+  	    my $buf = &$content_ref();
+  	    $buf = "" unless defined($buf);
+  	    $buf = sprintf "%x%s%s%s", length($buf), $CRLF, $buf, $CRLF
+  		if $chunked;
+  	    substr($buf, 0, 0) = $req_buf if $req_buf;
+  	    $wbuf = \$buf;
+  	}
+  	else {
+  	    if ($req_buf) {
+  		my $buf = $req_buf . $$content_ref;
+  		$wbuf = \$buf;
+  	    }
+  	    else {
+  		$wbuf = $content_ref;
+  	    }
+  	    $eof = 1;
+  	}
+  
+  	my $fbits = '';
+  	vec($fbits, fileno($socket), 1) = 1;
+  
+        WRITE:
+  	while ($write_wait || $woffset < length($$wbuf)) {
+  
+  	    my $sel_timeout = $timeout;
+  	    if ($write_wait) {
+  		$sel_timeout = $write_wait if $write_wait < $sel_timeout;
+  	    }
+  	    my $time_before;
+              $time_before = time if $sel_timeout;
+  
+  	    my $rbits = $fbits;
+  	    my $wbits = $write_wait ? undef : $fbits;
+              my $sel_timeout_before = $sel_timeout;
+            SELECT:
+              {
+                  my $nfound = select($rbits, $wbits, undef, $sel_timeout);
+                  if ($nfound < 0) {
+                      if ($!{EINTR} || $!{EWOULDBLOCK} || $!{EAGAIN}) {
+                          if ($time_before) {
+                              $sel_timeout = $sel_timeout_before - (time - $time_before);
+                              $sel_timeout = 0 if $sel_timeout < 0;
+                          }
+                          redo SELECT;
+                      }
+                      die "select failed: $!";
+                  }
+  	    }
+  
+  	    if ($write_wait) {
+  		$write_wait -= time - $time_before;
+  		$write_wait = 0 if $write_wait < 0;
+  	    }
+  
+  	    if (defined($rbits) && $rbits =~ /[^\0]/) {
+  		# readable
+  		my $buf = $socket->_rbuf;
+  		my $n = $socket->sysread($buf, 1024, length($buf));
+                  unless (defined $n) {
+                      die "read failed: $!" unless  $!{EINTR} || $!{EWOULDBLOCK} || $!{EAGAIN};
+                      # if we get here the rest of the block will do nothing
+                      # and we will retry the read on the next round
+                  }
+  		elsif ($n == 0) {
+                      # the server closed the connection before we finished
+                      # writing all the request content.  No need to write any more.
+                      $drop_connection++;
+                      last WRITE;
+  		}
+  		$socket->_rbuf($buf);
+  		if (!$code && $buf =~ /\015?\012\015?\012/) {
+  		    # a whole response header is present, so we can read it without blocking
+  		    ($code, $mess, @h) = $socket->read_response_headers(laxed => 1,
+  									junk_out => \@junk,
+  								       );
+  		    if ($code eq "100") {
+  			$write_wait = 0;
+  			undef($code);
+  			goto INITIAL_READ;
+  		    }
+  		    else {
+  			$drop_connection++;
+  			last WRITE;
+  			# XXX should perhaps try to abort write in a nice way too
+  		    }
+  		}
+  	    }
+  	    if (defined($wbits) && $wbits =~ /[^\0]/) {
+  		my $n = $socket->syswrite($$wbuf, length($$wbuf), $woffset);
+                  unless (defined $n) {
+                      die "write failed: $!" unless $!{EINTR} || $!{EWOULDBLOCK} || $!{EAGAIN};
+                      $n = 0;  # will retry write on the next round
+                  }
+                  elsif ($n == 0) {
+  		    die "write failed: no bytes written";
+  		}
+  		$woffset += $n;
+  
+  		if (!$eof && $woffset >= length($$wbuf)) {
+  		    # need to refill buffer from $content_ref code
+  		    my $buf = &$content_ref();
+  		    $buf = "" unless defined($buf);
+  		    $eof++ unless length($buf);
+  		    $buf = sprintf "%x%s%s%s", length($buf), $CRLF, $buf, $CRLF
+  			if $chunked;
+  		    $wbuf = \$buf;
+  		    $woffset = 0;
+  		}
+  	    }
+  	} # WRITE
+      }
+  
+      ($code, $mess, @h) = $socket->read_response_headers(laxed => 1, junk_out => \@junk)
+  	unless $code;
+      ($code, $mess, @h) = $socket->read_response_headers(laxed => 1, junk_out => \@junk)
+  	if $code eq "100";
+  
+      my $response = HTTP::Response->new($code, $mess);
+      my $peer_http_version = $socket->peer_http_version;
+      $response->protocol("HTTP/$peer_http_version");
+      {
+  	local $HTTP::Headers::TRANSLATE_UNDERSCORE;
+  	$response->push_header(@h);
+      }
+      $response->push_header("Client-Junk" => \@junk) if @junk;
+  
+      $response->request($request);
+      $self->_get_sock_info($response, $socket);
+  
+      if ($method eq "CONNECT") {
+  	$response->{client_socket} = $socket;  # so it can be picked up
+  	return $response;
+      }
+  
+      if (my @te = $response->remove_header('Transfer-Encoding')) {
+  	$response->push_header('Client-Transfer-Encoding', \@te);
+      }
+      $response->push_header('Client-Response-Num', scalar $socket->increment_response_count);
+  
+      my $complete;
+      $response = $self->collect($arg, $response, sub {
+  	my $buf = ""; #prevent use of uninitialized value in SSLeay.xs
+  	my $n;
+        READ:
+  	{
+  	    $n = $socket->read_entity_body($buf, $size);
+              unless (defined $n) {
+                  redo READ if $!{EINTR} || $!{EWOULDBLOCK} || $!{EAGAIN} || $!{ENOTTY};
+                  die "read failed: $!";
+              }
+  	    redo READ if $n == -1;
+  	}
+  	$complete++ if !$n;
+          return \$buf;
+      } );
+      $drop_connection++ unless $complete;
+  
+      @h = $socket->get_trailers;
+      if (@h) {
+  	local $HTTP::Headers::TRANSLATE_UNDERSCORE;
+  	$response->push_header(@h);
+      }
+  
+      # keep-alive support
+      unless ($drop_connection) {
+  	if ($cache_key) {
+  	    my %connection = map { (lc($_) => 1) }
+  		             split(/\s*,\s*/, ($response->header("Connection") || ""));
+  	    if (($peer_http_version eq "1.1" && !$connection{close}) ||
+  		$connection{"keep-alive"})
+  	    {
+  		$conn_cache->deposit($self->socket_type, $cache_key, $socket);
+  	    }
+  	}
+      }
+  
+      $response;
+  }
+  
+  
+  #-----------------------------------------------------------
+  package # hide from PAUSE
+      LWP::Protocol::http::SocketMethods;
+  
+  sub ping {
+      my $self = shift;
+      !$self->can_read(0);
+  }
+  
+  sub increment_response_count {
+      my $self = shift;
+      return ++${*$self}{'myhttp_response_count'};
+  }
+  
+  #-----------------------------------------------------------
+  package # hide from PAUSE
+      LWP::Protocol::http::Socket;
+  
+  use parent -norequire, qw(LWP::Protocol::http::SocketMethods Net::HTTP);
+  
+  1;
+LWP_PROTOCOL_HTTP
+
+$fatpacked{"LWP/Protocol/loopback.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'LWP_PROTOCOL_LOOPBACK';
+  package LWP::Protocol::loopback;
+  
+  use strict;
+  
+  our $VERSION = '6.67';
+  
+  require HTTP::Response;
+  
+  use parent qw(LWP::Protocol);
+  
+  sub request {
+      my($self, $request, $proxy, $arg, $size, $timeout) = @_;
+  
+      my $response = HTTP::Response->new(200, "OK");
+      $response->content_type("message/http; msgtype=request");
+  
+      $response->header("Via", "loopback/1.0 $proxy")
+  	if $proxy;
+  
+      $response->header("X-Arg", $arg);
+      $response->header("X-Read-Size", $size);
+      $response->header("X-Timeout", $timeout);
+  
+      return $self->collect_once($arg, $response, $request->as_string);
+  }
+  
+  1;
+LWP_PROTOCOL_LOOPBACK
+
+$fatpacked{"LWP/Protocol/mailto.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'LWP_PROTOCOL_MAILTO';
+  package LWP::Protocol::mailto;
+  
+  # This module implements the mailto protocol.  It is just a simple
+  # frontend to the Unix sendmail program except on MacOS, where it uses
+  # Mail::Internet.
+  
+  require HTTP::Request;
+  require HTTP::Response;
+  require HTTP::Status;
+  
+  use Carp;
+  use strict;
+  
+  our $VERSION = '6.67';
+  
+  use parent qw(LWP::Protocol);
+  our $SENDMAIL;
+  
+  unless ($SENDMAIL = $ENV{SENDMAIL}) {
+      for my $sm (qw(/usr/sbin/sendmail
+  		   /usr/lib/sendmail
+  		   /usr/ucblib/sendmail
+  		  ))
+      {
+  	if (-x $sm) {
+  	    $SENDMAIL = $sm;
+  	    last;
+  	}
+      }
+      die "Can't find the 'sendmail' program" unless $SENDMAIL;
+  }
+  
+  sub request
+  {
+      my($self, $request, $proxy, $arg, $size) = @_;
+  
+      my ($mail, $addr) if $^O eq "MacOS";
+      my @text = () if $^O eq "MacOS";
+  
+      # check proxy
+      if (defined $proxy)
+      {
+  	return HTTP::Response->new(HTTP::Status::RC_BAD_REQUEST,
+  				  'You can not proxy with mail');
+      }
+  
+      # check method
+      my $method = $request->method;
+  
+      if ($method ne 'POST') {
+  	return HTTP::Response->new( HTTP::Status::RC_BAD_REQUEST,
+  				  'Library does not allow method ' .
+  				  "$method for 'mailto:' URLs");
+      }
+  
+      # check url
+      my $url = $request->uri;
+  
+      my $scheme = $url->scheme;
+      if ($scheme ne 'mailto') {
+  	return HTTP::Response->new( HTTP::Status::RC_INTERNAL_SERVER_ERROR,
+  			 "LWP::Protocol::mailto::request called for '$scheme'");
+      }
+      if ($^O eq "MacOS") {
+  	eval {
+  	    require Mail::Internet;
+  	};
+  	if($@) {
+  	    return HTTP::Response->new( HTTP::Status::RC_INTERNAL_SERVER_ERROR,
+  	               "You don't have MailTools installed");
+  	}
+  	unless ($ENV{SMTPHOSTS}) {
+  	    return HTTP::Response->new( HTTP::Status::RC_INTERNAL_SERVER_ERROR,
+  	               "You don't have SMTPHOSTS defined");
+  	}
+      }
+      else {
+  	unless (-x $SENDMAIL) {
+  	    return HTTP::Response->new( HTTP::Status::RC_INTERNAL_SERVER_ERROR,
+  	               "You don't have $SENDMAIL");
+      }
+      }
+      if ($^O eq "MacOS") {
+  	    $mail = Mail::Internet->new or
+  	    return HTTP::Response->new( HTTP::Status::RC_INTERNAL_SERVER_ERROR,
+  	    "Can't get a Mail::Internet object");
+      }
+      else {
+  	open(SENDMAIL, "| $SENDMAIL -oi -t") or
+  	    return HTTP::Response->new( HTTP::Status::RC_INTERNAL_SERVER_ERROR,
+  	               "Can't run $SENDMAIL: $!");
+      }
+      if ($^O eq "MacOS") {
+  	$addr = $url->encoded822addr;
+      }
+      else {
+  	$request = $request->clone;  # we modify a copy
+  	my @h = $url->headers;  # URL headers override those in the request
+  	while (@h) {
+  	    my $k = shift @h;
+  	    my $v = shift @h;
+  	    next unless defined $v;
+  	    if (lc($k) eq "body") {
+  		$request->content($v);
+  	    }
+  	    else {
+  		$request->push_header($k => $v);
+  	    }
+  	}
+      }
+      if ($^O eq "MacOS") {
+  	$mail->add(To => $addr);
+  	$mail->add(split(/[:\n]/,$request->headers_as_string));
+      }
+      else {
+  	print SENDMAIL $request->headers_as_string;
+  	print SENDMAIL "\n";
+      }
+      my $content = $request->content;
+      if (defined $content) {
+  	my $contRef = ref($content) ? $content : \$content;
+  	if (ref($contRef) eq 'SCALAR') {
+  	    if ($^O eq "MacOS") {
+  		@text = split("\n",$$contRef);
+  		foreach (@text) {
+  		    $_ .= "\n";
+  		}
+  	    }
+  	    else {
+  	    print SENDMAIL $$contRef;
+  	    }
+  
+  	}
+  	elsif (ref($contRef) eq 'CODE') {
+  	    # Callback provides data
+  	    my $d;
+  	    if ($^O eq "MacOS") {
+  		my $stuff = "";
+  		while (length($d = &$contRef)) {
+  		    $stuff .= $d;
+  		}
+  		@text = split("\n",$stuff);
+  		foreach (@text) {
+  		    $_ .= "\n";
+  		}
+  	    }
+  	    else {
+  		print SENDMAIL $d;
+  	    }
+  	}
+      }
+      if ($^O eq "MacOS") {
+  	$mail->body(\@text);
+  	unless ($mail->smtpsend) {
+  	    return HTTP::Response->new(HTTP::Status::RC_INTERNAL_SERVER_ERROR,
+  				       "Mail::Internet->smtpsend unable to send message to <$addr>");
+  	}
+      }
+      else {
+  	unless (close(SENDMAIL)) {
+  	    my $err = $! ? "$!" : "Exit status $?";
+  	    return HTTP::Response->new(HTTP::Status::RC_INTERNAL_SERVER_ERROR,
+  				       "$SENDMAIL: $err");
+  	}
+      }
+  
+  
+      my $response = HTTP::Response->new(HTTP::Status::RC_ACCEPTED,
+  				       "Mail accepted");
+      $response->header('Content-Type', 'text/plain');
+      if ($^O eq "MacOS") {
+  	$response->header('Server' => "Mail::Internet $Mail::Internet::VERSION");
+  	$response->content("Message sent to <$addr>\n");
+      }
+      else {
+  	$response->header('Server' => $SENDMAIL);
+  	my $to = $request->header("To");
+  	$response->content("Message sent to <$to>\n");
+      }
+  
+      return $response;
+  }
+  
+  1;
+LWP_PROTOCOL_MAILTO
+
+$fatpacked{"LWP/Protocol/nntp.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'LWP_PROTOCOL_NNTP';
+  package LWP::Protocol::nntp;
+  
+  # Implementation of the Network News Transfer Protocol (RFC 977)
+  
+  use parent qw(LWP::Protocol);
+  
+  our $VERSION = '6.67';
+  
+  require HTTP::Response;
+  require HTTP::Status;
+  require Net::NNTP;
+  
+  use strict;
+  
+  
+  sub request {
+      my ($self, $request, $proxy, $arg, $size, $timeout) = @_;
+  
+      $size = 4096 unless $size;
+  
+      # Check for proxy
+      if (defined $proxy) {
+          return HTTP::Response->new(HTTP::Status::RC_BAD_REQUEST,
+              'You can not proxy through NNTP');
+      }
+  
+      # Check that the scheme is as expected
+      my $url    = $request->uri;
+      my $scheme = $url->scheme;
+      unless ($scheme eq 'news' || $scheme eq 'nntp') {
+          return HTTP::Response->new(HTTP::Status::RC_INTERNAL_SERVER_ERROR,
+              "LWP::Protocol::nntp::request called for '$scheme'");
+      }
+  
+      # check for a valid method
+      my $method = $request->method;
+      unless ($method eq 'GET' || $method eq 'HEAD' || $method eq 'POST') {
+          return HTTP::Response->new(HTTP::Status::RC_BAD_REQUEST,
+              'Library does not allow method ' . "$method for '$scheme:' URLs");
+      }
+  
+      # extract the identifier and check against posting to an article
+      my $groupart = $url->_group;
+      my $is_art   = $groupart =~ /@/;
+  
+      if ($is_art && $method eq 'POST') {
+          return HTTP::Response->new(HTTP::Status::RC_BAD_REQUEST,
+              "Can't post to an article <$groupart>");
+      }
+  
+      my $nntp = Net::NNTP->new(
+          $url->host,
+  
+          #Port    => 18574,
+          Timeout => $timeout,
+  
+          #Debug   => 1,
+      );
+      die "Can't connect to nntp server" unless $nntp;
+  
+      # Check the initial welcome message from the NNTP server
+      if ($nntp->status != 2) {
+          return HTTP::Response->new(HTTP::Status::RC_SERVICE_UNAVAILABLE,
+              $nntp->message);
+      }
+      my $response = HTTP::Response->new(HTTP::Status::RC_OK, "OK");
+  
+      my $mess = $nntp->message;
+  
+      # Try to extract server name from greeting message.
+      # Don't know if this works well for a large class of servers, but
+      # this works for our server.
+      $mess =~ s/\s+ready\b.*//;
+      $mess =~ s/^\S+\s+//;
+      $response->header(Server => $mess);
+  
+      # First we handle posting of articles
+      if ($method eq 'POST') {
+          $nntp->quit;
+          $nntp = undef;
+          $response->code(HTTP::Status::RC_NOT_IMPLEMENTED);
+          $response->message("POST not implemented yet");
+          return $response;
+      }
+  
+      # The method must be "GET" or "HEAD" by now
+      if (!$is_art) {
+          if (!$nntp->group($groupart)) {
+              $response->code(HTTP::Status::RC_NOT_FOUND);
+              $response->message($nntp->message);
+          }
+          $nntp->quit;
+          $nntp = undef;
+  
+          # HEAD: just check if the group exists
+          if ($method eq 'GET' && $response->is_success) {
+              $response->code(HTTP::Status::RC_NOT_IMPLEMENTED);
+              $response->message("GET newsgroup not implemented yet");
+          }
+          return $response;
+      }
+  
+      # Send command to server to retrieve an article (or just the headers)
+      my $get = $method eq 'HEAD' ? "head" : "article";
+      my $art = $nntp->$get("<$groupart>");
+      unless ($art) {
+          $nntp->quit;
+          $response->code(HTTP::Status::RC_NOT_FOUND);
+          $response->message($nntp->message);
+          $nntp = undef;
+          return $response;
+      }
+  
+      # Parse headers
+      my ($key, $val);
+      local $_;
+      while ($_ = shift @$art) {
+          if (/^\s+$/) {
+              last;    # end of headers
+          }
+          elsif (/^(\S+):\s*(.*)/) {
+              $response->push_header($key, $val) if $key;
+              ($key, $val) = ($1, $2);
+          }
+          elsif (/^\s+(.*)/) {
+              next unless $key;
+              $val .= $1;
+          }
+          else {
+              unshift(@$art, $_);
+              last;
+          }
+      }
+      $response->push_header($key, $val) if $key;
+  
+      # Ensure that there is a Content-Type header
+      $response->header("Content-Type", "text/plain")
+          unless $response->header("Content-Type");
+  
+      # Collect the body
+      $response = $self->collect_once($arg, $response, join("", @$art)) if @$art;
+  
+      # Say goodbye to the server
+      $nntp->quit;
+      $nntp = undef;
+  
+      $response;
+  }
+  
+  1;
+LWP_PROTOCOL_NNTP
+
+$fatpacked{"LWP/Protocol/nogo.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'LWP_PROTOCOL_NOGO';
+  package LWP::Protocol::nogo;
+  # If you want to disable access to a particular scheme, use this
+  # class and then call
+  #   LWP::Protocol::implementor(that_scheme, 'LWP::Protocol::nogo');
+  # For then on, attempts to access URLs with that scheme will generate
+  # a 500 error.
+  
+  use strict;
+  
+  our $VERSION = '6.67';
+  
+  require HTTP::Response;
+  require HTTP::Status;
+  use parent qw(LWP::Protocol);
+  
+  sub request {
+      my($self, $request) = @_;
+      my $scheme = $request->uri->scheme;
+  
+      return HTTP::Response->new(
+        HTTP::Status::RC_INTERNAL_SERVER_ERROR,
+        "Access to \'$scheme\' URIs has been disabled"
+      );
+  }
+  1;
+LWP_PROTOCOL_NOGO
+
+$fatpacked{"LWP/RobotUA.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'LWP_ROBOTUA';
+  package LWP::RobotUA;
+  
+  use parent qw(LWP::UserAgent);
+  
+  our $VERSION = '6.67';
+  
+  require WWW::RobotRules;
+  require HTTP::Request;
+  require HTTP::Response;
+  
+  use Carp ();
+  use HTTP::Status ();
+  use HTTP::Date qw(time2str);
+  use strict;
+  
+  
+  #
+  # Additional attributes in addition to those found in LWP::UserAgent:
+  #
+  # $self->{'delay'}    Required delay between request to the same
+  #                     server in minutes.
+  #
+  # $self->{'rules'}     A WWW::RobotRules object
+  #
+  
+  sub new
+  {
+      my $class = shift;
+      my %cnf;
+      if (@_ < 4) {
+  	# legacy args
+  	@cnf{qw(agent from rules)} = @_;
+      }
+      else {
+  	%cnf = @_;
+      }
+  
+      Carp::croak('LWP::RobotUA agent required') unless $cnf{agent};
+      Carp::croak('LWP::RobotUA from address required')
+  	unless $cnf{from} && $cnf{from} =~ m/\@/;
+  
+      my $delay = delete $cnf{delay} || 1;
+      my $use_sleep = delete $cnf{use_sleep};
+      $use_sleep = 1 unless defined($use_sleep);
+      my $rules = delete $cnf{rules};
+  
+      my $self = LWP::UserAgent->new(%cnf);
+      $self = bless $self, $class;
+  
+      $self->{'delay'} = $delay;   # minutes
+      $self->{'use_sleep'} = $use_sleep;
+  
+      if ($rules) {
+  	$rules->agent($cnf{agent});
+  	$self->{'rules'} = $rules;
+      }
+      else {
+  	$self->{'rules'} = WWW::RobotRules->new($cnf{agent});
+      }
+  
+      $self;
+  }
+  
+  
+  sub delay     { shift->_elem('delay',     @_); }
+  sub use_sleep { shift->_elem('use_sleep', @_); }
+  
+  
+  sub agent
+  {
+      my $self = shift;
+      my $old = $self->SUPER::agent(@_);
+      if (@_) {
+  	# Changing our name means to start fresh
+  	$self->{'rules'}->agent($self->{'agent'});
+      }
+      $old;
+  }
+  
+  
+  sub rules {
+      my $self = shift;
+      my $old = $self->_elem('rules', @_);
+      $self->{'rules'}->agent($self->{'agent'}) if @_;
+      $old;
+  }
+  
+  
+  sub no_visits
+  {
+      my($self, $netloc) = @_;
+      $self->{'rules'}->no_visits($netloc) || 0;
+  }
+  
+  *host_count = \&no_visits;  # backwards compatibility with LWP-5.02
+  
+  
+  sub host_wait
+  {
+      my($self, $netloc) = @_;
+      return undef unless defined $netloc;
+      my $last = $self->{'rules'}->last_visit($netloc);
+      if ($last) {
+  	my $wait = int($self->{'delay'} * 60 - (time - $last));
+  	$wait = 0 if $wait < 0;
+  	return $wait;
+      }
+      return 0;
+  }
+  
+  
+  sub simple_request
+  {
+      my($self, $request, $arg, $size) = @_;
+  
+      # Do we try to access a new server?
+      my $allowed = $self->{'rules'}->allowed($request->uri);
+  
+      if ($allowed < 0) {
+  	# Host is not visited before, or robots.txt expired; fetch "robots.txt"
+  	my $robot_url = $request->uri->clone;
+  	$robot_url->path("robots.txt");
+  	$robot_url->query(undef);
+  
+  	# make access to robot.txt legal since this will be a recursive call
+  	$self->{'rules'}->parse($robot_url, "");
+  
+  	my $robot_req = HTTP::Request->new('GET', $robot_url);
+  	my $parse_head = $self->parse_head(0);
+  	my $robot_res = $self->request($robot_req);
+  	$self->parse_head($parse_head);
+  	my $fresh_until = $robot_res->fresh_until;
+  	my $content = "";
+  	if ($robot_res->is_success && $robot_res->content_is_text) {
+  	    $content = $robot_res->decoded_content;
+  	    $content = "" unless $content && $content =~ /^\s*Disallow\s*:/mi;
+  	}
+  	$self->{'rules'}->parse($robot_url, $content, $fresh_until);
+  
+  	# recalculate allowed...
+  	$allowed = $self->{'rules'}->allowed($request->uri);
+      }
+  
+      # Check rules
+      unless ($allowed) {
+  	my $res = HTTP::Response->new(
+  	  HTTP::Status::RC_FORBIDDEN, 'Forbidden by robots.txt');
+  	$res->request( $request ); # bind it to that request
+  	return $res;
+      }
+  
+      my $netloc = eval { local $SIG{__DIE__}; $request->uri->host_port; };
+      my $wait = $self->host_wait($netloc);
+  
+      if ($wait) {
+  	if ($self->{'use_sleep'}) {
+  	    sleep($wait)
+  	}
+  	else {
+  	    my $res = HTTP::Response->new(
+  	      HTTP::Status::RC_SERVICE_UNAVAILABLE, 'Please, slow down');
+  	    $res->header('Retry-After', time2str(time + $wait));
+  	    $res->request( $request ); # bind it to that request
+  	    return $res;
+  	}
+      }
+  
+      # Perform the request
+      my $res = $self->SUPER::simple_request($request, $arg, $size);
+  
+      $self->{'rules'}->visit($netloc);
+  
+      $res;
+  }
+  
+  
+  sub as_string
+  {
+      my $self = shift;
+      my @s;
+      push(@s, "Robot: $self->{'agent'} operated by $self->{'from'}  [$self]");
+      push(@s, "    Minimum delay: " . int($self->{'delay'}*60) . "s");
+      push(@s, "    Will sleep if too early") if $self->{'use_sleep'};
+      push(@s, "    Rules = $self->{'rules'}");
+      join("\n", @s, '');
+  }
+  
+  1;
+  
+  
+  __END__
+  
+  =pod
+  
+  =head1 NAME
+  
+  LWP::RobotUA - a class for well-behaved Web robots
+  
+  =head1 SYNOPSIS
+  
+    use LWP::RobotUA;
+    my $ua = LWP::RobotUA->new('my-robot/0.1', 'me@foo.com');
+    $ua->delay(10);  # be very nice -- max one hit every ten minutes!
+    ...
+  
+    # Then just use it just like a normal LWP::UserAgent:
+    my $response = $ua->get('http://whatever.int/...');
+    ...
+  
+  =head1 DESCRIPTION
+  
+  This class implements a user agent that is suitable for robot
+  applications.  Robots should be nice to the servers they visit.  They
+  should consult the F</robots.txt> file to ensure that they are welcomed
+  and they should not make requests too frequently.
+  
+  But before you consider writing a robot, take a look at
+  L<http://www.robotstxt.org/>.
+  
+  When you use an I<LWP::RobotUA> object as your user agent, then you do not
+  really have to think about these things yourself; C<robots.txt> files
+  are automatically consulted and obeyed, the server isn't queried
+  too rapidly, and so on.  Just send requests
+  as you do when you are using a normal I<LWP::UserAgent>
+  object (using C<< $ua->get(...) >>, C<< $ua->head(...) >>,
+  C<< $ua->request(...) >>, etc.), and this
+  special agent will make sure you are nice.
+  
+  =head1 METHODS
+  
+  The LWP::RobotUA is a sub-class of L<LWP::UserAgent> and implements the
+  same methods. In addition the following methods are provided:
+  
+  =head2 new
+  
+      my $ua = LWP::RobotUA->new( %options )
+      my $ua = LWP::RobotUA->new( $agent, $from )
+      my $ua = LWP::RobotUA->new( $agent, $from, $rules )
+  
+  The LWP::UserAgent options C<agent> and C<from> are mandatory.  The
+  options C<delay>, C<use_sleep> and C<rules> initialize attributes
+  private to the RobotUA.  If C<rules> are not provided, then
+  L<WWW::RobotRules> is instantiated providing an internal database of
+  F<robots.txt>.
+  
+  It is also possible to just pass the value of C<agent>, C<from> and
+  optionally C<rules> as plain positional arguments.
+  
+  =head2 delay
+  
+      my $delay = $ua->delay;
+      $ua->delay( $minutes );
+  
+  Get/set the minimum delay between requests to the same server, in
+  I<minutes>.  The default is C<1> minute.  Note that this number doesn't
+  have to be an integer; for example, this sets the delay to C<10> seconds:
+  
+      $ua->delay(10/60);
+  
+  =head2 use_sleep
+  
+      my $bool = $ua->use_sleep;
+      $ua->use_sleep( $boolean );
+  
+  Get/set a value indicating whether the UA should L<LWP::RobotUA/sleep> if
+  requests arrive too fast, defined as C<< $ua->delay >> minutes not passed since
+  last request to the given server.  The default is true.  If this value is
+  false then an internal C<SERVICE_UNAVAILABLE> response will be generated.
+  It will have a C<Retry-After> header that indicates when it is OK to
+  send another request to this server.
+  
+  =head2 rules
+  
+      my $rules = $ua->rules;
+      $ua->rules( $rules );
+  
+  Set/get which I<WWW::RobotRules> object to use.
+  
+  =head2 no_visits
+  
+      my $num = $ua->no_visits( $netloc )
+  
+  Returns the number of documents fetched from this server host. Yeah I
+  know, this method should probably have been named C<num_visits> or
+  something like that. :-(
+  
+  =head2 host_wait
+  
+      my $num = $ua->host_wait( $netloc )
+  
+  Returns the number of I<seconds> (from now) you must wait before you can
+  make a new request to this host.
+  
+  =head2 as_string
+  
+      my $string = $ua->as_string;
+  
+  Returns a string that describes the state of the UA.
+  Mainly useful for debugging.
+  
+  =head1 SEE ALSO
+  
+  L<LWP::UserAgent>, L<WWW::RobotRules>
+  
+  =head1 COPYRIGHT
+  
+  Copyright 1996-2004 Gisle Aas.
+  
+  This library is free software; you can redistribute it and/or
+  modify it under the same terms as Perl itself.
+  
+  =cut
+LWP_ROBOTUA
+
+$fatpacked{"LWP/Simple.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'LWP_SIMPLE';
+  package LWP::Simple;
+  
+  use strict;
+  
+  our $VERSION = '6.67';
+  
+  require Exporter;
+  
+  our @EXPORT = qw(get head getprint getstore mirror);
+  our @EXPORT_OK = qw($ua);
+  
+  # I really hate this.  It was a bad idea to do it in the first place.
+  # Wonder how to get rid of it???  (It even makes LWP::Simple 7% slower
+  # for trivial tests)
+  use HTTP::Status;
+  push(@EXPORT, @HTTP::Status::EXPORT);
+  
+  sub import
+  {
+      my $pkg = shift;
+      my $callpkg = caller;
+      Exporter::export($pkg, $callpkg, @_);
+  }
+  
+  use LWP::UserAgent ();
+  use HTTP::Date ();
+  
+  our $ua = LWP::UserAgent->new;  # we create a global UserAgent object
+  $ua->agent("LWP::Simple/$VERSION ");
+  $ua->env_proxy;
+  
+  sub get ($)
+  {
+      my $response = $ua->get(shift);
+      return $response->decoded_content if $response->is_success;
+      return undef;
+  }
+  
+  
+  sub head ($)
+  {
+      my($url) = @_;
+      my $request = HTTP::Request->new(HEAD => $url);
+      my $response = $ua->request($request);
+  
+      if ($response->is_success) {
+  	return $response unless wantarray;
+  	return (scalar $response->header('Content-Type'),
+  		scalar $response->header('Content-Length'),
+  		HTTP::Date::str2time($response->header('Last-Modified')),
+  		HTTP::Date::str2time($response->header('Expires')),
+  		scalar $response->header('Server'),
+  	       );
+      }
+      return;
+  }
+  
+  
+  sub getprint ($)
+  {
+      my($url) = @_;
+      my $request = HTTP::Request->new(GET => $url);
+      local($\) = ""; # ensure standard $OUTPUT_RECORD_SEPARATOR
+      my $callback = sub { print $_[0] };
+      if ($^O eq "MacOS") {
+  	$callback = sub { $_[0] =~ s/\015?\012/\n/g; print $_[0] }
+      }
+      my $response = $ua->request($request, $callback);
+      unless ($response->is_success) {
+  	print STDERR $response->status_line, " <URL:$url>\n";
+      }
+      $response->code;
+  }
+  
+  
+  sub getstore ($$)
+  {
+      my($url, $file) = @_;
+      my $request = HTTP::Request->new(GET => $url);
+      my $response = $ua->request($request, $file);
+  
+      $response->code;
+  }
+  
+  
+  sub mirror ($$)
+  {
+      my($url, $file) = @_;
+      my $response = $ua->mirror($url, $file);
+      $response->code;
+  }
+  
+  
+  1;
+  
+  __END__
+  
+  =pod
+  
+  =head1 NAME
+  
+  LWP::Simple - simple procedural interface to LWP
+  
+  =head1 SYNOPSIS
+  
+   perl -MLWP::Simple -e 'getprint "http://www.sn.no"'
+  
+   use LWP::Simple;
+   $content = get("http://www.sn.no/");
+   die "Couldn't get it!" unless defined $content;
+  
+   if (mirror("http://www.sn.no/", "foo") == RC_NOT_MODIFIED) {
+       ...
+   }
+  
+   if (is_success(getprint("http://www.sn.no/"))) {
+       ...
+   }
+  
+  =head1 DESCRIPTION
+  
+  This module is meant for people who want a simplified view of the
+  libwww-perl library.  It should also be suitable for one-liners.  If
+  you need more control or access to the header fields in the requests
+  sent and responses received, then you should use the full object-oriented
+  interface provided by the L<LWP::UserAgent> module.
+  
+  The module will also export the L<LWP::UserAgent> object as C<$ua> if you
+  ask for it explicitly.
+  
+  The user agent created by this module will identify itself as
+  C<LWP::Simple/#.##>
+  and will initialize its proxy defaults from the environment (by
+  calling C<< $ua->env_proxy >>).
+  
+  =head1 FUNCTIONS
+  
+  The following functions are provided (and exported) by this module:
+  
+  =head2 get
+  
+      my $res = get($url);
+  
+  The get() function will fetch the document identified by the given URL
+  and return it.  It returns C<undef> if it fails.  The C<$url> argument can
+  be either a string or a reference to a L<URI> object.
+  
+  You will not be able to examine the response code or response headers
+  (like C<Content-Type>) when you are accessing the web using this
+  function.  If you need that information you should use the full OO
+  interface (see L<LWP::UserAgent>).
+  
+  =head2 head
+  
+      my $res = head($url);
+  
+  Get document headers. Returns the following 5 values if successful:
+  ($content_type, $document_length, $modified_time, $expires, $server)
+  
+  Returns an empty list if it fails.  In scalar context returns TRUE if
+  successful.
+  
+  =head2 getprint
+  
+      my $code = getprint($url);
+  
+  Get and print a document identified by a URL. The document is printed
+  to the selected default filehandle for output (normally STDOUT) as
+  data is received from the network.  If the request fails, then the
+  status code and message are printed on STDERR.  The return value is
+  the HTTP response code.
+  
+  =head2 getstore
+  
+      my $code = getstore($url, $file)
+      my $code = getstore($url, $filehandle)
+  
+  Gets a document identified by a URL and stores it in the file. The
+  return value is the HTTP response code.
+  You may also pass a writeable filehandle or similar,
+  such as a L<File::Temp> object.
+  
+  =head2 mirror
+  
+      my $code = mirror($url, $file);
+  
+  Get and store a document identified by a URL, using
+  I<If-modified-since>, and checking the I<Content-Length>.  Returns
+  the HTTP response code.
+  
+  =head1 STATUS CONSTANTS
+  
+  This module also exports the L<HTTP::Status> constants and procedures.
+  You can use them when you check the response code from L<LWP::Simple/getprint>,
+  L<LWP::Simple/getstore> or L<LWP::Simple/mirror>.  The constants are:
+  
+     RC_CONTINUE
+     RC_SWITCHING_PROTOCOLS
+     RC_OK
+     RC_CREATED
+     RC_ACCEPTED
+     RC_NON_AUTHORITATIVE_INFORMATION
+     RC_NO_CONTENT
+     RC_RESET_CONTENT
+     RC_PARTIAL_CONTENT
+     RC_MULTIPLE_CHOICES
+     RC_MOVED_PERMANENTLY
+     RC_MOVED_TEMPORARILY
+     RC_SEE_OTHER
+     RC_NOT_MODIFIED
+     RC_USE_PROXY
+     RC_BAD_REQUEST
+     RC_UNAUTHORIZED
+     RC_PAYMENT_REQUIRED
+     RC_FORBIDDEN
+     RC_NOT_FOUND
+     RC_METHOD_NOT_ALLOWED
+     RC_NOT_ACCEPTABLE
+     RC_PROXY_AUTHENTICATION_REQUIRED
+     RC_REQUEST_TIMEOUT
+     RC_CONFLICT
+     RC_GONE
+     RC_LENGTH_REQUIRED
+     RC_PRECONDITION_FAILED
+     RC_REQUEST_ENTITY_TOO_LARGE
+     RC_REQUEST_URI_TOO_LARGE
+     RC_UNSUPPORTED_MEDIA_TYPE
+     RC_INTERNAL_SERVER_ERROR
+     RC_NOT_IMPLEMENTED
+     RC_BAD_GATEWAY
+     RC_SERVICE_UNAVAILABLE
+     RC_GATEWAY_TIMEOUT
+     RC_HTTP_VERSION_NOT_SUPPORTED
+  
+  =head1 CLASSIFICATION FUNCTIONS
+  
+  The L<HTTP::Status> classification functions are:
+  
+  =head2 is_success
+  
+      my $bool = is_success($rc);
+  
+  True if response code indicated a successful request.
+  
+  =head2 is_error
+  
+      my $bool = is_error($rc)
+  
+  True if response code indicated that an error occurred.
+  
+  =head1 CAVEAT
+  
+  Note that if you are using both LWP::Simple and the very popular L<CGI>
+  module, you may be importing a C<head> function from each module,
+  producing a warning like C<Prototype mismatch: sub main::head ($) vs none>.
+  Get around this problem by just not importing LWP::Simple's
+  C<head> function, like so:
+  
+          use LWP::Simple qw(!head);
+          use CGI qw(:standard);  # then only CGI.pm defines a head()
+  
+  Then if you do need LWP::Simple's C<head> function, you can just call
+  it as C<LWP::Simple::head($url)>.
+  
+  =head1 SEE ALSO
+  
+  L<LWP>, L<lwpcook>, L<LWP::UserAgent>, L<HTTP::Status>, L<lwp-request>,
+  L<lwp-mirror>
+  
+  =cut
+LWP_SIMPLE
+
+$fatpacked{"LWP/UserAgent.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'LWP_USERAGENT';
+  package LWP::UserAgent;
+  
+  use strict;
+  
+  use parent qw(LWP::MemberMixin);
+  
+  use Carp ();
+  use File::Copy ();
+  use HTTP::Request ();
+  use HTTP::Response ();
+  use HTTP::Date ();
+  
+  use LWP ();
+  use HTTP::Status ();
+  use LWP::Protocol ();
+  
+  use Scalar::Util qw(blessed openhandle);
+  use Try::Tiny qw(try catch);
+  
+  our $VERSION = '6.67';
+  
+  sub new
+  {
+      # Check for common user mistake
+      Carp::croak("Options to LWP::UserAgent should be key/value pairs, not hash reference")
+          if ref($_[1]) eq 'HASH';
+  
+      my($class, %cnf) = @_;
+  
+      my $agent = delete $cnf{agent};
+      my $from  = delete $cnf{from};
+      my $def_headers = delete $cnf{default_headers};
+      my $timeout = delete $cnf{timeout};
+      $timeout = 3*60 unless defined $timeout;
+      my $local_address = delete $cnf{local_address};
+      my $ssl_opts = delete $cnf{ssl_opts} || {};
+      unless (exists $ssl_opts->{verify_hostname}) {
+  	# The processing of HTTPS_CA_* below is for compatibility with Crypt::SSLeay
+  	if (exists $ENV{PERL_LWP_SSL_VERIFY_HOSTNAME}) {
+  	    $ssl_opts->{verify_hostname} = $ENV{PERL_LWP_SSL_VERIFY_HOSTNAME};
+  	}
+  	elsif ($ENV{HTTPS_CA_FILE} || $ENV{HTTPS_CA_DIR}) {
+  	    # Crypt-SSLeay compatibility (verify peer certificate; but not the hostname)
+  	    $ssl_opts->{verify_hostname} = 0;
+  	    $ssl_opts->{SSL_verify_mode} = 1;
+  	}
+  	else {
+  	    $ssl_opts->{verify_hostname} = 1;
+  	}
+      }
+      unless (exists $ssl_opts->{SSL_ca_file}) {
+  	if (my $ca_file = $ENV{PERL_LWP_SSL_CA_FILE} || $ENV{HTTPS_CA_FILE}) {
+  	    $ssl_opts->{SSL_ca_file} = $ca_file;
+  	}
+      }
+      unless (exists $ssl_opts->{SSL_ca_path}) {
+  	if (my $ca_path = $ENV{PERL_LWP_SSL_CA_PATH} || $ENV{HTTPS_CA_DIR}) {
+  	    $ssl_opts->{SSL_ca_path} = $ca_path;
+  	}
+      }
+      my $use_eval = delete $cnf{use_eval};
+      $use_eval = 1 unless defined $use_eval;
+      my $parse_head = delete $cnf{parse_head};
+      $parse_head = 1 unless defined $parse_head;
+      my $send_te = delete $cnf{send_te};
+      $send_te = 1 unless defined $send_te;
+      my $show_progress = delete $cnf{show_progress};
+      my $max_size = delete $cnf{max_size};
+      my $max_redirect = delete $cnf{max_redirect};
+      $max_redirect = 7 unless defined $max_redirect;
+      my $env_proxy = exists $cnf{env_proxy} ? delete $cnf{env_proxy} : $ENV{PERL_LWP_ENV_PROXY};
+      my $no_proxy = exists $cnf{no_proxy} ? delete $cnf{no_proxy} : [];
+      Carp::croak(qq{no_proxy must be an arrayref, not $no_proxy!}) if ref $no_proxy ne 'ARRAY';
+  
+      my $cookie_jar = delete $cnf{cookie_jar};
+      my $conn_cache = delete $cnf{conn_cache};
+      my $keep_alive = delete $cnf{keep_alive};
+  
+      Carp::croak("Can't mix conn_cache and keep_alive")
+  	  if $conn_cache && $keep_alive;
+  
+      my $protocols_allowed   = delete $cnf{protocols_allowed};
+      my $protocols_forbidden = delete $cnf{protocols_forbidden};
+  
+      my $requests_redirectable = delete $cnf{requests_redirectable};
+      $requests_redirectable = ['GET', 'HEAD']
+        unless defined $requests_redirectable;
+  
+      # Actually ""s are just as good as 0's, but for concision we'll just say:
+      Carp::croak("protocols_allowed has to be an arrayref or 0, not \"$protocols_allowed\"!")
+        if $protocols_allowed and ref($protocols_allowed) ne 'ARRAY';
+      Carp::croak("protocols_forbidden has to be an arrayref or 0, not \"$protocols_forbidden\"!")
+        if $protocols_forbidden and ref($protocols_forbidden) ne 'ARRAY';
+      Carp::croak("requests_redirectable has to be an arrayref or 0, not \"$requests_redirectable\"!")
+        if $requests_redirectable and ref($requests_redirectable) ne 'ARRAY';
+  
+      if (%cnf && $^W) {
+  	Carp::carp("Unrecognized LWP::UserAgent options: @{[sort keys %cnf]}");
+      }
+  
+      my $self = bless {
+          def_headers           => $def_headers,
+          timeout               => $timeout,
+          local_address         => $local_address,
+          ssl_opts              => $ssl_opts,
+          use_eval              => $use_eval,
+          show_progress         => $show_progress,
+          max_size              => $max_size,
+          max_redirect          => $max_redirect,
+          # We set proxy later as we do validation on the values
+          proxy                 => {},
+          no_proxy              => [ @{ $no_proxy } ],
+          protocols_allowed     => $protocols_allowed,
+          protocols_forbidden   => $protocols_forbidden,
+          requests_redirectable => $requests_redirectable,
+          send_te               => $send_te,
+      }, $class;
+  
+      $self->agent(defined($agent) ? $agent : $class->_agent)
+          if defined($agent) || !$def_headers || !$def_headers->header("User-Agent");
+      $self->from($from) if $from;
+      $self->cookie_jar($cookie_jar) if $cookie_jar;
+      $self->parse_head($parse_head);
+      $self->env_proxy if $env_proxy;
+  
+      if (exists $cnf{proxy}) {
+          Carp::croak(qq{proxy must be an arrayref, not $cnf{proxy}!})
+              if ref $cnf{proxy} ne 'ARRAY';
+          $self->proxy($cnf{proxy});
+      }
+  
+      $self->protocols_allowed(  $protocols_allowed  ) if $protocols_allowed;
+      $self->protocols_forbidden($protocols_forbidden) if $protocols_forbidden;
+  
+      if ($keep_alive) {
+  	$conn_cache ||= { total_capacity => $keep_alive };
+      }
+      $self->conn_cache($conn_cache) if $conn_cache;
+  
+      return $self;
+  }
+  
+  
+  sub send_request
+  {
+      my($self, $request, $arg, $size) = @_;
+      my($method, $url) = ($request->method, $request->uri);
+      my $scheme = $url->scheme;
+  
+      local($SIG{__DIE__});  # protect against user defined die handlers
+  
+      $self->progress("begin", $request);
+  
+      my $response = $self->run_handlers("request_send", $request);
+  
+      unless ($response) {
+          my $protocol;
+  
+          {
+              # Honor object-specific restrictions by forcing protocol objects
+              #  into class LWP::Protocol::nogo.
+              my $x;
+              if($x = $self->protocols_allowed) {
+                  if (grep lc($_) eq $scheme, @$x) {
+                  }
+                  else {
+                      require LWP::Protocol::nogo;
+                      $protocol = LWP::Protocol::nogo->new;
+                  }
+              }
+              elsif ($x = $self->protocols_forbidden) {
+                  if(grep lc($_) eq $scheme, @$x) {
+                      require LWP::Protocol::nogo;
+                      $protocol = LWP::Protocol::nogo->new;
+                  }
+              }
+              # else fall thru and create the protocol object normally
+          }
+  
+          # Locate protocol to use
+          my $proxy = $request->{proxy};
+          if ($proxy) {
+              $scheme = $proxy->scheme;
+          }
+  
+          unless ($protocol) {
+              try {
+                  $protocol = LWP::Protocol::create($scheme, $self);
+              }
+              catch {
+                  my $error = $_;
+                  $error =~ s/ at .* line \d+.*//s;  # remove file/line number
+                  $response =  _new_response($request, HTTP::Status::RC_NOT_IMPLEMENTED, $error);
+                  if ($scheme eq "https") {
+                      $response->message($response->message . " (LWP::Protocol::https not installed)");
+                      $response->content_type("text/plain");
+                      $response->content(<<EOT);
+  LWP will support https URLs if the LWP::Protocol::https module
+  is installed.
+  EOT
+                  }
+              };
+          }
+  
+          if (!$response && $self->{use_eval}) {
+              # we eval, and turn dies into responses below
+              try {
+                  $response = $protocol->request($request, $proxy, $arg, $size, $self->{timeout}) || die "No response returned by $protocol";
+              }
+              catch {
+                  my $error = $_;
+                  if (blessed($error) && $error->isa("HTTP::Response")) {
+                      $response = $error;
+                      $response->request($request);
+                  }
+                  else {
+                      my $full = $error;
+                      (my $status = $error) =~ s/\n.*//s;
+                      $status =~ s/ at .* line \d+.*//s;  # remove file/line number
+                      my $code = ($status =~ s/^(\d\d\d)\s+//) ? $1 : HTTP::Status::RC_INTERNAL_SERVER_ERROR;
+                      $response = _new_response($request, $code, $status, $full);
+                  }
+              };
+          }
+          elsif (!$response) {
+              $response = $protocol->request($request, $proxy,
+                                             $arg, $size, $self->{timeout});
+              # XXX: Should we die unless $response->is_success ???
+          }
+      }
+  
+      $response->request($request);  # record request for reference
+      $response->header("Client-Date" => HTTP::Date::time2str(time));
+  
+      $self->run_handlers("response_done", $response);
+  
+      $self->progress("end", $response);
+      return $response;
+  }
+  
+  
+  sub prepare_request
+  {
+      my($self, $request) = @_;
+      die "Method missing" unless $request->method;
+      my $url = $request->uri;
+      die "URL missing" unless $url;
+      die "URL must be absolute" unless $url->scheme;
+  
+      $self->run_handlers("request_preprepare", $request);
+  
+      if (my $def_headers = $self->{def_headers}) {
+  	for my $h ($def_headers->header_field_names) {
+  	    $request->init_header($h => [$def_headers->header($h)]);
+  	}
+      }
+  
+      $self->run_handlers("request_prepare", $request);
+  
+      return $request;
+  }
+  
+  
+  sub simple_request
+  {
+      my($self, $request, $arg, $size) = @_;
+  
+      # sanity check the request passed in
+      if (defined $request) {
+  	if (ref $request) {
+  	    Carp::croak("You need a request object, not a " . ref($request) . " object")
+  	      if ref($request) eq 'ARRAY' or ref($request) eq 'HASH' or
+  		 !$request->can('method') or !$request->can('uri');
+  	}
+  	else {
+  	    Carp::croak("You need a request object, not '$request'");
+  	}
+      }
+      else {
+          Carp::croak("No request object passed in");
+      }
+  
+      my $error;
+      try {
+          $request = $self->prepare_request($request);
+      }
+      catch {
+          $error = $_;
+          $error =~ s/ at .* line \d+.*//s;  # remove file/line number
+      };
+  
+      if ($error) {
+          return _new_response($request, HTTP::Status::RC_BAD_REQUEST, $error);
+      }
+      return $self->send_request($request, $arg, $size);
+  }
+  
+  
+  sub request {
+      my ($self, $request, $arg, $size, $previous) = @_;
+  
+      my $response = $self->simple_request($request, $arg, $size);
+      $response->previous($previous) if $previous;
+  
+      if ($response->redirects >= $self->{max_redirect}) {
+          if ($response->header('Location')) {
+              $response->header("Client-Warning" =>
+                  "Redirect loop detected (max_redirect = $self->{max_redirect})"
+              );
+          }
+          return $response;
+      }
+  
+      if (my $req = $self->run_handlers("response_redirect", $response)) {
+          return $self->request($req, $arg, $size, $response);
+      }
+  
+      my $code = $response->code;
+  
+      if (   $code == HTTP::Status::RC_MOVED_PERMANENTLY
+          or $code == HTTP::Status::RC_FOUND
+          or $code == HTTP::Status::RC_SEE_OTHER
+          or $code == HTTP::Status::RC_TEMPORARY_REDIRECT
+          or $code == HTTP::Status::RC_PERMANENT_REDIRECT)
+      {
+          my $referral = $request->clone;
+  
+          # These headers should never be forwarded
+          $referral->remove_header('Host', 'Cookie');
+  
+          if (   $referral->header('Referer')
+              && $request->uri->scheme eq 'https'
+              && $referral->uri->scheme eq 'http')
+          {
+              # RFC 2616, section 15.1.3.
+              # https -> http redirect, suppressing Referer
+              $referral->remove_header('Referer');
+          }
+  
+          if (   $code == HTTP::Status::RC_SEE_OTHER
+              || $code == HTTP::Status::RC_FOUND)
+          {
+              my $method = uc($referral->method);
+              unless ($method eq "GET" || $method eq "HEAD") {
+                  $referral->method("GET");
+                  $referral->content("");
+                  $referral->remove_content_headers;
+              }
+          }
+  
+          # And then we update the URL based on the Location:-header.
+          my $referral_uri = $response->header('Location');
+          {
+              # Some servers erroneously return a relative URL for redirects,
+              # so make it absolute if it not already is.
+              local $URI::ABS_ALLOW_RELATIVE_SCHEME = 1;
+              my $base = $response->base;
+              $referral_uri = "" unless defined $referral_uri;
+              $referral_uri
+                  = $HTTP::URI_CLASS->new($referral_uri, $base)->abs($base);
+          }
+          $referral->uri($referral_uri);
+  
+          return $response unless $self->redirect_ok($referral, $response);
+          return $self->request($referral, $arg, $size, $response);
+  
+      }
+      elsif ($code == HTTP::Status::RC_UNAUTHORIZED
+          || $code == HTTP::Status::RC_PROXY_AUTHENTICATION_REQUIRED)
+      {
+          my $proxy = ($code == HTTP::Status::RC_PROXY_AUTHENTICATION_REQUIRED);
+          my $ch_header
+              = $proxy || $request->method eq 'CONNECT'
+              ? "Proxy-Authenticate"
+              : "WWW-Authenticate";
+          my @challenges = $response->header($ch_header);
+          unless (@challenges) {
+              $response->header(
+                  "Client-Warning" => "Missing Authenticate header");
+              return $response;
+          }
+  
+          require HTTP::Headers::Util;
+          CHALLENGE: for my $challenge (@challenges) {
+              $challenge =~ tr/,/;/;    # "," is used to separate auth-params!!
+              ($challenge) = HTTP::Headers::Util::split_header_words($challenge);
+              my $scheme = shift(@$challenge);
+              shift(@$challenge);       # no value
+              $challenge = {@$challenge};    # make rest into a hash
+  
+              unless ($scheme =~ /^([a-z]+(?:-[a-z]+)*)$/) {
+                  $response->header(
+                      "Client-Warning" => "Bad authentication scheme '$scheme'");
+                  return $response;
+              }
+              $scheme = $1;                  # untainted now
+              my $class = "LWP::Authen::\u$scheme";
+              $class =~ tr/-/_/;
+  
+              no strict 'refs';
+              unless (%{"$class\::"}) {
+                  # try to load it
+                  my $error;
+                  try {
+                      (my $req = $class) =~ s{::}{/}g;
+                      $req .= '.pm' unless $req =~ /\.pm$/;
+                      require $req;
+                  }
+                  catch {
+                      $error = $_;
+                  };
+                  if ($error) {
+                      if ($error =~ /^Can\'t locate/) {
+                          $response->header("Client-Warning" =>
+                                  "Unsupported authentication scheme '$scheme'");
+                      }
+                      else {
+                          $response->header("Client-Warning" => $error);
+                      }
+                      next CHALLENGE;
+                  }
+              }
+              unless ($class->can("authenticate")) {
+                  $response->header("Client-Warning" =>
+                          "Unsupported authentication scheme '$scheme'");
+                  next CHALLENGE;
+              }
+              my $re = $class->authenticate($self, $proxy, $challenge, $response,
+                  $request, $arg, $size);
+  
+              next CHALLENGE if $re->code == HTTP::Status::RC_UNAUTHORIZED;
+              return $re;
+          }
+          return $response;
+      }
+      return $response;
+  }
+  
+  #
+  # Now the shortcuts...
+  #
+  sub get {
+      require HTTP::Request::Common;
+      my($self, @parameters) = @_;
+      my @suff = $self->_process_colonic_headers(\@parameters,1);
+      return $self->request( HTTP::Request::Common::GET( @parameters ), @suff );
+  }
+  
+  sub _maybe_copy_default_content_type {
+      my $self = shift;
+      my $req  = shift;
+  
+      my $default_ct = $self->default_header('Content-Type');
+      return unless defined $default_ct;
+  
+      # drop url
+      shift;
+  
+      # adapted from HTTP::Request::Common::request_type_with_data
+      my $content;
+      $content = shift if @_ and ref $_[0];
+  
+      # We only care about the final value, really
+      my $ct;
+  
+      my ($k, $v);
+      while (($k, $v) = splice(@_, 0, 2)) {
+          if (lc($k) eq 'content') {
+              $content = $v;
+          }
+          elsif (lc($k) eq 'content-type') {
+              $ct = $v;
+          }
+      }
+  
+      # Content-type provided and truthy? skip
+      return if $ct;
+  
+      # Content is not just a string? Then it must be x-www-form-urlencoded
+      return if defined $content && ref($content);
+  
+      # Provide default
+      $req->header('Content-Type' => $default_ct);
+  }
+  
+  sub post {
+      require HTTP::Request::Common;
+      my($self, @parameters) = @_;
+      my @suff = $self->_process_colonic_headers(\@parameters, (ref($parameters[1]) ? 2 : 1));
+      my $req = HTTP::Request::Common::POST(@parameters);
+      $self->_maybe_copy_default_content_type($req, @parameters);
+      return $self->request($req, @suff);
+  }
+  
+  
+  sub head {
+      require HTTP::Request::Common;
+      my($self, @parameters) = @_;
+      my @suff = $self->_process_colonic_headers(\@parameters,1);
+      return $self->request( HTTP::Request::Common::HEAD( @parameters ), @suff );
+  }
+  
+  sub patch {
+      require HTTP::Request::Common;
+      my($self, @parameters) = @_;
+      my @suff = $self->_process_colonic_headers(\@parameters, (ref($parameters[1]) ? 2 : 1));
+  
+      # this work-around is in place as HTTP::Request::Common
+      # did not implement a patch convenience method until
+      # version 6.12. Once we can bump the prereq to at least
+      # that version, we can use ::PATCH instead of this hack
+      my $req = HTTP::Request::Common::PUT(@parameters);
+      $req->method('PATCH');
+  
+      $self->_maybe_copy_default_content_type($req, @parameters);
+      return $self->request($req, @suff);
+  }
+  
+  sub put {
+      require HTTP::Request::Common;
+      my($self, @parameters) = @_;
+      my @suff = $self->_process_colonic_headers(\@parameters, (ref($parameters[1]) ? 2 : 1));
+      my $req = HTTP::Request::Common::PUT(@parameters);
+      $self->_maybe_copy_default_content_type($req, @parameters);
+      return $self->request($req, @suff);
+  }
+  
+  
+  sub delete {
+      require HTTP::Request::Common;
+      my($self, @parameters) = @_;
+      my @suff = $self->_process_colonic_headers(\@parameters,1);
+      return $self->request( HTTP::Request::Common::DELETE( @parameters ), @suff );
+  }
+  
+  
+  sub _process_colonic_headers {
+      # Process :content_cb / :content_file / :read_size_hint headers.
+      my($self, $args, $start_index) = @_;
+  
+      my($arg, $size);
+      for(my $i = $start_index; $i < @$args; $i += 2) {
+  	next unless defined $args->[$i];
+  
+  	#printf "Considering %s => %s\n", $args->[$i], $args->[$i + 1];
+  
+  	if($args->[$i] eq ':content_cb') {
+  	    # Some sanity-checking...
+  	    $arg = $args->[$i + 1];
+  	    Carp::croak("A :content_cb value can't be undef") unless defined $arg;
+  	    Carp::croak("A :content_cb value must be a coderef")
+  		unless ref $arg and UNIVERSAL::isa($arg, 'CODE');
+  
+  	}
+  	elsif ($args->[$i] eq ':content_file') {
+  	    $arg = $args->[$i + 1];
+  
+  	    # Some sanity-checking...
+  	    Carp::croak("A :content_file value can't be undef")
+  		unless defined $arg;
+  
+  	    unless ( defined openhandle($arg) ) {
+  		    Carp::croak("A :content_file value can't be a reference")
+  			if ref $arg;
+  		    Carp::croak("A :content_file value can't be \"\"")
+  			unless length $arg;
+  	    }
+  	}
+  	elsif ($args->[$i] eq ':read_size_hint') {
+  	    $size = $args->[$i + 1];
+  	    # Bother checking it?
+  
+  	}
+  	else {
+  	    next;
+  	}
+  	splice @$args, $i, 2;
+  	$i -= 2;
+      }
+  
+      # And return a suitable suffix-list for request(REQ,...)
+  
+      return             unless defined $arg;
+      return $arg, $size if     defined $size;
+      return $arg;
+  }
+  
+  
+  sub is_online {
+      my $self = shift;
+      return 1 if $self->get("http://www.msftncsi.com/ncsi.txt")->content eq "Microsoft NCSI";
+      return 1 if $self->get("http://www.apple.com")->content =~ m,<title>Apple</title>,;
+      return 0;
+  }
+  
+  
+  my @ANI = qw(- \ | /);
+  
+  sub progress {
+      my($self, $status, $m) = @_;
+      return unless $self->{show_progress};
+  
+      local($,, $\);
+      if ($status eq "begin") {
+          print STDERR "** ", $m->method, " ", $m->uri, " ==> ";
+          $self->{progress_start} = time;
+          $self->{progress_lastp} = "";
+          $self->{progress_ani} = 0;
+      }
+      elsif ($status eq "end") {
+          delete $self->{progress_lastp};
+          delete $self->{progress_ani};
+          print STDERR $m->status_line;
+          my $t = time - delete $self->{progress_start};
+          print STDERR " (${t}s)" if $t;
+          print STDERR "\n";
+      }
+      elsif ($status eq "tick") {
+          print STDERR "$ANI[$self->{progress_ani}++]\b";
+          $self->{progress_ani} %= @ANI;
+      }
+      else {
+          my $p = sprintf "%3.0f%%", $status * 100;
+          return if $p eq $self->{progress_lastp};
+          print STDERR "$p\b\b\b\b";
+          $self->{progress_lastp} = $p;
+      }
+      STDERR->flush;
+  }
+  
+  
+  #
+  # This whole allow/forbid thing is based on man 1 at's way of doing things.
+  #
+  sub is_protocol_supported
+  {
+      my($self, $scheme) = @_;
+      if (ref $scheme) {
+  	# assume we got a reference to an URI object
+  	$scheme = $scheme->scheme;
+      }
+      else {
+  	Carp::croak("Illegal scheme '$scheme' passed to is_protocol_supported")
+  	    if $scheme =~ /\W/;
+  	$scheme = lc $scheme;
+      }
+  
+      my $x;
+      if(ref($self) and $x       = $self->protocols_allowed) {
+        return 0 unless grep lc($_) eq $scheme, @$x;
+      }
+      elsif (ref($self) and $x = $self->protocols_forbidden) {
+        return 0 if grep lc($_) eq $scheme, @$x;
+      }
+  
+      local($SIG{__DIE__});  # protect against user defined die handlers
+      $x = LWP::Protocol::implementor($scheme);
+      return 1 if $x and $x ne 'LWP::Protocol::nogo';
+      return 0;
+  }
+  
+  
+  sub protocols_allowed      { shift->_elem('protocols_allowed'    , @_) }
+  sub protocols_forbidden    { shift->_elem('protocols_forbidden'  , @_) }
+  sub requests_redirectable  { shift->_elem('requests_redirectable', @_) }
+  
+  
+  sub redirect_ok
+  {
+      # RFC 2616, section 10.3.2 and 10.3.3 say:
+      #  If the 30[12] status code is received in response to a request other
+      #  than GET or HEAD, the user agent MUST NOT automatically redirect the
+      #  request unless it can be confirmed by the user, since this might
+      #  change the conditions under which the request was issued.
+  
+      # Note that this routine used to be just:
+      #  return 0 if $_[1]->method eq "POST";  return 1;
+  
+      my($self, $new_request, $response) = @_;
+      my $method = $response->request->method;
+      return 0 unless grep $_ eq $method,
+        @{ $self->requests_redirectable || [] };
+  
+      if ($new_request->uri->scheme eq 'file') {
+        $response->header("Client-Warning" =>
+  			"Can't redirect to a file:// URL!");
+        return 0;
+      }
+  
+      # Otherwise it's apparently okay...
+      return 1;
+  }
+  
+  sub credentials {
+      my $self   = shift;
+      my $netloc = lc(shift || '');
+      my $realm  = shift || "";
+      my $old    = $self->{basic_authentication}{$netloc}{$realm};
+      if (@_) {
+          $self->{basic_authentication}{$netloc}{$realm} = [@_];
+      }
+      return unless $old;
+      return @$old if wantarray;
+      return join(":", @$old);
+  }
+  
+  sub get_basic_credentials
+  {
+      my($self, $realm, $uri, $proxy) = @_;
+      return if $proxy;
+      return $self->credentials($uri->host_port, $realm);
+  }
+  
+  
+  sub timeout      { shift->_elem('timeout',      @_); }
+  sub local_address{ shift->_elem('local_address',@_); }
+  sub max_size     { shift->_elem('max_size',     @_); }
+  sub max_redirect { shift->_elem('max_redirect', @_); }
+  sub show_progress{ shift->_elem('show_progress', @_); }
+  sub send_te      { shift->_elem('send_te',      @_); }
+  
+  sub ssl_opts {
+      my $self = shift;
+      if (@_ == 1) {
+  	my $k = shift;
+  	return $self->{ssl_opts}{$k};
+      }
+      if (@_) {
+  	my $old;
+  	while (@_) {
+  	    my($k, $v) = splice(@_, 0, 2);
+  	    $old = $self->{ssl_opts}{$k} unless @_;
+  	    if (defined $v) {
+  		$self->{ssl_opts}{$k} = $v;
+  	    }
+  	    else {
+  		delete $self->{ssl_opts}{$k};
+  	    }
+  	}
+  	%{$self->{ssl_opts}} = (%{$self->{ssl_opts}}, @_);
+  	return $old;
+      }
+  
+      my @opts= sort keys %{$self->{ssl_opts}};
+      return @opts;
+  }
+  
+  sub parse_head {
+      my $self = shift;
+      if (@_) {
+          my $flag = shift;
+          my $parser;
+          my $old = $self->set_my_handler("response_header", $flag ? sub {
+                 my($response, $ua) = @_;
+                 require HTML::HeadParser;
+                 $parser = HTML::HeadParser->new;
+                 $parser->xml_mode(1) if $response->content_is_xhtml;
+                 $parser->utf8_mode(1) if $] >= 5.008 && $HTML::Parser::VERSION >= 3.40;
+  
+                 push(@{$response->{handlers}{response_data}}, {
+  		   callback => sub {
+  		       return unless $parser;
+  		       unless ($parser->parse($_[3])) {
+  			   my $h = $parser->header;
+  			   my $r = $_[0];
+  			   for my $f ($h->header_field_names) {
+  			       $r->init_header($f, [$h->header($f)]);
+  			   }
+  			   undef($parser);
+  		       }
+  		   },
+  	       });
+  
+              } : undef,
+              m_media_type => "html",
+          );
+          return !!$old;
+      }
+      else {
+          return !!$self->get_my_handler("response_header");
+      }
+  }
+  
+  sub cookie_jar {
+      my $self = shift;
+      my $old = $self->{cookie_jar};
+      if (@_) {
+  	my $jar = shift;
+  	if (ref($jar) eq "HASH") {
+  	    require HTTP::Cookies;
+  	    $jar = HTTP::Cookies->new(%$jar);
+  	}
+  	$self->{cookie_jar} = $jar;
+          $self->set_my_handler("request_prepare",
+              $jar ? sub {
+                  return if $_[0]->header("Cookie");
+                  $jar->add_cookie_header($_[0]);
+              } : undef,
+          );
+          $self->set_my_handler("response_done",
+              $jar ? sub { $jar->extract_cookies($_[0]); } : undef,
+          );
+      }
+      $old;
+  }
+  
+  sub default_headers {
+      my $self = shift;
+      my $old = $self->{def_headers} ||= HTTP::Headers->new;
+      if (@_) {
+  	Carp::croak("default_headers not set to HTTP::Headers compatible object")
+  	    unless @_ == 1 && $_[0]->can("header_field_names");
+  	$self->{def_headers} = shift;
+      }
+      return $old;
+  }
+  
+  sub default_header {
+      my $self = shift;
+      return $self->default_headers->header(@_);
+  }
+  
+  sub _agent { "libwww-perl/$VERSION" }
+  
+  sub agent {
+      my $self = shift;
+      if (@_) {
+  	my $agent = shift;
+          if ($agent) {
+              $agent .= $self->_agent if $agent =~ /\s+$/;
+          }
+          else {
+              undef($agent)
+          }
+          return $self->default_header("User-Agent", $agent);
+      }
+      return $self->default_header("User-Agent");
+  }
+  
+  sub from {  # legacy
+      my $self = shift;
+      return $self->default_header("From", @_);
+  }
+  
+  
+  sub conn_cache {
+      my $self = shift;
+      my $old = $self->{conn_cache};
+      if (@_) {
+  	my $cache = shift;
+  	if (ref($cache) eq "HASH") {
+  	    require LWP::ConnCache;
+  	    $cache = LWP::ConnCache->new(%$cache);
+  	}
+  	$self->{conn_cache} = $cache;
+      }
+      $old;
+  }
+  
+  
+  sub add_handler {
+      my($self, $phase, $cb, %spec) = @_;
+      $spec{line} ||= join(":", (caller)[1,2]);
+      my $conf = $self->{handlers}{$phase} ||= do {
+          require HTTP::Config;
+          HTTP::Config->new;
+      };
+      $conf->add(%spec, callback => $cb);
+  }
+  
+  sub set_my_handler {
+      my($self, $phase, $cb, %spec) = @_;
+      $spec{owner} = (caller(1))[3] unless exists $spec{owner};
+      $self->remove_handler($phase, %spec);
+      $spec{line} ||= join(":", (caller)[1,2]);
+      $self->add_handler($phase, $cb, %spec) if $cb;
+  }
+  
+  sub get_my_handler {
+      my $self = shift;
+      my $phase = shift;
+      my $init = pop if @_ % 2;
+      my %spec = @_;
+      my $conf = $self->{handlers}{$phase};
+      unless ($conf) {
+          return unless $init;
+          require HTTP::Config;
+          $conf = $self->{handlers}{$phase} = HTTP::Config->new;
+      }
+      $spec{owner} = (caller(1))[3] unless exists $spec{owner};
+      my @h = $conf->find(%spec);
+      if (!@h && $init) {
+          if (ref($init) eq "CODE") {
+              $init->(\%spec);
+          }
+          elsif (ref($init) eq "HASH") {
+              $spec{$_}= $init->{$_}
+                  for keys %$init;
+          }
+          $spec{callback} ||= sub {};
+          $spec{line} ||= join(":", (caller)[1,2]);
+          $conf->add(\%spec);
+          return \%spec;
+      }
+      return wantarray ? @h : $h[0];
+  }
+  
+  sub remove_handler {
+      my($self, $phase, %spec) = @_;
+      if ($phase) {
+          my $conf = $self->{handlers}{$phase} || return;
+          my @h = $conf->remove(%spec);
+          delete $self->{handlers}{$phase} if $conf->empty;
+          return @h;
+      }
+  
+      return unless $self->{handlers};
+      return map $self->remove_handler($_), sort keys %{$self->{handlers}};
+  }
+  
+  sub handlers {
+      my($self, $phase, $o) = @_;
+      my @h;
+      if ($o->{handlers} && $o->{handlers}{$phase}) {
+          push(@h, @{$o->{handlers}{$phase}});
+      }
+      if (my $conf = $self->{handlers}{$phase}) {
+          push(@h, $conf->matching($o));
+      }
+      return @h;
+  }
+  
+  sub run_handlers {
+      my($self, $phase, $o) = @_;
+  
+      # here we pass $_[2] to the callbacks, instead of $o, so that they
+      # can assign to it; e.g. request_prepare is documented to allow
+      # that
+      if (defined(wantarray)) {
+          for my $h ($self->handlers($phase, $o)) {
+              my $ret = $h->{callback}->($_[2], $self, $h);
+              return $ret if $ret;
+          }
+          return undef;
+      }
+  
+      for my $h ($self->handlers($phase, $o)) {
+          $h->{callback}->($_[2], $self, $h);
+      }
+  }
+  
+  
+  # deprecated
+  sub use_eval   { shift->_elem('use_eval',  @_); }
+  sub use_alarm
+  {
+      Carp::carp("LWP::UserAgent->use_alarm(BOOL) is a no-op")
+  	if @_ > 1 && $^W;
+      "";
+  }
+  
+  
+  sub clone
+  {
+      my $self = shift;
+      my $copy = bless { %$self }, ref $self;  # copy most fields
+  
+      delete $copy->{handlers};
+      delete $copy->{conn_cache};
+  
+      # copy any plain arrays and hashes; known not to need recursive copy
+      for my $k (qw(proxy no_proxy requests_redirectable ssl_opts)) {
+          next unless $copy->{$k};
+          if (ref($copy->{$k}) eq "ARRAY") {
+              $copy->{$k} = [ @{$copy->{$k}} ];
+          }
+          elsif (ref($copy->{$k}) eq "HASH") {
+              $copy->{$k} = { %{$copy->{$k}} };
+          }
+      }
+  
+      if ($self->{def_headers}) {
+          $copy->{def_headers} = $self->{def_headers}->clone;
+      }
+  
+      # re-enable standard handlers
+      $copy->parse_head($self->parse_head);
+  
+      # no easy way to clone the cookie jar; so let's just remove it for now
+      $copy->cookie_jar(undef);
+  
+      $copy;
+  }
+  
+  
+  sub mirror
+  {
+      my($self, $url, $file) = @_;
+  
+      die "Local file name is missing" unless defined $file && length $file;
+  
+      my $request = HTTP::Request->new('GET', $url);
+  
+      # If the file exists, add a cache-related header
+      if ( -e $file ) {
+          my ($mtime) = ( stat($file) )[9];
+          if ($mtime) {
+              $request->header( 'If-Modified-Since' => HTTP::Date::time2str($mtime) );
+          }
+      }
+  
+      require File::Temp;
+      my ($tmpfh, $tmpfile) = File::Temp::tempfile("$file-XXXXXX");
+      close($tmpfh) or die "Could not close tmpfile '$tmpfile': $!";
+  
+      my $response = $self->request($request, $tmpfile);
+      if ( $response->header('X-Died') ) {
+          unlink($tmpfile);
+          die $response->header('X-Died');
+      }
+  
+      # Only fetching a fresh copy of the file would be considered success.
+      # If the file was not modified, "304" would returned, which
+      # is considered by HTTP::Status to be a "redirect", /not/ "success"
+      if ( $response->is_success ) {
+          my @stat        = stat($tmpfile) or die "Could not stat tmpfile '$tmpfile': $!";
+          my $file_length = $stat[7];
+          my ($content_length) = $response->header('Content-length');
+  
+          if ( defined $content_length and $file_length < $content_length ) {
+              unlink($tmpfile);
+              die "Transfer truncated: only $file_length out of $content_length bytes received\n";
+          }
+          elsif ( defined $content_length and $file_length > $content_length ) {
+              unlink($tmpfile);
+              die "Content-length mismatch: expected $content_length bytes, got $file_length\n";
+          }
+          # The file was the expected length.
+          else {
+              # Replace the stale file with a fresh copy
+              # File::Copy will attempt to do it atomically,
+              # and fall back to a delete + copy if that fails.
+              File::Copy::move( $tmpfile, $file )
+                  or die "Cannot rename '$tmpfile' to '$file': $!\n";
+  
+              # Set standard file permissions if umask is supported.
+              # If not, leave what File::Temp created in effect.
+              if ( defined(my $umask = umask()) ) {
+                  my $mode = 0666 &~ $umask;
+                  chmod $mode, $file
+                      or die sprintf("Cannot chmod %o '%s': %s\n", $mode, $file, $!);
+              }
+  
+              # make sure the file has the same last modification time
+              if ( my $lm = $response->last_modified ) {
+                  utime $lm, $lm, $file
+                      or warn "Cannot update modification time of '$file': $!\n";
+              }
+          }
+      }
+      # The local copy is fresh enough, so just delete the temp file
+      else {
+          unlink($tmpfile);
+      }
+      return $response;
+  }
+  
+  
+  sub _need_proxy {
+      my($req, $ua) = @_;
+      return if exists $req->{proxy};
+      my $proxy = $ua->{proxy}{$req->uri->scheme} || return;
+      if ($ua->{no_proxy}) {
+          if (my $host = eval { $req->uri->host }) {
+              for my $domain (@{$ua->{no_proxy}}) {
+                  if ($host =~ /\Q$domain\E$/) {
+                      return;
+                  }
+              }
+          }
+      }
+      $req->{proxy} = $HTTP::URI_CLASS->new($proxy);
+  }
+  
+  
+  sub proxy {
+      my $self = shift;
+      my $key  = shift;
+      if (!@_ && ref $key eq 'ARRAY') {
+          die 'odd number of items in proxy arrayref!' unless @{$key} % 2 == 0;
+  
+          # This map reads the elements of $key 2 at a time
+          return
+              map { $self->proxy($key->[2 * $_], $key->[2 * $_ + 1]) }
+              (0 .. @{$key} / 2 - 1);
+      }
+      return map { $self->proxy($_, @_) } @$key if ref $key;
+  
+      Carp::croak("'$key' is not a valid URI scheme") unless $key =~ /^$URI::scheme_re\z/;
+      my $old = $self->{'proxy'}{$key};
+      if (@_) {
+          my $url = shift;
+          if (defined($url) && length($url)) {
+              Carp::croak("Proxy must be specified as absolute URI; '$url' is not") unless $url =~ /^$URI::scheme_re:/;
+              Carp::croak("Bad http proxy specification '$url'") if $url =~ /^https?:/ && $url !~ m,^https?://[\w[],;
+          }
+          $self->{proxy}{$key} = $url;
+          $self->set_my_handler("request_preprepare", \&_need_proxy)
+      }
+      return $old;
+  }
+  
+  
+  sub env_proxy {
+      my ($self) = @_;
+      require Encode;
+      require Encode::Locale;
+      my $env_request_method= $ENV{REQUEST_METHOD};
+      my %seen;
+      foreach my $k (sort keys %ENV) {
+          my $real_key= $k;
+          my $v= $ENV{$k}
+              or next;
+          if ( $env_request_method ) {
+              # Need to be careful when called in the CGI environment, as
+              # the HTTP_PROXY variable is under control of that other guy.
+              next if $k =~ /^HTTP_/;
+              $k = "HTTP_PROXY" if $k eq "CGI_HTTP_PROXY";
+          }
+  	$k = lc($k);
+          if (my $from_key= $seen{$k}) {
+              warn "Environment contains multiple differing definitions for '$k'.\n".
+                   "Using value from '$from_key' ($ENV{$from_key}) and ignoring '$real_key' ($v)"
+                  if $v ne $ENV{$from_key};
+              next;
+          } else {
+              $seen{$k}= $real_key;
+          }
+  
+  	next unless $k =~ /^(.*)_proxy$/;
+  	$k = $1;
+  	if ($k eq 'no') {
+  	    $self->no_proxy(split(/\s*,\s*/, $v));
+  	}
+  	else {
+              # Ignore random _proxy variables, allow only valid schemes
+              next unless $k =~ /^$URI::scheme_re\z/;
+              # Ignore xxx_proxy variables if xxx isn't a supported protocol
+              next unless LWP::Protocol::implementor($k);
+  	    $self->proxy($k, Encode::decode(locale => $v));
+  	}
+      }
+  }
+  
+  
+  sub no_proxy {
+      my($self, @no) = @_;
+      if (@no) {
+  	push(@{ $self->{'no_proxy'} }, @no);
+      }
+      else {
+  	$self->{'no_proxy'} = [];
+      }
+  }
+  
+  
+  sub _new_response {
+      my($request, $code, $message, $content) = @_;
+      $message ||= HTTP::Status::status_message($code);
+      my $response = HTTP::Response->new($code, $message);
+      $response->request($request);
+      $response->header("Client-Date" => HTTP::Date::time2str(time));
+      $response->header("Client-Warning" => "Internal response");
+      $response->header("Content-Type" => "text/plain");
+      $response->content($content || "$code $message\n");
+      return $response;
+  }
+  
+  
+  1;
+  
+  __END__
+  
+  =pod
+  
+  =head1 NAME
+  
+  LWP::UserAgent - Web user agent class
+  
+  =head1 SYNOPSIS
+  
+      use strict;
+      use warnings;
+  
+      use LWP::UserAgent ();
+  
+      my $ua = LWP::UserAgent->new(timeout => 10);
+      $ua->env_proxy;
+  
+      my $response = $ua->get('http://example.com');
+  
+      if ($response->is_success) {
+          print $response->decoded_content;
+      }
+      else {
+          die $response->status_line;
+      }
+  
+  Extra layers of security (note the C<cookie_jar> and C<protocols_allowed>):
+  
+      use strict;
+      use warnings;
+  
+      use HTTP::CookieJar::LWP ();
+      use LWP::UserAgent       ();
+  
+      my $jar = HTTP::CookieJar::LWP->new;
+      my $ua  = LWP::UserAgent->new(
+          cookie_jar        => $jar,
+          protocols_allowed => ['http', 'https'],
+          timeout           => 10,
+      );
+  
+      $ua->env_proxy;
+  
+      my $response = $ua->get('http://example.com');
+  
+      if ($response->is_success) {
+          print $response->decoded_content;
+      }
+      else {
+          die $response->status_line;
+      }
+  
+  =head1 DESCRIPTION
+  
+  The L<LWP::UserAgent> is a class implementing a web user agent.
+  L<LWP::UserAgent> objects can be used to dispatch web requests.
+  
+  In normal use the application creates an L<LWP::UserAgent> object, and
+  then configures it with values for timeouts, proxies, name, etc. It
+  then creates an instance of L<HTTP::Request> for the request that
+  needs to be performed. This request is then passed to one of the
+  request method the UserAgent, which dispatches it using the relevant
+  protocol, and returns a L<HTTP::Response> object.  There are
+  convenience methods for sending the most common request types:
+  L<LWP::UserAgent/get>, L<LWP::UserAgent/head>, L<LWP::UserAgent/post>,
+  L<LWP::UserAgent/put> and L<LWP::UserAgent/delete>.  When using these
+  methods, the creation of the request object is hidden as shown in the
+  synopsis above.
+  
+  The basic approach of the library is to use HTTP-style communication
+  for all protocol schemes.  This means that you will construct
+  L<HTTP::Request> objects and receive L<HTTP::Response> objects even
+  for non-HTTP resources like I<gopher> and I<ftp>.  In order to achieve
+  even more similarity to HTTP-style communications, I<gopher> menus and
+  file directories are converted to HTML documents.
+  
+  =head1 CONSTRUCTOR METHODS
+  
+  The following constructor methods are available:
+  
+  =head2 clone
+  
+      my $ua2 = $ua->clone;
+  
+  Returns a copy of the L<LWP::UserAgent> object.
+  
+  B<CAVEAT>: Please be aware that the clone method does not copy or clone your
+  C<cookie_jar> attribute. Due to the limited restrictions on what can be used
+  for your cookie jar, there is no way to clone the attribute. The C<cookie_jar>
+  attribute will be C<undef> in the new object instance.
+  
+  =head2 new
+  
+      my $ua = LWP::UserAgent->new( %options )
+  
+  This method constructs a new L<LWP::UserAgent> object and returns it.
+  Key/value pair arguments may be provided to set up the initial state.
+  The following options correspond to attribute methods described below:
+  
+     KEY                     DEFAULT
+     -----------             --------------------
+     agent                   "libwww-perl/#.###"
+     conn_cache              undef
+     cookie_jar              undef
+     default_headers         HTTP::Headers->new
+     from                    undef
+     local_address           undef
+     max_redirect            7
+     max_size                undef
+     no_proxy                []
+     parse_head              1
+     protocols_allowed       undef
+     protocols_forbidden     undef
+     proxy                   undef
+     requests_redirectable   ['GET', 'HEAD']
+     ssl_opts                { verify_hostname => 1 }
+     timeout                 180
+  
+  The following additional options are also accepted: If the C<env_proxy> option
+  is passed in with a true value, then proxy settings are read from environment
+  variables (see L<LWP::UserAgent/env_proxy>). If C<env_proxy> isn't provided, the
+  C<PERL_LWP_ENV_PROXY> environment variable controls if
+  L<LWP::UserAgent/env_proxy> is called during initialization.  If the
+  C<keep_alive> option value is defined and non-zero, then an C<LWP::ConnCache> is set up (see
+  L<LWP::UserAgent/conn_cache>).  The C<keep_alive> value is passed on as the
+  C<total_capacity> for the connection cache.
+  
+  C<proxy> must be set as an arrayref of key/value pairs. C<no_proxy> takes an
+  arrayref of domains.
+  
+  =head1 ATTRIBUTES
+  
+  The settings of the configuration attributes modify the behaviour of the
+  L<LWP::UserAgent> when it dispatches requests.  Most of these can also
+  be initialized by options passed to the constructor method.
+  
+  The following attribute methods are provided.  The attribute value is
+  left unchanged if no argument is given.  The return value from each
+  method is the old attribute value.
+  
+  =head2 agent
+  
+      my $agent = $ua->agent;
+      $ua->agent('Checkbot/0.4 ');    # append the default to the end
+      $ua->agent('Mozilla/5.0');
+      $ua->agent("");                 # don't identify
+  
+  Get/set the product token that is used to identify the user agent on
+  the network. The agent value is sent as the C<User-Agent> header in
+  the requests.
+  
+  The default is a string of the form C<libwww-perl/#.###>, where C<#.###> is
+  substituted with the version number of this library.
+  
+  If the provided string ends with space, the default C<libwww-perl/#.###>
+  string is appended to it.
+  
+  The user agent string should be one or more simple product identifiers
+  with an optional version number separated by the C</> character.
+  
+  =head2 conn_cache
+  
+      my $cache_obj = $ua->conn_cache;
+      $ua->conn_cache( $cache_obj );
+  
+  Get/set the L<LWP::ConnCache> object to use.  See L<LWP::ConnCache>
+  for details.
+  
+  =head2 cookie_jar
+  
+      my $jar = $ua->cookie_jar;
+      $ua->cookie_jar( $cookie_jar_obj );
+  
+  Get/set the cookie jar object to use.  The only requirement is that
+  the cookie jar object must implement the C<extract_cookies($response)> and
+  C<add_cookie_header($request)> methods.  These methods will then be
+  invoked by the user agent as requests are sent and responses are
+  received.  Normally this will be a L<HTTP::Cookies> object or some
+  subclass.  You are, however, encouraged to use L<HTTP::CookieJar::LWP>
+  instead.  See L</"BEST PRACTICES"> for more information.
+  
+      use HTTP::CookieJar::LWP ();
+  
+      my $jar = HTTP::CookieJar::LWP->new;
+      my $ua = LWP::UserAgent->new( cookie_jar => $jar );
+  
+      # or after object creation
+      $ua->cookie_jar( $cookie_jar );
+  
+  The default is to have no cookie jar, i.e. never automatically add
+  C<Cookie> headers to the requests.
+  
+  Shortcut: If a reference to a plain hash is passed in, it is replaced with an
+  instance of L<HTTP::Cookies> that is initialized based on the hash. This form
+  also automatically loads the L<HTTP::Cookies> module.  It means that:
+  
+    $ua->cookie_jar({ file => "$ENV{HOME}/.cookies.txt" });
+  
+  is really just a shortcut for:
+  
+    require HTTP::Cookies;
+    $ua->cookie_jar(HTTP::Cookies->new(file => "$ENV{HOME}/.cookies.txt"));
+  
+  =head2 credentials
+  
+      my $creds = $ua->credentials();
+      $ua->credentials( $netloc, $realm );
+      $ua->credentials( $netloc, $realm, $uname, $pass );
+      $ua->credentials("www.example.com:80", "Some Realm", "foo", "secret");
+  
+  Get/set the user name and password to be used for a realm.
+  
+  The C<$netloc> is a string of the form C<< <host>:<port> >>.  The username and
+  password will only be passed to this server.
+  
+  =head2 default_header
+  
+      $ua->default_header( $field );
+      $ua->default_header( $field => $value );
+      $ua->default_header('Accept-Encoding' => scalar HTTP::Message::decodable());
+      $ua->default_header('Accept-Language' => "no, en");
+  
+  This is just a shortcut for
+  C<< $ua->default_headers->header( $field => $value ) >>.
+  
+  =head2 default_headers
+  
+      my $headers = $ua->default_headers;
+      $ua->default_headers( $headers_obj );
+  
+  Get/set the headers object that will provide default header values for
+  any requests sent.  By default this will be an empty L<HTTP::Headers>
+  object.
+  
+  =head2 from
+  
+      my $from = $ua->from;
+      $ua->from('foo@bar.com');
+  
+  Get/set the email address for the human user who controls
+  the requesting user agent.  The address should be machine-usable, as
+  defined in L<RFC2822|https://tools.ietf.org/html/rfc2822>. The C<from> value
+  is sent as the C<From> header in the requests.
+  
+  The default is to not send a C<From> header.  See
+  L<LWP::UserAgent/default_headers> for the more general interface that allow
+  any header to be defaulted.
+  
+  
+  =head2 local_address
+  
+      my $address = $ua->local_address;
+      $ua->local_address( $address );
+  
+  Get/set the local interface to bind to for network connections.  The interface
+  can be specified as a hostname or an IP address.  This value is passed as the
+  C<LocalAddr> argument to L<IO::Socket::INET>.
+  
+  =head2 max_redirect
+  
+      my $max = $ua->max_redirect;
+      $ua->max_redirect( $n );
+  
+  This reads or sets the object's limit of how many times it will obey
+  redirection responses in a given request cycle.
+  
+  By default, the value is C<7>. This means that if you call L<LWP::UserAgent/request>
+  and the response is a redirect elsewhere which is in turn a
+  redirect, and so on seven times, then LWP gives up after that seventh
+  request.
+  
+  =head2 max_size
+  
+      my $size = $ua->max_size;
+      $ua->max_size( $bytes );
+  
+  Get/set the size limit for response content.  The default is C<undef>,
+  which means that there is no limit.  If the returned response content
+  is only partial, because the size limit was exceeded, then a
+  C<Client-Aborted> header will be added to the response.  The content
+  might end up longer than C<max_size> as we abort once appending a
+  chunk of data makes the length exceed the limit.  The C<Content-Length>
+  header, if present, will indicate the length of the full content and
+  will normally not be the same as C<< length($res->content) >>.
+  
+  =head2 parse_head
+  
+      my $bool = $ua->parse_head;
+      $ua->parse_head( $boolean );
+  
+  Get/set a value indicating whether we should initialize response
+  headers from the E<lt>head> section of HTML documents. The default is
+  true. I<Do not turn this off> unless you know what you are doing.
+  
+  =head2 protocols_allowed
+  
+      my $aref = $ua->protocols_allowed;      # get allowed protocols
+      $ua->protocols_allowed( \@protocols );  # allow ONLY these
+      $ua->protocols_allowed(undef);          # delete the list
+      $ua->protocols_allowed(['http',]);      # ONLY allow http
+  
+  By default, an object has neither a C<protocols_allowed> list, nor a
+  L<LWP::UserAgent/protocols_forbidden> list.
+  
+  This reads (or sets) this user agent's list of protocols that the
+  request methods will exclusively allow.  The protocol names are case
+  insensitive.
+  
+  For example: C<< $ua->protocols_allowed( [ 'http', 'https'] ); >>
+  means that this user agent will I<allow only> those protocols,
+  and attempts to use this user agent to access URLs with any other
+  schemes (like C<ftp://...>) will result in a 500 error.
+  
+  Note that having a C<protocols_allowed> list causes any
+  L<LWP::UserAgent/protocols_forbidden> list to be ignored.
+  
+  =head2 protocols_forbidden
+  
+      my $aref = $ua->protocols_forbidden;    # get the forbidden list
+      $ua->protocols_forbidden(\@protocols);  # do not allow these
+      $ua->protocols_forbidden(['http',]);    # All http reqs get a 500
+      $ua->protocols_forbidden(undef);        # delete the list
+  
+  This reads (or sets) this user agent's list of protocols that the
+  request method will I<not> allow. The protocol names are case
+  insensitive.
+  
+  For example: C<< $ua->protocols_forbidden( [ 'file', 'mailto'] ); >>
+  means that this user agent will I<not> allow those protocols, and
+  attempts to use this user agent to access URLs with those schemes
+  will result in a 500 error.
+  
+  =head2 requests_redirectable
+  
+      my $aref = $ua->requests_redirectable;
+      $ua->requests_redirectable( \@requests );
+      $ua->requests_redirectable(['GET', 'HEAD',]); # the default
+  
+  This reads or sets the object's list of request names that
+  L<LWP::UserAgent/redirect_ok> will allow redirection for. By default, this
+  is C<['GET', 'HEAD']>, as per L<RFC 2616|https://tools.ietf.org/html/rfc2616>.
+  To change to include C<POST>, consider:
+  
+     push @{ $ua->requests_redirectable }, 'POST';
+  
+  =head2 send_te
+  
+      my $bool = $ua->send_te;
+      $ua->send_te( $boolean );
+  
+  If true, will send a C<TE> header along with the request. The default is
+  true. Set it to false to disable the C<TE> header for systems who can't
+  handle it.
+  
+  =head2 show_progress
+  
+      my $bool = $ua->show_progress;
+      $ua->show_progress( $boolean );
+  
+  Get/set a value indicating whether a progress bar should be displayed
+  on the terminal as requests are processed. The default is false.
+  
+  =head2 ssl_opts
+  
+      my @keys = $ua->ssl_opts;
+      my $val = $ua->ssl_opts( $key );
+      $ua->ssl_opts( $key => $value );
+  
+  Get/set the options for SSL connections.  Without argument return the list
+  of options keys currently set.  With a single argument return the current
+  value for the given option.  With 2 arguments set the option value and return
+  the old.  Setting an option to the value C<undef> removes this option.
+  
+  The options that LWP relates to are:
+  
+  =over
+  
+  =item C<verify_hostname> => $bool
+  
+  When TRUE LWP will for secure protocol schemes ensure it connects to servers
+  that have a valid certificate matching the expected hostname.  If FALSE no
+  checks are made and you can't be sure that you communicate with the expected peer.
+  The no checks behaviour was the default for libwww-perl-5.837 and earlier releases.
+  
+  This option is initialized from the C<PERL_LWP_SSL_VERIFY_HOSTNAME> environment
+  variable.  If this environment variable isn't set; then C<verify_hostname>
+  defaults to 1.
+  
+  =item C<SSL_ca_file> => $path
+  
+  The path to a file containing Certificate Authority certificates.
+  A default setting for this option is provided by checking the environment
+  variables C<PERL_LWP_SSL_CA_FILE> and C<HTTPS_CA_FILE> in order.
+  
+  =item C<SSL_ca_path> => $path
+  
+  The path to a directory containing files containing Certificate Authority
+  certificates.
+  A default setting for this option is provided by checking the environment
+  variables C<PERL_LWP_SSL_CA_PATH> and C<HTTPS_CA_DIR> in order.
+  
+  =back
+  
+  Other options can be set and are processed directly by the SSL Socket implementation
+  in use.  See L<IO::Socket::SSL> or L<Net::SSL> for details.
+  
+  The libwww-perl core no longer bundles protocol plugins for SSL.  You will need
+  to install L<LWP::Protocol::https> separately to enable support for processing
+  https-URLs.
+  
+  =head2 timeout
+  
+      my $secs = $ua->timeout;
+      $ua->timeout( $secs );
+  
+  Get/set the timeout value in seconds. The default value is
+  180 seconds, i.e. 3 minutes.
+  
+  The request is aborted if no activity on the connection to the server
+  is observed for C<timeout> seconds.  This means that the time it takes
+  for the complete transaction and the L<LWP::UserAgent/request> method to
+  actually return might be longer.
+  
+  When a request times out, a response object is still returned.  The response
+  will have a standard HTTP Status Code (500).  This response will have the
+  "Client-Warning" header set to the value of "Internal response".  See the
+  L<LWP::UserAgent/get> method description below for further details.
+  
+  =head1 PROXY ATTRIBUTES
+  
+  The following methods set up when requests should be passed via a
+  proxy server.
+  
+  =head2 env_proxy
+  
+      $ua->env_proxy;
+  
+  Load proxy settings from C<*_proxy> environment variables.  You might
+  specify proxies like this (sh-syntax):
+  
+    gopher_proxy=http://proxy.my.place/
+    wais_proxy=http://proxy.my.place/
+    no_proxy="localhost,example.com"
+    export gopher_proxy wais_proxy no_proxy
+  
+  csh or tcsh users should use the C<setenv> command to define these
+  environment variables.
+  
+  On systems with case insensitive environment variables there exists a
+  name clash between the CGI environment variables and the C<HTTP_PROXY>
+  environment variable normally picked up by C<env_proxy>.  Because of
+  this C<HTTP_PROXY> is not honored for CGI scripts.  The
+  C<CGI_HTTP_PROXY> environment variable can be used instead.
+  
+  =head2 no_proxy
+  
+      $ua->no_proxy( @domains );
+      $ua->no_proxy('localhost', 'example.com');
+      $ua->no_proxy(); # clear the list
+  
+  Do not proxy requests to the given domains.  Calling C<no_proxy> without
+  any domains clears the list of domains.
+  
+  =head2 proxy
+  
+      $ua->proxy(\@schemes, $proxy_url)
+      $ua->proxy(['http', 'ftp'], 'http://proxy.sn.no:8001/');
+  
+      # For a single scheme:
+      $ua->proxy($scheme, $proxy_url)
+      $ua->proxy('gopher', 'http://proxy.sn.no:8001/');
+  
+      # To set multiple proxies at once:
+      $ua->proxy([
+          ftp => 'http://ftp.example.com:8001/',
+          [ 'http', 'https' ] => 'http://http.example.com:8001/',
+      ]);
+  
+  Set/retrieve proxy URL for a scheme.
+  
+  The first form specifies that the URL is to be used as a proxy for
+  access methods listed in the list in the first method argument,
+  i.e. C<http> and C<ftp>.
+  
+  The second form shows a shorthand form for specifying
+  proxy URL for a single access scheme.
+  
+  The third form demonstrates setting multiple proxies at once. This is also
+  the only form accepted by the constructor.
+  
+  =head1 HANDLERS
+  
+  Handlers are code that injected at various phases during the
+  processing of requests.  The following methods are provided to manage
+  the active handlers:
+  
+  =head2 add_handler
+  
+      $ua->add_handler( $phase => \&cb, %matchspec )
+  
+  Add handler to be invoked in the given processing phase.  For how to
+  specify C<%matchspec> see L<HTTP::Config/"Matching">.
+  
+  The possible values C<$phase> and the corresponding callback signatures are as
+  follows.  Note that the handlers are documented in the order in which they will
+  be run, which is:
+  
+      request_preprepare
+      request_prepare
+      request_send
+      response_header
+      response_data
+      response_done
+      response_redirect
+  
+  =over
+  
+  =item request_preprepare => sub { my($request, $ua, $handler) = @_; ... }
+  
+  The handler is called before the C<request_prepare> and other standard
+  initialization of the request.  This can be used to set up headers
+  and attributes that the C<request_prepare> handler depends on.  Proxy
+  initialization should take place here; but in general don't register
+  handlers for this phase.
+  
+  =item request_prepare => sub { my($request, $ua, $handler) = @_; ... }
+  
+  The handler is called before the request is sent and can modify the
+  request any way it see fit.  This can for instance be used to add
+  certain headers to specific requests.
+  
+  The method can assign a new request object to C<$_[0]> to replace the
+  request that is sent fully.
+  
+  The return value from the callback is ignored.  If an exception is
+  raised it will abort the request and make the request method return a
+  "400 Bad request" response.
+  
+  =item request_send => sub { my($request, $ua, $handler) = @_; ... }
+  
+  This handler gets a chance of handling requests before they're sent to the
+  protocol handlers.  It should return an L<HTTP::Response> object if it
+  wishes to terminate the processing; otherwise it should return nothing.
+  
+  The C<response_header> and C<response_data> handlers will not be
+  invoked for this response, but the C<response_done> will be.
+  
+  =item response_header => sub { my($response, $ua, $handler) = @_; ... }
+  
+  This handler is called right after the response headers have been
+  received, but before any content data.  The handler might set up
+  handlers for data and might croak to abort the request.
+  
+  The handler might set the C<< $response->{default_add_content} >> value to
+  control if any received data should be added to the response object
+  directly.  This will initially be false if the C<< $ua->request() >> method
+  was called with a C<$content_file> or C<$content_cb argument>; otherwise true.
+  
+  =item response_data => sub { my($response, $ua, $handler, $data) = @_; ... }
+  
+  This handler is called for each chunk of data received for the
+  response.  The handler might croak to abort the request.
+  
+  This handler needs to return a TRUE value to be called again for
+  subsequent chunks for the same request.
+  
+  =item response_done => sub { my($response, $ua, $handler) = @_; ... }
+  
+  The handler is called after the response has been fully received, but
+  before any redirect handling is attempted.  The handler can be used to
+  extract information or modify the response.
+  
+  =item response_redirect => sub { my($response, $ua, $handler) = @_; ... }
+  
+  The handler is called in C<< $ua->request >> after C<response_done>.  If the
+  handler returns an L<HTTP::Request> object we'll start over with processing
+  this request instead.
+  
+  =back
+  
+  For all of these, C<$handler> is a code reference to the handler that
+  is currently being run.
+  
+  =head2 get_my_handler
+  
+      $ua->get_my_handler( $phase, %matchspec );
+      $ua->get_my_handler( $phase, %matchspec, $init );
+  
+  Will retrieve the matching handler as hash ref.
+  
+  If C<$init> is passed as a true value, create and add the
+  handler if it's not found.  If C<$init> is a subroutine reference, then
+  it's called with the created handler hash as argument.  This sub might
+  populate the hash with extra fields; especially the callback.  If
+  C<$init> is a hash reference, merge the hashes.
+  
+  =head2 handlers
+  
+      $ua->handlers( $phase, $request )
+      $ua->handlers( $phase, $response )
+  
+  Returns the handlers that apply to the given request or response at
+  the given processing phase.
+  
+  =head2 remove_handler
+  
+      $ua->remove_handler( undef, %matchspec );
+      $ua->remove_handler( $phase, %matchspec );
+      $ua->remove_handler(); # REMOVE ALL HANDLERS IN ALL PHASES
+  
+  Remove handlers that match the given C<%matchspec>.  If C<$phase> is not
+  provided, remove handlers from all phases.
+  
+  Be careful as calling this function with C<%matchspec> that is not
+  specific enough can remove handlers not owned by you.  It's probably
+  better to use the L<LWP::UserAgent/set_my_handler> method instead.
+  
+  The removed handlers are returned.
+  
+  =head2 set_my_handler
+  
+      $ua->set_my_handler( $phase, $cb, %matchspec );
+      $ua->set_my_handler($phase, undef); # remove handler for phase
+  
+  Set handlers private to the executing subroutine.  Works by defaulting
+  an C<owner> field to the C<%matchspec> that holds the name of the called
+  subroutine.  You might pass an explicit C<owner> to override this.
+  
+  If C<$cb> is passed as C<undef>, remove the handler.
+  
+  =head1 REQUEST METHODS
+  
+  The methods described in this section are used to dispatch requests
+  via the user agent.  The following request methods are provided:
+  
+  =head2 delete
+  
+      my $res = $ua->delete( $url );
+      my $res = $ua->delete( $url, $field_name => $value, ... );
+  
+  This method will dispatch a C<DELETE> request on the given URL.  Additional
+  headers and content options are the same as for the L<LWP::UserAgent/get>
+  method.
+  
+  This method will use the C<DELETE()> function from L<HTTP::Request::Common>
+  to build the request.  See L<HTTP::Request::Common> for a details on
+  how to pass form content and other advanced features.
+  
+  =head2 get
+  
+      my $res = $ua->get( $url );
+      my $res = $ua->get( $url , $field_name => $value, ... );
+  
+  This method will dispatch a C<GET> request on the given URL.  Further
+  arguments can be given to initialize the headers of the request. These
+  are given as separate name/value pairs.  The return value is a
+  response object.  See L<HTTP::Response> for a description of the
+  interface it provides.
+  
+  There will still be a response object returned when LWP can't connect to the
+  server specified in the URL or when other failures in protocol handlers occur.
+  These internal responses use the standard HTTP status codes, so the responses
+  can't be differentiated by testing the response status code alone.  Error
+  responses that LWP generates internally will have the "Client-Warning" header
+  set to the value "Internal response".  If you need to differentiate these
+  internal responses from responses that a remote server actually generates, you
+  need to test this header value.
+  
+  Fields names that start with ":" are special.  These will not
+  initialize headers of the request but will determine how the response
+  content is treated.  The following special field names are recognized:
+  
+      ':content_file'   => $filename # or $filehandle
+      ':content_cb'     => \&callback
+      ':read_size_hint' => $bytes
+  
+  If a C<$filename> or C<$filehandle> is provided with the C<:content_file>
+  option, then the response content will be saved here instead of in
+  the response object.  The C<$filehandle> may also be an object with
+  an open file descriptor, such as a L<File::Temp> object.
+  If a callback is provided with the C<:content_cb> option then
+  this function will be called for each chunk of the response content as
+  it is received from the server.  If neither of these options are
+  given, then the response content will accumulate in the response
+  object itself.  This might not be suitable for very large response
+  bodies.  Only one of C<:content_file> or C<:content_cb> can be
+  specified.  The content of unsuccessful responses will always
+  accumulate in the response object itself, regardless of the
+  C<:content_file> or C<:content_cb> options passed in.  Note that errors
+  writing to the content file (for example due to permission denied
+  or the filesystem being full) will be reported via the C<Client-Aborted>
+  or C<X-Died> response headers, and not the C<is_success> method.
+  
+  The C<:read_size_hint> option is passed to the protocol module which
+  will try to read data from the server in chunks of this size.  A
+  smaller value for the C<:read_size_hint> will result in a higher
+  number of callback invocations.
+  
+  The callback function is called with 3 arguments: a chunk of data, a
+  reference to the response object, and a reference to the protocol
+  object.  The callback can abort the request by invoking C<die()>.  The
+  exception message will show up as the "X-Died" header field in the
+  response returned by the C<< $ua->get() >> method.
+  
+  =head2 head
+  
+      my $res = $ua->head( $url );
+      my $res = $ua->head( $url , $field_name => $value, ... );
+  
+  This method will dispatch a C<HEAD> request on the given URL.
+  Otherwise it works like the L<LWP::UserAgent/get> method described above.
+  
+  =head2 is_protocol_supported
+  
+      my $bool = $ua->is_protocol_supported( $scheme );
+  
+  You can use this method to test whether this user agent object supports the
+  specified C<scheme>.  (The C<scheme> might be a string (like C<http> or
+  C<ftp>) or it might be an L<URI> object reference.)
+  
+  Whether a scheme is supported is determined by the user agent's
+  C<protocols_allowed> or C<protocols_forbidden> lists (if any), and by
+  the capabilities of LWP.  I.e., this will return true only if LWP
+  supports this protocol I<and> it's permitted for this particular
+  object.
+  
+  =head2 is_online
+  
+      my $bool = $ua->is_online;
+  
+  Tries to determine if you have access to the Internet. Returns C<1> (true)
+  if the built-in heuristics determine that the user agent is
+  able to access the Internet (over HTTP) or C<0> (false).
+  
+  See also L<LWP::Online>.
+  
+  =head2 mirror
+  
+      my $res = $ua->mirror( $url, $filename );
+  
+  This method will get the document identified by URL and store it in
+  file called C<$filename>.  If the file already exists, then the request
+  will contain an C<If-Modified-Since> header matching the modification
+  time of the file.  If the document on the server has not changed since
+  this time, then nothing happens.  If the document has been updated, it
+  will be downloaded again.  The modification time of the file will be
+  forced to match that of the server.
+  
+  Uses L<File::Copy/move> to attempt to atomically replace the C<$filename>.
+  
+  The return value is an L<HTTP::Response> object.
+  
+  =head2 patch
+  
+      # Any version of HTTP::Message works with this form:
+      my $res = $ua->patch( $url, $field_name => $value, Content => $content );
+  
+      # Using hash or array references requires HTTP::Message >= 6.12
+      use HTTP::Request 6.12;
+      my $res = $ua->patch( $url, \%form );
+      my $res = $ua->patch( $url, \@form );
+      my $res = $ua->patch( $url, \%form, $field_name => $value, ... );
+      my $res = $ua->patch( $url, $field_name => $value, Content => \%form );
+      my $res = $ua->patch( $url, $field_name => $value, Content => \@form );
+  
+  This method will dispatch a C<PATCH> request on the given URL, with
+  C<%form> or C<@form> providing the key/value pairs for the fill-in form
+  content. Additional headers and content options are the same as for
+  the L<LWP::UserAgent/get> method.
+  
+  CAVEAT:
+  
+  This method can only accept content that is in key-value pairs when using
+  L<HTTP::Request::Common> prior to version C<6.12>. Any use of hash or array
+  references will result in an error prior to version C<6.12>.
+  
+  This method will use the C<PATCH> function from L<HTTP::Request::Common>
+  to build the request.  See L<HTTP::Request::Common> for a details on
+  how to pass form content and other advanced features.
+  
+  =head2 post
+  
+      my $res = $ua->post( $url, \%form );
+      my $res = $ua->post( $url, \@form );
+      my $res = $ua->post( $url, \%form, $field_name => $value, ... );
+      my $res = $ua->post( $url, $field_name => $value, Content => \%form );
+      my $res = $ua->post( $url, $field_name => $value, Content => \@form );
+      my $res = $ua->post( $url, $field_name => $value, Content => $content );
+  
+  This method will dispatch a C<POST> request on the given URL, with
+  C<%form> or C<@form> providing the key/value pairs for the fill-in form
+  content. Additional headers and content options are the same as for
+  the L<LWP::UserAgent/get> method.
+  
+  This method will use the C<POST> function from L<HTTP::Request::Common>
+  to build the request.  See L<HTTP::Request::Common> for a details on
+  how to pass form content and other advanced features.
+  
+  =head2 put
+  
+      # Any version of HTTP::Message works with this form:
+      my $res = $ua->put( $url, $field_name => $value, Content => $content );
+  
+      # Using hash or array references requires HTTP::Message >= 6.07
+      use HTTP::Request 6.07;
+      my $res = $ua->put( $url, \%form );
+      my $res = $ua->put( $url, \@form );
+      my $res = $ua->put( $url, \%form, $field_name => $value, ... );
+      my $res = $ua->put( $url, $field_name => $value, Content => \%form );
+      my $res = $ua->put( $url, $field_name => $value, Content => \@form );
+  
+  This method will dispatch a C<PUT> request on the given URL, with
+  C<%form> or C<@form> providing the key/value pairs for the fill-in form
+  content. Additional headers and content options are the same as for
+  the L<LWP::UserAgent/get> method.
+  
+  CAVEAT:
+  
+  This method can only accept content that is in key-value pairs when using
+  L<HTTP::Request::Common> prior to version C<6.07>. Any use of hash or array
+  references will result in an error prior to version C<6.07>.
+  
+  This method will use the C<PUT> function from L<HTTP::Request::Common>
+  to build the request.  See L<HTTP::Request::Common> for a details on
+  how to pass form content and other advanced features.
+  
+  =head2 request
+  
+      my $res = $ua->request( $request );
+      my $res = $ua->request( $request, $content_file );
+      my $res = $ua->request( $request, $content_cb );
+      my $res = $ua->request( $request, $content_cb, $read_size_hint );
+  
+  This method will dispatch the given C<$request> object. Normally this
+  will be an instance of the L<HTTP::Request> class, but any object with
+  a similar interface will do. The return value is an L<HTTP::Response> object.
+  
+  The C<request> method will process redirects and authentication
+  responses transparently. This means that it may actually send several
+  simple requests via the L<LWP::UserAgent/simple_request> method described below.
+  
+  The request methods described above; L<LWP::UserAgent/get>, L<LWP::UserAgent/head>,
+  L<LWP::UserAgent/post> and L<LWP::UserAgent/mirror> will all dispatch the request
+  they build via this method. They are convenience methods that simply hide the
+  creation of the request object for you.
+  
+  The C<$content_file>, C<$content_cb> and C<$read_size_hint> all correspond to
+  options described with the L<LWP::UserAgent/get> method above. Note that errors
+  writing to the content file (for example due to permission denied
+  or the filesystem being full) will be reported via the C<Client-Aborted>
+  or C<X-Died> response headers, and not the C<is_success> method.
+  
+  You are allowed to use a CODE reference as C<content> in the request
+  object passed in.  The C<content> function should return the content
+  when called.  The content can be returned in chunks.  The content
+  function will be invoked repeatedly until it return an empty string to
+  signal that there is no more content.
+  
+  =head2 simple_request
+  
+      my $request = HTTP::Request->new( ... );
+      my $res = $ua->simple_request( $request );
+      my $res = $ua->simple_request( $request, $content_file );
+      my $res = $ua->simple_request( $request, $content_cb );
+      my $res = $ua->simple_request( $request, $content_cb, $read_size_hint );
+  
+  This method dispatches a single request and returns the response
+  received.  Arguments are the same as for the L<LWP::UserAgent/request> described above.
+  
+  The difference from L<LWP::UserAgent/request> is that C<simple_request> will not try to
+  handle redirects or authentication responses.  The L<LWP::UserAgent/request> method
+  will, in fact, invoke this method for each simple request it sends.
+  
+  =head1 CALLBACK METHODS
+  
+  The following methods will be invoked as requests are processed. These
+  methods are documented here because subclasses of L<LWP::UserAgent>
+  might want to override their behaviour.
+  
+  =head2 get_basic_credentials
+  
+      # This checks wantarray and can either return an array:
+      my ($user, $pass) = $ua->get_basic_credentials( $realm, $uri, $isproxy );
+      # or a string that looks like "user:pass"
+      my $creds = $ua->get_basic_credentials($realm, $uri, $isproxy);
+  
+  This is called by L<LWP::UserAgent/request> to retrieve credentials for documents
+  protected by Basic or Digest Authentication.  The arguments passed in
+  is the C<$realm> provided by the server, the C<$uri> requested and a
+  C<boolean flag> to indicate if this is authentication against a proxy server.
+  
+  The method should return a username and password.  It should return an
+  empty list to abort the authentication resolution attempt.  Subclasses
+  can override this method to prompt the user for the information. An
+  example of this can be found in C<lwp-request> program distributed
+  with this library.
+  
+  The base implementation simply checks a set of pre-stored member
+  variables, set up with the L<LWP::UserAgent/credentials> method.
+  
+  =head2 prepare_request
+  
+      $request = $ua->prepare_request( $request );
+  
+  This method is invoked by L<LWP::UserAgent/simple_request>. Its task is
+  to modify the given C<$request> object by setting up various headers based
+  on the attributes of the user agent. The return value should normally be the
+  C<$request> object passed in.  If a different request object is returned
+  it will be the one actually processed.
+  
+  The headers affected by the base implementation are; C<User-Agent>,
+  C<From>, C<Range> and C<Cookie>.
+  
+  =head2 progress
+  
+      my $prog = $ua->progress( $status, $request_or_response );
+  
+  This is called frequently as the response is received regardless of
+  how the content is processed.  The method is called with C<$status>
+  "begin" at the start of processing the request and with C<$state> "end"
+  before the request method returns.  In between these C<$status> will be
+  the fraction of the response currently received or the string "tick"
+  if the fraction can't be calculated.
+  
+  When C<$status> is "begin" the second argument is the L<HTTP::Request> object,
+  otherwise it is the L<HTTP::Response> object.
+  
+  =head2 redirect_ok
+  
+      my $bool = $ua->redirect_ok( $prospective_request, $response );
+  
+  This method is called by L<LWP::UserAgent/request> before it tries to follow a
+  redirection to the request in C<$response>.  This should return a true
+  value if this redirection is permissible.  The C<$prospective_request>
+  will be the request to be sent if this method returns true.
+  
+  The base implementation will return false unless the method
+  is in the object's C<requests_redirectable> list,
+  false if the proposed redirection is to a C<file://...>
+  URL, and true otherwise.
+  
+  =head1 BEST PRACTICES
+  
+  The default settings can get you up and running quickly, but there are settings
+  you can change in order to make your life easier.
+  
+  =head2 Handling Cookies
+  
+  You are encouraged to install L<Mozilla::PublicSuffix> and use
+  L<HTTP::CookieJar::LWP> as your cookie jar.  L<HTTP::CookieJar::LWP> provides a
+  better security model matching that of current Web browsers when
+  L<Mozilla::PublicSuffix> is installed.
+  
+      use HTTP::CookieJar::LWP ();
+  
+      my $jar = HTTP::CookieJar::LWP->new;
+      my $ua = LWP::UserAgent->new( cookie_jar => $jar );
+  
+  See L</"cookie_jar"> for more information.
+  
+  =head2 Managing Protocols
+  
+  C<protocols_allowed> gives you the ability to allow arbitrary protocols.
+  
+      my $ua = LWP::UserAgent->new(
+          protocols_allowed => [ 'http', 'https' ]
+      );
+  
+  This will prevent you from inadvertently following URLs like
+  C<file:///etc/passwd>.  See L</"protocols_allowed">.
+  
+  C<protocols_forbidden> gives you the ability to deny arbitrary protocols.
+  
+      my $ua = LWP::UserAgent->new(
+          protocols_forbidden => [ 'file', 'mailto', 'ssh', ]
+      );
+  
+  This can also prevent you from inadvertently following URLs like
+  C<file:///etc/passwd>.  See L</protocols_forbidden>.
+  
+  =head1 SEE ALSO
+  
+  See L<LWP> for a complete overview of libwww-perl5.  See L<lwpcook>
+  and the scripts F<lwp-request> and F<lwp-download> for examples of
+  usage.
+  
+  See L<HTTP::Request> and L<HTTP::Response> for a description of the
+  message objects dispatched and received.  See L<HTTP::Request::Common>
+  and L<HTML::Form> for other ways to build request objects.
+  
+  See L<WWW::Mechanize> and L<WWW::Search> for examples of more
+  specialized user agents based on L<LWP::UserAgent>.
+  
+  =head1 COPYRIGHT AND LICENSE
+  
+  Copyright 1995-2009 Gisle Aas.
+  
+  This library is free software; you can redistribute it and/or
+  modify it under the same terms as Perl itself.
+  
+  =cut
+LWP_USERAGENT
+
+$fatpacked{"Try/Tiny.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'TRY_TINY';
+  package Try::Tiny; # git description: v0.30-11-g1b81d0a
+  use 5.006;
+  # ABSTRACT: Minimal try/catch with proper preservation of $@
+  
+  our $VERSION = '0.31';
+  
+  use strict;
+  use warnings;
+  
+  use Exporter 5.57 'import';
+  our @EXPORT = our @EXPORT_OK = qw(try catch finally);
+  
+  use Carp;
+  $Carp::Internal{+__PACKAGE__}++;
+  
+  BEGIN {
+    my $su = $INC{'Sub/Util.pm'} && defined &Sub::Util::set_subname;
+    my $sn = $INC{'Sub/Name.pm'} && eval { Sub::Name->VERSION(0.08) };
+    unless ($su || $sn) {
+      $su = eval { require Sub::Util; } && defined &Sub::Util::set_subname;
+      unless ($su) {
+        $sn = eval { require Sub::Name; Sub::Name->VERSION(0.08) };
+      }
+    }
+  
+    *_subname = $su ? \&Sub::Util::set_subname
+              : $sn ? \&Sub::Name::subname
+              : sub { $_[1] };
+    *_HAS_SUBNAME = ($su || $sn) ? sub(){1} : sub(){0};
+  }
+  
+  my %_finally_guards;
+  
+  # Need to prototype as @ not $$ because of the way Perl evaluates the prototype.
+  # Keeping it at $$ means you only ever get 1 sub because we need to eval in a list
+  # context & not a scalar one
+  
+  sub try (&;@) {
+    my ( $try, @code_refs ) = @_;
+  
+    # we need to save this here, the eval block will be in scalar context due
+    # to $failed
+    my $wantarray = wantarray;
+  
+    # work around perl bug by explicitly initializing these, due to the likelyhood
+    # this will be used in global destruction (perl rt#119311)
+    my ( $catch, @finally ) = ();
+  
+    # find labeled blocks in the argument list.
+    # catch and finally tag the blocks by blessing a scalar reference to them.
+    foreach my $code_ref (@code_refs) {
+  
+      if ( ref($code_ref) eq 'Try::Tiny::Catch' ) {
+        croak 'A try() may not be followed by multiple catch() blocks'
+          if $catch;
+        $catch = ${$code_ref};
+      } elsif ( ref($code_ref) eq 'Try::Tiny::Finally' ) {
+        push @finally, ${$code_ref};
+      } else {
+        croak(
+          'try() encountered an unexpected argument ('
+        . ( defined $code_ref ? $code_ref : 'undef' )
+        . ') - perhaps a missing semi-colon before or'
+        );
+      }
+    }
+  
+    # FIXME consider using local $SIG{__DIE__} to accumulate all errors. It's
+    # not perfect, but we could provide a list of additional errors for
+    # $catch->();
+  
+    # name the blocks if we have Sub::Name installed
+    _subname(caller().'::try {...} ' => $try)
+      if _HAS_SUBNAME;
+  
+    # set up scope guards to invoke the finally blocks at the end.
+    # this should really be a function scope lexical variable instead of
+    # file scope + local but that causes issues with perls < 5.20 due to
+    # perl rt#119311
+    local $_finally_guards{guards} = [
+      map Try::Tiny::ScopeGuard->_new($_),
+      @finally
+    ];
+  
+    # save the value of $@ so we can set $@ back to it in the beginning of the eval
+    # and restore $@ after the eval finishes
+    my $prev_error = $@;
+  
+    my ( @ret, $error );
+  
+    # failed will be true if the eval dies, because 1 will not be returned
+    # from the eval body
+    my $failed = not eval {
+      $@ = $prev_error;
+  
+      # evaluate the try block in the correct context
+      if ( $wantarray ) {
+        @ret = $try->();
+      } elsif ( defined $wantarray ) {
+        $ret[0] = $try->();
+      } else {
+        $try->();
+      };
+  
+      return 1; # properly set $failed to false
+    };
+  
+    # preserve the current error and reset the original value of $@
+    $error = $@;
+    $@ = $prev_error;
+  
+    # at this point $failed contains a true value if the eval died, even if some
+    # destructor overwrote $@ as the eval was unwinding.
+    if ( $failed ) {
+      # pass $error to the finally blocks
+      push @$_, $error for @{$_finally_guards{guards}};
+  
+      # if we got an error, invoke the catch block.
+      if ( $catch ) {
+        # This works like given($error), but is backwards compatible and
+        # sets $_ in the dynamic scope for the body of C<$catch>
+        for ($error) {
+          return $catch->($error);
+        }
+  
+        # in case when() was used without an explicit return, the C<for>
+        # loop will be aborted and there's no useful return value
+      }
   
       return;
+    } else {
+      # no failure, $@ is back to what it was, everything is fine
+      return $wantarray ? @ret : $ret[0];
+    }
+  }
+  
+  sub catch (&;@) {
+    my ( $block, @rest ) = @_;
+  
+    croak 'Useless bare catch()' unless wantarray;
+  
+    _subname(caller().'::catch {...} ' => $block)
+      if _HAS_SUBNAME;
+    return (
+      bless(\$block, 'Try::Tiny::Catch'),
+      @rest,
+    );
+  }
+  
+  sub finally (&;@) {
+    my ( $block, @rest ) = @_;
+  
+    croak 'Useless bare finally()' unless wantarray;
+  
+    _subname(caller().'::finally {...} ' => $block)
+      if _HAS_SUBNAME;
+    return (
+      bless(\$block, 'Try::Tiny::Finally'),
+      @rest,
+    );
+  }
+  
+  {
+    package # hide from PAUSE
+      Try::Tiny::ScopeGuard;
+  
+    use constant UNSTABLE_DOLLARAT => ("$]" < '5.013002') ? 1 : 0;
+  
+    sub _new {
+      shift;
+      bless [ @_ ];
+    }
+  
+    sub DESTROY {
+      my ($code, @args) = @{ $_[0] };
+  
+      local $@ if UNSTABLE_DOLLARAT;
+      eval {
+        $code->(@args);
+        1;
+      } or do {
+        warn
+          "Execution of finally() block $code resulted in an exception, which "
+        . '*CAN NOT BE PROPAGATED* due to fundamental limitations of Perl. '
+        . 'Your program will continue as if this event never took place. '
+        . "Original exception text follows:\n\n"
+        . (defined $@ ? $@ : '$@ left undefined...')
+        . "\n"
+        ;
+      }
+    }
+  }
+  
+  __PACKAGE__
+  
+  __END__
+  
+  =pod
+  
+  =encoding UTF-8
+  
+  =head1 NAME
+  
+  Try::Tiny - Minimal try/catch with proper preservation of $@
+  
+  =head1 VERSION
+  
+  version 0.31
+  
+  =head1 SYNOPSIS
+  
+  You can use Try::Tiny's C<try> and C<catch> to expect and handle exceptional
+  conditions, avoiding quirks in Perl and common mistakes:
+  
+    # handle errors with a catch handler
+    try {
+      die "foo";
+    } catch {
+      warn "caught error: $_"; # not $@
+    };
+  
+  You can also use it like a standalone C<eval> to catch and ignore any error
+  conditions.  Obviously, this is an extreme measure not to be undertaken
+  lightly:
+  
+    # just silence errors
+    try {
+      die "foo";
+    };
+  
+  =head1 DESCRIPTION
+  
+  This module provides bare bones C<try>/C<catch>/C<finally> statements that are designed to
+  minimize common mistakes with eval blocks, and NOTHING else.
+  
+  This is unlike L<TryCatch> which provides a nice syntax and avoids adding
+  another call stack layer, and supports calling C<return> from the C<try> block to
+  return from the parent subroutine. These extra features come at a cost of a few
+  dependencies, namely L<Devel::Declare> and L<Scope::Upper> which are
+  occasionally problematic, and the additional catch filtering uses L<Moose>
+  type constraints which may not be desirable either.
+  
+  The main focus of this module is to provide simple and reliable error handling
+  for those having a hard time installing L<TryCatch>, but who still want to
+  write correct C<eval> blocks without 5 lines of boilerplate each time.
+  
+  It's designed to work as correctly as possible in light of the various
+  pathological edge cases (see L</BACKGROUND>) and to be compatible with any style
+  of error values (simple strings, references, objects, overloaded objects, etc).
+  
+  If the C<try> block dies, it returns the value of the last statement executed in
+  the C<catch> block, if there is one. Otherwise, it returns C<undef> in scalar
+  context or the empty list in list context. The following examples all
+  assign C<"bar"> to C<$x>:
+  
+    my $x = try { die "foo" } catch { "bar" };
+    my $x = try { die "foo" } || "bar";
+    my $x = (try { die "foo" }) // "bar";
+  
+    my $x = eval { die "foo" } || "bar";
+  
+  You can add C<finally> blocks, yielding the following:
+  
+    my $x;
+    try { die 'foo' } finally { $x = 'bar' };
+    try { die 'foo' } catch { warn "Got a die: $_" } finally { $x = 'bar' };
+  
+  C<finally> blocks are always executed making them suitable for cleanup code
+  which cannot be handled using local.  You can add as many C<finally> blocks to a
+  given C<try> block as you like.
+  
+  Note that adding a C<finally> block without a preceding C<catch> block
+  suppresses any errors. This behaviour is consistent with using a standalone
+  C<eval>, but it is not consistent with C<try>/C<finally> patterns found in
+  other programming languages, such as Java, Python, Javascript or C#. If you
+  learned the C<try>/C<finally> pattern from one of these languages, watch out for
+  this.
+  
+  =head1 EXPORTS
+  
+  All functions are exported by default using L<Exporter>.
+  
+  If you need to rename the C<try>, C<catch> or C<finally> keyword consider using
+  L<Sub::Import> to get L<Sub::Exporter>'s flexibility.
+  
+  =over 4
+  
+  =item try (&;@)
+  
+  Takes one mandatory C<try> subroutine, an optional C<catch> subroutine and C<finally>
+  subroutine.
+  
+  The mandatory subroutine is evaluated in the context of an C<eval> block.
+  
+  If no error occurred the value from the first block is returned, preserving
+  list/scalar context.
+  
+  If there was an error and the second subroutine was given it will be invoked
+  with the error in C<$_> (localized) and as that block's first and only
+  argument.
+  
+  C<$@> does B<not> contain the error. Inside the C<catch> block it has the same
+  value it had before the C<try> block was executed.
+  
+  Note that the error may be false, but if that happens the C<catch> block will
+  still be invoked.
+  
+  Once all execution is finished then the C<finally> block, if given, will execute.
+  
+  =item catch (&;@)
+  
+  Intended to be used in the second argument position of C<try>.
+  
+  Returns a reference to the subroutine it was given but blessed as
+  C<Try::Tiny::Catch> which allows try to decode correctly what to do
+  with this code reference.
+  
+    catch { ... }
+  
+  Inside the C<catch> block the caught error is stored in C<$_>, while previous
+  value of C<$@> is still available for use.  This value may or may not be
+  meaningful depending on what happened before the C<try>, but it might be a good
+  idea to preserve it in an error stack.
+  
+  For code that captures C<$@> when throwing new errors (i.e.
+  L<Class::Throwable>), you'll need to do:
+  
+    local $@ = $_;
+  
+  =item finally (&;@)
+  
+    try     { ... }
+    catch   { ... }
+    finally { ... };
+  
+  Or
+  
+    try     { ... }
+    finally { ... };
+  
+  Or even
+  
+    try     { ... }
+    finally { ... }
+    catch   { ... };
+  
+  Intended to be the second or third element of C<try>. C<finally> blocks are always
+  executed in the event of a successful C<try> or if C<catch> is run. This allows
+  you to locate cleanup code which cannot be done via C<local()> e.g. closing a file
+  handle.
+  
+  When invoked, the C<finally> block is passed the error that was caught.  If no
+  error was caught, it is passed nothing.  (Note that the C<finally> block does not
+  localize C<$_> with the error, since unlike in a C<catch> block, there is no way
+  to know if C<$_ == undef> implies that there were no errors.) In other words,
+  the following code does just what you would expect:
+  
+    try {
+      die_sometimes();
+    } catch {
+      # ...code run in case of error
+    } finally {
+      if (@_) {
+        print "The try block died with: @_\n";
+      } else {
+        print "The try block ran without error.\n";
+      }
+    };
+  
+  B<You must always do your own error handling in the C<finally> block>. C<Try::Tiny> will
+  not do anything about handling possible errors coming from code located in these
+  blocks.
+  
+  Furthermore B<exceptions in C<finally> blocks are not trappable and are unable
+  to influence the execution of your program>. This is due to limitation of
+  C<DESTROY>-based scope guards, which C<finally> is implemented on top of. This
+  may change in a future version of Try::Tiny.
+  
+  In the same way C<catch()> blesses the code reference this subroutine does the same
+  except it bless them as C<Try::Tiny::Finally>.
+  
+  =back
+  
+  =head1 BACKGROUND
+  
+  There are a number of issues with C<eval>.
+  
+  =head2 Clobbering $@
+  
+  When you run an C<eval> block and it succeeds, C<$@> will be cleared, potentially
+  clobbering an error that is currently being caught.
+  
+  This causes action at a distance, clearing previous errors your caller may have
+  not yet handled.
+  
+  C<$@> must be properly localized before invoking C<eval> in order to avoid this
+  issue.
+  
+  More specifically,
+  L<before Perl version 5.14.0|perl5140delta/"Exception Handling">
+  C<$@> was clobbered at the beginning of the C<eval>, which
+  also made it impossible to capture the previous error before you die (for
+  instance when making exception objects with error stacks).
+  
+  For this reason C<try> will actually set C<$@> to its previous value (the one
+  available before entering the C<try> block) in the beginning of the C<eval>
+  block.
+  
+  =head2 Localizing $@ silently masks errors
+  
+  Inside an C<eval> block, C<die> behaves sort of like:
+  
+    sub die {
+      $@ = $_[0];
+      return_undef_from_eval();
+    }
+  
+  This means that if you were polite and localized C<$@> you can't die in that
+  scope, or your error will be discarded (printing "Something's wrong" instead).
+  
+  The workaround is very ugly:
+  
+    my $error = do {
+      local $@;
+      eval { ... };
+      $@;
+    };
+  
+    ...
+    die $error;
+  
+  =head2 $@ might not be a true value
+  
+  This code is wrong:
+  
+    if ( $@ ) {
+      ...
+    }
+  
+  because due to the previous caveats it may have been unset.
+  
+  C<$@> could also be an overloaded error object that evaluates to false, but
+  that's asking for trouble anyway.
+  
+  The classic failure mode (fixed in L<Perl 5.14.0|perl5140delta/"Exception Handling">) is:
+  
+    sub Object::DESTROY {
+      eval { ... }
+    }
+  
+    eval {
+      my $obj = Object->new;
+  
+      die "foo";
+    };
+  
+    if ( $@ ) {
+  
+    }
+  
+  In this case since C<Object::DESTROY> is not localizing C<$@> but still uses
+  C<eval>, it will set C<$@> to C<"">.
+  
+  The destructor is called when the stack is unwound, after C<die> sets C<$@> to
+  C<"foo at Foo.pm line 42\n">, so by the time C<if ( $@ )> is evaluated it has
+  been cleared by C<eval> in the destructor.
+  
+  The workaround for this is even uglier than the previous ones. Even though we
+  can't save the value of C<$@> from code that doesn't localize, we can at least
+  be sure the C<eval> was aborted due to an error:
+  
+    my $failed = not eval {
+      ...
+  
+      return 1;
+    };
+  
+  This is because an C<eval> that caught a C<die> will always return a false
+  value.
+  
+  =head1 ALTERNATE SYNTAX
+  
+  Using Perl 5.10 you can use L<perlsyn/"Switch statements"> (but please don't,
+  because that syntax has since been deprecated because there was too much
+  unexpected magical behaviour).
+  
+  =for stopwords topicalizer
+  
+  The C<catch> block is invoked in a topicalizer context (like a C<given> block),
+  but note that you can't return a useful value from C<catch> using the C<when>
+  blocks without an explicit C<return>.
+  
+  This is somewhat similar to Perl 6's C<CATCH> blocks. You can use it to
+  concisely match errors:
+  
+    try {
+      require Foo;
+    } catch {
+      when (/^Can't locate .*?\.pm in \@INC/) { } # ignore
+      default { die $_ }
+    };
+  
+  =head1 CAVEATS
+  
+  =over 4
+  
+  =item *
+  
+  C<@_> is not available within the C<try> block, so you need to copy your
+  argument list. In case you want to work with argument values directly via C<@_>
+  aliasing (i.e. allow C<$_[1] = "foo">), you need to pass C<@_> by reference:
+  
+    sub foo {
+      my ( $self, @args ) = @_;
+      try { $self->bar(@args) }
+    }
+  
+  or
+  
+    sub bar_in_place {
+      my $self = shift;
+      my $args = \@_;
+      try { $_ = $self->bar($_) for @$args }
+    }
+  
+  =item *
+  
+  C<return> returns from the C<try> block, not from the parent sub (note that
+  this is also how C<eval> works, but not how L<TryCatch> works):
+  
+    sub parent_sub {
+      try {
+        die;
+      }
+      catch {
+        return;
+      };
+  
+      say "this text WILL be displayed, even though an exception is thrown";
+    }
+  
+  Instead, you should capture the return value:
+  
+    sub parent_sub {
+      my $success = try {
+        die;
+        1;
+      };
+      return unless $success;
+  
+      say "This text WILL NEVER appear!";
+    }
+    # OR
+    sub parent_sub_with_catch {
+      my $success = try {
+        die;
+        1;
+      }
+      catch {
+        # do something with $_
+        return undef; #see note
+      };
+      return unless $success;
+  
+      say "This text WILL NEVER appear!";
+    }
+  
+  Note that if you have a C<catch> block, it must return C<undef> for this to work,
+  since if a C<catch> block exists, its return value is returned in place of C<undef>
+  when an exception is thrown.
+  
+  =item *
+  
+  C<try> introduces another caller stack frame. L<Sub::Uplevel> is not used. L<Carp>
+  will not report this when using full stack traces, though, because
+  C<%Carp::Internal> is used. This lack of magic is considered a feature.
+  
+  =for stopwords unhygienically
+  
+  =item *
+  
+  The value of C<$_> in the C<catch> block is not guaranteed to be the value of
+  the exception thrown (C<$@>) in the C<try> block.  There is no safe way to
+  ensure this, since C<eval> may be used unhygienically in destructors.  The only
+  guarantee is that the C<catch> will be called if an exception is thrown.
+  
+  =item *
+  
+  The return value of the C<catch> block is not ignored, so if testing the result
+  of the expression for truth on success, be sure to return a false value from
+  the C<catch> block:
+  
+    my $obj = try {
+      MightFail->new;
+    } catch {
+      ...
+  
+      return; # avoid returning a true value;
+    };
+  
+    return unless $obj;
+  
+  =item *
+  
+  C<$SIG{__DIE__}> is still in effect.
+  
+  Though it can be argued that C<$SIG{__DIE__}> should be disabled inside of
+  C<eval> blocks, since it isn't people have grown to rely on it. Therefore in
+  the interests of compatibility, C<try> does not disable C<$SIG{__DIE__}> for
+  the scope of the error throwing code.
+  
+  =item *
+  
+  Lexical C<$_> may override the one set by C<catch>.
+  
+  For example Perl 5.10's C<given> form uses a lexical C<$_>, creating some
+  confusing behavior:
+  
+    given ($foo) {
+      when (...) {
+        try {
+          ...
+        } catch {
+          warn $_; # will print $foo, not the error
+          warn $_[0]; # instead, get the error like this
+        }
+      }
+    }
+  
+  Note that this behavior was changed once again in
+  L<Perl5 version 18|https://metacpan.org/module/perldelta#given-now-aliases-the-global-_>.
+  However, since the entirety of lexical C<$_> is now L<considered experimental
+  |https://metacpan.org/module/perldelta#Lexical-_-is-now-experimental>, it
+  is unclear whether the new version 18 behavior is final.
+  
+  =back
+  
+  =head1 SEE ALSO
+  
+  =over 4
+  
+  =item L<Syntax::Keyword::Try>
+  
+  Only available on perls >= 5.14, with a slightly different syntax (e.g. no trailing C<;> because
+  it's actually a keyword, not a sub, but this means you can C<return> and C<next> within it). Use
+  L<Feature::Compat::Try> to automatically switch to the native C<try> syntax in newer perls (when
+  available). See also L<Try Catch Exception Handling|perlsyn/Try-Catch-Exception-Handling>.
+  
+  =item L<TryCatch>
+  
+  Much more feature complete, more convenient semantics, but at the cost of
+  implementation complexity.
+  
+  =item L<autodie>
+  
+  Automatic error throwing for builtin functions and more. Also designed to
+  work well with C<given>/C<when>.
+  
+  =item L<Throwable>
+  
+  A lightweight role for rolling your own exception classes.
+  
+  =item L<Error>
+  
+  Exception object implementation with a C<try> statement. Does not localize
+  C<$@>.
+  
+  =item L<Exception::Class::TryCatch>
+  
+  Provides a C<catch> statement, but properly calling C<eval> is your
+  responsibility.
+  
+  The C<try> keyword pushes C<$@> onto an error stack, avoiding some of the
+  issues with C<$@>, but you still need to localize to prevent clobbering.
+  
+  =back
+  
+  =head1 LIGHTNING TALK
+  
+  I gave a lightning talk about this module, you can see the slides (Firefox
+  only):
+  
+  L<http://web.archive.org/web/20100628040134/http://nothingmuch.woobling.org/talks/takahashi.xul>
+  
+  Or read the source:
+  
+  L<http://web.archive.org/web/20100305133605/http://nothingmuch.woobling.org/talks/yapc_asia_2009/try_tiny.yml>
+  
+  =head1 SUPPORT
+  
+  Bugs may be submitted through L<the RT bug tracker|https://rt.cpan.org/Public/Dist/Display.html?Name=Try-Tiny>
+  (or L<bug-Try-Tiny@rt.cpan.org|mailto:bug-Try-Tiny@rt.cpan.org>).
+  
+  =head1 AUTHORS
+  
+  =over 4
+  
+  =item *
+  
+  יובל קוג'מן (Yuval Kogman) <nothingmuch@woobling.org>
+  
+  =item *
+  
+  Jesse Luehrs <doy@tozt.net>
+  
+  =back
+  
+  =head1 CONTRIBUTORS
+  
+  =for stopwords Karen Etheridge Peter Rabbitson Ricardo Signes Mark Fowler Graham Knop Aristotle Pagaltzis Dagfinn Ilmari Mannsåker Lukas Mai Alex anaxagoras Andrew Yates awalker chromatic cm-perl David Lowe Glenn Hans Dieter Pearcey Jens Berthold Jonathan Yu Marc Mims Stosberg Pali Paul Howarth Rudolf Leermakers
+  
+  =over 4
+  
+  =item *
+  
+  Karen Etheridge <ether@cpan.org>
+  
+  =item *
+  
+  Peter Rabbitson <ribasushi@cpan.org>
+  
+  =item *
+  
+  Ricardo Signes <rjbs@cpan.org>
+  
+  =item *
+  
+  Mark Fowler <mark@twoshortplanks.com>
+  
+  =item *
+  
+  Graham Knop <haarg@haarg.org>
+  
+  =item *
+  
+  Aristotle Pagaltzis <pagaltzis@gmx.de>
+  
+  =item *
+  
+  Dagfinn Ilmari Mannsåker <ilmari@ilmari.org>
+  
+  =item *
+  
+  Lukas Mai <l.mai@web.de>
+  
+  =item *
+  
+  Alex <alex@koban.(none)>
+  
+  =item *
+  
+  anaxagoras <walkeraj@gmail.com>
+  
+  =item *
+  
+  Andrew Yates <ayates@haddock.local>
+  
+  =item *
+  
+  awalker <awalker@sourcefire.com>
+  
+  =item *
+  
+  chromatic <chromatic@wgz.org>
+  
+  =item *
+  
+  cm-perl <cm-perl@users.noreply.github.com>
+  
+  =item *
+  
+  David Lowe <davidl@lokku.com>
+  
+  =item *
+  
+  Glenn Fowler <cebjyre@cpan.org>
+  
+  =item *
+  
+  Hans Dieter Pearcey <hdp@weftsoar.net>
+  
+  =item *
+  
+  Jens Berthold <jens@jebecs.de>
+  
+  =item *
+  
+  Jonathan Yu <JAWNSY@cpan.org>
+  
+  =item *
+  
+  Marc Mims <marc@questright.com>
+  
+  =item *
+  
+  Mark Stosberg <mark@stosberg.com>
+  
+  =item *
+  
+  Pali <pali@cpan.org>
+  
+  =item *
+  
+  Paul Howarth <paul@city-fan.org>
+  
+  =item *
+  
+  Rudolf Leermakers <rudolf@hatsuseno.org>
+  
+  =back
+  
+  =head1 COPYRIGHT AND LICENCE
+  
+  This software is Copyright (c) 2009 by יובל קוג'מן (Yuval Kogman).
+  
+  This is free software, licensed under:
+  
+    The MIT (X11) License
+  
+  =cut
+TRY_TINY
+
+$fatpacked{"URI.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'URI';
+  package URI;
+  
+  use strict;
+  use warnings;
+  
+  our $VERSION = '5.12';
+  
+  # 1=version 5.10 and earlier; 0=version 5.11 and later
+  use constant HAS_RESERVED_SQUARE_BRACKETS => $ENV{URI_HAS_RESERVED_SQUARE_BRACKETS} ? 1 : 0;
+  
+  our ($ABS_REMOTE_LEADING_DOTS, $ABS_ALLOW_RELATIVE_SCHEME, $DEFAULT_QUERY_FORM_DELIMITER);
+  
+  my %implements;  # mapping from scheme to implementor class
+  
+  # Some "official" character classes
+  
+  our $reserved   = HAS_RESERVED_SQUARE_BRACKETS ? q(;/?:@&=+$,[]) : q(;/?:@&=+$,);
+  our $mark       = q(-_.!~*'());                                    #'; emacs
+  our $unreserved = "A-Za-z0-9\Q$mark\E";
+  our $uric       = quotemeta($reserved) . $unreserved . "%";
+  our $uric4host  = $uric . ( HAS_RESERVED_SQUARE_BRACKETS ? '' : quotemeta( q([]) ) );
+  our $uric4user  = quotemeta( q{!$'()*,;:._~%-+=%&} ) . "A-Za-z0-9" . ( HAS_RESERVED_SQUARE_BRACKETS ? quotemeta( q([]) ) : '' ); # RFC-3987: iuserinfo w/o UTF
+  
+  our $scheme_re  = '[a-zA-Z][a-zA-Z0-9.+\-]*';
+  
+  # These schemes don't have an IPv6+ address part.
+  our $schemes_without_host_part_re = 'data|ldapi|urn|sqlite|sqlite3';
+  
+  # These schemes can have an IPv6+ authority part:
+  #     file, ftp, gopher, http, https, ldap, ldaps, mms, news, nntp, nntps, pop, rlogin, rtsp, rtspu, rsync, sip, sips, snews,
+  #     telnet, tn3270, ssh, sftp
+  #     (all DB URIs, i.e. cassandra, couch, couchdb, etc.), except 'sqlite:', 'sqlite3:'. Others?
+  #MAINT: URI has no test coverage for DB schemes
+  #MAINT: decoupling - perhaps let each class decide itself by defining a member function 'scheme_has_authority_part()'?
+  
+  #MAINT: 'mailto:' needs special treatment for IPv* addresses / RFC 5321 (4.1.3). Until then: restore all '[', ']'
+  # These schemes need fallback to previous (<= 5.10) encoding until a specific handler is available.
+  our $fallback_schemes_re = 'mailto';
+  
+  use Carp ();
+  use URI::Escape ();
+  
+  use overload ('""'     => sub { ${$_[0]} },
+                '=='     => sub { _obj_eq(@_) },
+                '!='     => sub { !_obj_eq(@_) },
+                fallback => 1,
+               );
+  
+  # Check if two objects are the same object
+  sub _obj_eq {
+      return overload::StrVal($_[0]) eq overload::StrVal($_[1]);
   }
   
   sub new
   {
-      my $self = shift;
-      my ( $pkg, $file, $line ) = caller($Error::Depth);
+      my($class, $uri, $scheme) = @_;
   
-      my $err = bless {
-          '-package' => $pkg,
-          '-file'    => $file,
-          '-line'    => $line,
-          @_
-      }, $self;
+      $uri = defined ($uri) ? "$uri" : "";   # stringify
+      # Get rid of potential wrapping
+      $uri =~ s/^<(?:URL:)?(.*)>$/$1/;  # 
+      $uri =~ s/^"(.*)"$/$1/;
+      $uri =~ s/^\s+//;
+      $uri =~ s/\s+$//;
   
-      $err->associate( $err->{'-object'} )
-          if ( exists $err->{'-object'} );
+      my $impclass;
+      if ($uri =~ m/^($scheme_re):/so) {
+  	$scheme = $1;
+      }
+      else {
+  	if (($impclass = ref($scheme))) {
+  	    $scheme = $scheme->scheme;
+  	}
+  	elsif ($scheme && $scheme =~ m/^($scheme_re)(?::|$)/o) {
+  	    $scheme = $1;
+          }
+      }
+      $impclass ||= implementor($scheme) ||
+  	do {
+  	    require URI::_foreign;
+  	    $impclass = 'URI::_foreign';
+  	};
   
-      # To always create a stacktrace would be very inefficient, so
-      # we only do it if $Error::Debug is set
+      return $impclass->_init($uri, $scheme);
+  }
   
-      if ($Error::Debug)
-      {
-          require Carp;
-          local $Carp::CarpLevel = $Error::Depth;
-          my $text = defined( $err->{'-text'} ) ? $err->{'-text'} : "Error";
-          my $trace = Carp::longmess($text);
   
-          # Remove try calls from the trace
-          $trace =~
-  s/(\n\s+\S+__ANON__[^\n]+)?\n\s+eval[^\n]+\n\s+Error::subs::try[^\n]+(?=\n)//sog;
-          $trace =~
-  s/(\n\s+\S+__ANON__[^\n]+)?\n\s+eval[^\n]+\n\s+Error::subs::run_clauses[^\n]+\n\s+Error::subs::try[^\n]+(?=\n)//sog;
-          $err->{'-stacktrace'} = $trace;
+  sub new_abs
+  {
+      my($class, $uri, $base) = @_;
+      $uri = $class->new($uri, $base);
+      $uri->abs($base);
+  }
+  
+  
+  sub _init
+  {
+      my $class = shift;
+      my($str, $scheme) = @_;
+      # find all funny characters and encode the bytes.
+      $str = $class->_uric_escape($str);
+      $str = "$scheme:$str" unless $str =~ /^$scheme_re:/o ||
+                                   $class->_no_scheme_ok;
+      my $self = bless \$str, $class;
+      $self;
+  }
+  
+  
+  #-- Version: 5.11+
+  #   Since the complete URI will be percent-encoded including '[' and ']',
+  #   we selectively unescape square brackets from the authority/host part of the URI.
+  #   Derived modules that implement _uric_escape() should take this into account
+  #   if they do not rely on URI::_uric_escape().
+  #   No unescaping is performed for the userinfo@ part of the authority part.
+  sub _fix_uric_escape_for_host_part {
+    return if HAS_RESERVED_SQUARE_BRACKETS;
+    return if $_[0] !~ /%/;
+    return if $_[0] =~ m{^(?:$URI::schemes_without_host_part_re):}os;
+  
+    # until a scheme specific handler is available, fall back to previous behavior of v5.10 (i.e. 'mailto:')
+    if ($_[0] =~ m{^(?:$URI::fallback_schemes_re):}os) {
+      $_[0]    =~ s/\%5B/[/gi;
+      $_[0]    =~ s/\%5D/]/gi;
+      return;
+    }
+  
+    if ($_[0] =~ m{^((?:$URI::scheme_re:)?)//([^/?\#]+)(.*)$}os) {
+      my $orig          = $2;
+      my ($user, $host) = $orig =~ /^(.*@)?([^@]*)$/;
+      $user  ||= '';
+      my $port = $host =~ s/(:\d+)$// ? $1 : '';
+      #MAINT: die() here if scheme indicates TCP/UDP and port is out of range [0..65535] ?
+      $host    =~ s/\%5B/[/gi;
+      $host    =~ s/\%5D/]/gi;
+      $_[0]    =~ s/\Q$orig\E/$user$host$port/;
+    }
+  }
+  
+  
+  sub _uric_escape
+  {
+      my($class, $str) = @_;
+      $str =~ s*([^$uric\#])* URI::Escape::escape_char($1) *ego;
+      _fix_uric_escape_for_host_part( $str );
+      utf8::downgrade($str);
+      return $str;
+  }
+  
+  my %require_attempted;
+  
+  sub implementor
+  {
+      my($scheme, $impclass) = @_;
+      if (!$scheme || $scheme !~ /\A$scheme_re\z/o) {
+  	require URI::_generic;
+  	return "URI::_generic";
       }
   
-      $@ = $LAST = $ERROR{$pkg} = $err;
+      $scheme = lc($scheme);
+  
+      if ($impclass) {
+  	# Set the implementor class for a given scheme
+          my $old = $implements{$scheme};
+          $impclass->_init_implementor($scheme);
+          $implements{$scheme} = $impclass;
+          return $old;
+      }
+  
+      my $ic = $implements{$scheme};
+      return $ic if $ic;
+  
+      # scheme not yet known, look for internal or
+      # preloaded (with 'use') implementation
+      $ic = "URI::$scheme";  # default location
+  
+      # turn scheme into a valid perl identifier by a simple transformation...
+      $ic =~ s/\+/_P/g;
+      $ic =~ s/\./_O/g;
+      $ic =~ s/\-/_/g;
+  
+      no strict 'refs';
+      # check we actually have one for the scheme:
+      unless (@{"${ic}::ISA"}) {
+          if (not exists $require_attempted{$ic}) {
+              # Try to load it
+              my $_old_error = $@;
+              eval "require $ic";
+              die $@ if $@ && $@ !~ /Can\'t locate.*in \@INC/;
+              $@ = $_old_error;
+          }
+          return undef unless @{"${ic}::ISA"};
+      }
+  
+      $ic->_init_implementor($scheme);
+      $implements{$scheme} = $ic;
+      $ic;
   }
   
-  # Throw an error. this contains some very gory code.
   
-  sub throw
+  sub _init_implementor
+  {
+      my($class, $scheme) = @_;
+      # Remember that one implementor class may actually
+      # serve to implement several URI schemes.
+  }
+  
+  
+  sub clone
   {
       my $self = shift;
-      local $Error::Depth = $Error::Depth + 1;
-  
-      # if we are not rethrow-ing then create the object to throw
-      $self = $self->new(@_) unless ref($self);
-  
-      die $Error::THROWN = $self;
+      my $other = $$self;
+      bless \$other, ref $self;
   }
   
-  # syntactic sugar for
-  #
-  #    die with Error( ... );
+  sub TO_JSON { ${$_[0]} }
   
-  sub with
+  sub _no_scheme_ok { 0 }
+  
+  sub _scheme
   {
       my $self = shift;
-      local $Error::Depth = $Error::Depth + 1;
   
-      $self->new(@_);
+      unless (@_) {
+  	return undef unless $$self =~ /^($scheme_re):/o;
+  	return $1;
+      }
+  
+      my $old;
+      my $new = shift;
+      if (defined($new) && length($new)) {
+  	Carp::croak("Bad scheme '$new'") unless $new =~ /^$scheme_re$/o;
+  	$old = $1 if $$self =~ s/^($scheme_re)://o;
+  	my $newself = URI->new("$new:$$self");
+  	$$self = $$newself; 
+  	bless $self, ref($newself);
+      }
+      else {
+  	if ($self->_no_scheme_ok) {
+  	    $old = $1 if $$self =~ s/^($scheme_re)://o;
+  	    Carp::carp("Oops, opaque part now look like scheme")
+  		if $^W && $$self =~ m/^$scheme_re:/o
+  	}
+  	else {
+  	    $old = $1 if $$self =~ m/^($scheme_re):/o;
+  	}
+      }
+  
+      return $old;
   }
   
-  # syntactic sugar for
-  #
-  #    record Error( ... ) and return;
+  sub scheme
+  {
+      my $scheme = shift->_scheme(@_);
+      return undef unless defined $scheme;
+      lc($scheme);
+  }
   
-  sub record
+  sub has_recognized_scheme {
+      my $self = shift;
+      return ref($self) !~ /^URI::_(?:foreign|generic)\z/;
+  }
+  
+  sub opaque
   {
       my $self = shift;
-      local $Error::Depth = $Error::Depth + 1;
   
-      $self->new(@_);
+      unless (@_) {
+  	$$self =~ /^(?:$scheme_re:)?([^\#]*)/o or die;
+  	return $1;
+      }
+  
+      $$self =~ /^($scheme_re:)?    # optional scheme
+  	        ([^\#]*)          # opaque
+                  (\#.*)?           # optional fragment
+                $/sx or die;
+  
+      my $old_scheme = $1;
+      my $old_opaque = $2;
+      my $old_frag   = $3;
+  
+      my $new_opaque = shift;
+      $new_opaque = "" unless defined $new_opaque;
+      $new_opaque =~ s/([^$uric])/ URI::Escape::escape_char($1)/ego;
+      utf8::downgrade($new_opaque);
+  
+      $$self = defined($old_scheme) ? $old_scheme : "";
+      $$self .= $new_opaque;
+      $$self .= $old_frag if defined $old_frag;
+  
+      $old_opaque;
   }
   
-  # catch clause for
-  #
-  # try { ... } catch CLASS with { ... }
+  sub path { goto &opaque }  # alias
   
-  sub catch
-  {
-      my $pkg     = shift;
-      my $code    = shift;
-      my $clauses = shift || {};
-      my $catch   = $clauses->{'catch'} ||= [];
   
-      unshift @$catch, $pkg, $code;
-  
-      $clauses;
-  }
-  
-  # Object query methods
-  
-  sub object
+  sub fragment
   {
       my $self = shift;
-      exists $self->{'-object'} ? $self->{'-object'} : undef;
+      unless (@_) {
+  	return undef unless $$self =~ /\#(.*)/s;
+  	return $1;
+      }
+  
+      my $old;
+      $old = $1 if $$self =~ s/\#(.*)//s;
+  
+      my $new_frag = shift;
+      if (defined $new_frag) {
+  	$new_frag =~ s/([^$uric])/ URI::Escape::escape_char($1) /ego;
+  	utf8::downgrade($new_frag);
+  	$$self .= "#$new_frag";
+      }
+      $old;
+  }
+  
+  
+  sub as_string
+  {
+      my $self = shift;
+      $$self;
+  }
+  
+  
+  sub as_iri
+  {
+      my $self = shift;
+      my $str = $$self;
+      if ($str =~ s/%([89a-fA-F][0-9a-fA-F])/chr(hex($1))/eg) {
+  	# All this crap because the more obvious:
+  	#
+  	#   Encode::decode("UTF-8", $str, sub { sprintf "%%%02X", shift })
+  	#
+  	# doesn't work before Encode 2.39.  Wait for a standard release
+  	# to bundle that version.
+  
+  	require Encode;
+  	my $enc = Encode::find_encoding("UTF-8");
+  	my $u = "";
+  	while (length $str) {
+  	    $u .= $enc->decode($str, Encode::FB_QUIET());
+  	    if (length $str) {
+  		# escape next char
+  		$u .= URI::Escape::escape_char(substr($str, 0, 1, ""));
+  	    }
+  	}
+  	$str = $u;
+      }
+      return $str;
+  }
+  
+  
+  sub canonical
+  {
+      # Make sure scheme is lowercased, that we don't escape unreserved chars,
+      # and that we use upcase escape sequences.
+  
+      my $self = shift;
+      my $scheme = $self->_scheme || "";
+      my $uc_scheme = $scheme =~ /[A-Z]/;
+      my $esc = $$self =~ /%[a-fA-F0-9]{2}/;
+      return $self unless $uc_scheme || $esc;
+  
+      my $other = $self->clone;
+      if ($uc_scheme) {
+  	$other->_scheme(lc $scheme);
+      }
+      if ($esc) {
+  	$$other =~ s{%([0-9a-fA-F]{2})}
+  	            { my $a = chr(hex($1));
+                        $a =~ /^[$unreserved]\z/o ? $a : "%\U$1"
+                      }ge;
+      }
+      return $other;
+  }
+  
+  # Compare two URIs, subclasses will provide a more correct implementation
+  sub eq {
+      my($self, $other) = @_;
+      $self  = URI->new($self, $other) unless ref $self;
+      $other = URI->new($other, $self) unless ref $other;
+      ref($self) eq ref($other) &&                # same class
+  	$self->canonical->as_string eq $other->canonical->as_string;
+  }
+  
+  # generic-URI transformation methods
+  sub abs { $_[0]; }
+  sub rel { $_[0]; }
+  
+  sub secure { 0 }
+  
+  # help out Storable
+  sub STORABLE_freeze {
+         my($self, $cloning) = @_;
+         return $$self;
+  }
+  
+  sub STORABLE_thaw {
+         my($self, $cloning, $str) = @_;
+         $$self = $str;
+  }
+  
+  1;
+  
+  __END__
+  
+  =head1 NAME
+  
+  URI - Uniform Resource Identifiers (absolute and relative)
+  
+  =head1 SYNOPSIS
+  
+   use URI ();
+  
+   $u1 = URI->new("http://www.example.com");
+   $u2 = URI->new("foo", "http");
+   $u3 = $u2->abs($u1);
+   $u4 = $u3->clone;
+   $u5 = URI->new("HTTP://WWW.example.com:80")->canonical;
+  
+   $str = $u->as_string;
+   $str = "$u";
+  
+   $scheme = $u->scheme;
+   $opaque = $u->opaque;
+   $path   = $u->path;
+   $frag   = $u->fragment;
+  
+   $u->scheme("ftp");
+   $u->host("ftp.example.com");
+   $u->path("cpan/");
+  
+  =head1 DESCRIPTION
+  
+  This module implements the C<URI> class.  Objects of this class
+  represent "Uniform Resource Identifier references" as specified in RFC
+  2396 (and updated by RFC 2732).
+  
+  A Uniform Resource Identifier is a compact string of characters that
+  identifies an abstract or physical resource.  A Uniform Resource
+  Identifier can be further classified as either a Uniform Resource Locator
+  (URL) or a Uniform Resource Name (URN).  The distinction between URL
+  and URN does not matter to the C<URI> class interface. A
+  "URI-reference" is a URI that may have additional information attached
+  in the form of a fragment identifier.
+  
+  An absolute URI reference consists of three parts:  a I<scheme>, a
+  I<scheme-specific part> and a I<fragment> identifier.  A subset of URI
+  references share a common syntax for hierarchical namespaces.  For
+  these, the scheme-specific part is further broken down into
+  I<authority>, I<path> and I<query> components.  These URIs can also
+  take the form of relative URI references, where the scheme (and
+  usually also the authority) component is missing, but implied by the
+  context of the URI reference.  The three forms of URI reference
+  syntax are summarized as follows:
+  
+    <scheme>:<scheme-specific-part>#<fragment>
+    <scheme>://<authority><path>?<query>#<fragment>
+    <path>?<query>#<fragment>
+  
+  The components into which a URI reference can be divided depend on the
+  I<scheme>.  The C<URI> class provides methods to get and set the
+  individual components.  The methods available for a specific
+  C<URI> object depend on the scheme.
+  
+  =head1 CONSTRUCTORS
+  
+  The following methods construct new C<URI> objects:
+  
+  =over 4
+  
+  =item $uri = URI->new( $str )
+  
+  =item $uri = URI->new( $str, $scheme )
+  
+  Constructs a new URI object.  The string
+  representation of a URI is given as argument, together with an optional
+  scheme specification.  Common URI wrappers like "" and <>, as well as
+  leading and trailing white space, are automatically removed from
+  the $str argument before it is processed further.
+  
+  The constructor determines the scheme, maps this to an appropriate
+  URI subclass, constructs a new object of that class and returns it.
+  
+  If the scheme isn't one of those that URI recognizes, you still get
+  an URI object back that you can access the generic methods on.  The
+  C<< $uri->has_recognized_scheme >> method can be used to test for
+  this.
+  
+  The $scheme argument is only used when $str is a
+  relative URI.  It can be either a simple string that
+  denotes the scheme, a string containing an absolute URI reference, or
+  an absolute C<URI> object.  If no $scheme is specified for a relative
+  URI $str, then $str is simply treated as a generic URI (no scheme-specific
+  methods available).
+  
+  The set of characters available for building URI references is
+  restricted (see L<URI::Escape>).  Characters outside this set are
+  automatically escaped by the URI constructor.
+  
+  =item $uri = URI->new_abs( $str, $base_uri )
+  
+  Constructs a new absolute URI object.  The $str argument can
+  denote a relative or absolute URI.  If relative, then it is
+  absolutized using $base_uri as base. The $base_uri must be an absolute
+  URI.
+  
+  =item $uri = URI::file->new( $filename )
+  
+  =item $uri = URI::file->new( $filename, $os )
+  
+  Constructs a new I<file> URI from a file name.  See L<URI::file>.
+  
+  =item $uri = URI::file->new_abs( $filename )
+  
+  =item $uri = URI::file->new_abs( $filename, $os )
+  
+  Constructs a new absolute I<file> URI from a file name.  See
+  L<URI::file>.
+  
+  =item $uri = URI::file->cwd
+  
+  Returns the current working directory as a I<file> URI.  See
+  L<URI::file>.
+  
+  =item $uri->clone
+  
+  Returns a copy of the $uri.
+  
+  =back
+  
+  =head1 COMMON METHODS
+  
+  The methods described in this section are available for all C<URI>
+  objects.
+  
+  Methods that give access to components of a URI always return the
+  old value of the component.  The value returned is C<undef> if the
+  component was not present.  There is generally a difference between a
+  component that is empty (represented as C<"">) and a component that is
+  missing (represented as C<undef>).  If an accessor method is given an
+  argument, it updates the corresponding component in addition to
+  returning the old value of the component.  Passing an undefined
+  argument removes the component (if possible).  The description of
+  each accessor method indicates whether the component is passed as
+  an escaped (percent-encoded) or an unescaped string.  A component that can be further
+  divided into sub-parts are usually passed escaped, as unescaping might
+  change its semantics.
+  
+  The common methods available for all URI are:
+  
+  =over 4
+  
+  =item $uri->scheme
+  
+  =item $uri->scheme( $new_scheme )
+  
+  Sets and returns the scheme part of the $uri.  If the $uri is
+  relative, then $uri->scheme returns C<undef>.  If called with an
+  argument, it updates the scheme of $uri, possibly changing the
+  class of $uri, and returns the old scheme value.  The method croaks
+  if the new scheme name is illegal; a scheme name must begin with a
+  letter and must consist of only US-ASCII letters, numbers, and a few
+  special marks: ".", "+", "-".  This restriction effectively means
+  that the scheme must be passed unescaped.  Passing an undefined
+  argument to the scheme method makes the URI relative (if possible).
+  
+  Letter case does not matter for scheme names.  The string
+  returned by $uri->scheme is always lowercase.  If you want the scheme
+  just as it was written in the URI in its original case,
+  you can use the $uri->_scheme method instead.
+  
+  =item $uri->has_recognized_scheme
+  
+  Returns TRUE if the URI scheme is one that URI recognizes.
+  
+  It will also be TRUE for relative URLs where a recognized
+  scheme was provided to the constructor, even if C<< $uri->scheme >>
+  returns C<undef> for these.
+  
+  =item $uri->opaque
+  
+  =item $uri->opaque( $new_opaque )
+  
+  Sets and returns the scheme-specific part of the $uri
+  (everything between the scheme and the fragment)
+  as an escaped string.
+  
+  =item $uri->path
+  
+  =item $uri->path( $new_path )
+  
+  Sets and returns the same value as $uri->opaque unless the URI
+  supports the generic syntax for hierarchical namespaces.
+  In that case the generic method is overridden to set and return
+  the part of the URI between the I<host name> and the I<fragment>.
+  
+  =item $uri->fragment
+  
+  =item $uri->fragment( $new_frag )
+  
+  Returns the fragment identifier of a URI reference
+  as an escaped string.
+  
+  =item $uri->as_string
+  
+  Returns a URI object to a plain ASCII string.  URI objects are
+  also converted to plain strings automatically by overloading.  This
+  means that $uri objects can be used as plain strings in most Perl
+  constructs.
+  
+  =item $uri->as_iri
+  
+  Returns a Unicode string representing the URI.  Escaped UTF-8 sequences
+  representing non-ASCII characters are turned into their corresponding Unicode
+  code point.
+  
+  =item $uri->canonical
+  
+  Returns a normalized version of the URI.  The rules
+  for normalization are scheme-dependent.  They usually involve
+  lowercasing the scheme and Internet host name components,
+  removing the explicit port specification if it matches the default port,
+  uppercasing all escape sequences, and unescaping octets that can be
+  better represented as plain characters.
+  
+  For efficiency reasons, if the $uri is already in normalized form,
+  then a reference to it is returned instead of a copy.
+  
+  =item $uri->eq( $other_uri )
+  
+  =item URI::eq( $first_uri, $other_uri )
+  
+  Tests whether two URI references are equal.  URI references
+  that normalize to the same string are considered equal.  The method
+  can also be used as a plain function which can also test two string
+  arguments.
+  
+  If you need to test whether two C<URI> object references denote the
+  same object, use the '==' operator.
+  
+  =item $uri->abs( $base_uri )
+  
+  Returns an absolute URI reference.  If $uri is already
+  absolute, then a reference to it is simply returned.  If the $uri
+  is relative, then a new absolute URI is constructed by combining the
+  $uri and the $base_uri, and returned.
+  
+  =item $uri->rel( $base_uri )
+  
+  Returns a relative URI reference if it is possible to
+  make one that denotes the same resource relative to $base_uri.
+  If not, then $uri is simply returned.
+  
+  =item $uri->secure
+  
+  Returns a TRUE value if the URI is considered to point to a resource on
+  a secure channel, such as an SSL or TLS encrypted one.
+  
+  =back
+  
+  =head1 GENERIC METHODS
+  
+  The following methods are available to schemes that use the
+  common/generic syntax for hierarchical namespaces.  The descriptions of
+  schemes below indicate which these are.  Unrecognized schemes are
+  assumed to support the generic syntax, and therefore the following
+  methods:
+  
+  =over 4
+  
+  =item $uri->authority
+  
+  =item $uri->authority( $new_authority )
+  
+  Sets and returns the escaped authority component
+  of the $uri.
+  
+  =item $uri->path
+  
+  =item $uri->path( $new_path )
+  
+  Sets and returns the escaped path component of
+  the $uri (the part between the host name and the query or fragment).
+  The path can never be undefined, but it can be the empty string.
+  
+  =item $uri->path_query
+  
+  =item $uri->path_query( $new_path_query )
+  
+  Sets and returns the escaped path and query
+  components as a single entity.  The path and the query are
+  separated by a "?" character, but the query can itself contain "?".
+  
+  =item $uri->path_segments
+  
+  =item $uri->path_segments( $segment, ... )
+  
+  Sets and returns the path.  In a scalar context, it returns
+  the same value as $uri->path.  In a list context, it returns the
+  unescaped path segments that make up the path.  Path segments that
+  have parameters are returned as an anonymous array.  The first element
+  is the unescaped path segment proper;  subsequent elements are escaped
+  parameter strings.  Such an anonymous array uses overloading so it can
+  be treated as a string too, but this string does not include the
+  parameters.
+  
+  Note that absolute paths have the empty string as their first
+  I<path_segment>, i.e. the I<path> C</foo/bar> have 3
+  I<path_segments>; "", "foo" and "bar".
+  
+  =item $uri->query
+  
+  =item $uri->query( $new_query )
+  
+  Sets and returns the escaped query component of
+  the $uri.
+  
+  =item $uri->query_form
+  
+  =item $uri->query_form( $key1 => $val1, $key2 => $val2, ... )
+  
+  =item $uri->query_form( $key1 => $val1, $key2 => $val2, ..., $delim )
+  
+  =item $uri->query_form( \@key_value_pairs )
+  
+  =item $uri->query_form( \@key_value_pairs, $delim )
+  
+  =item $uri->query_form( \%hash )
+  
+  =item $uri->query_form( \%hash, $delim )
+  
+  Sets and returns query components that use the
+  I<application/x-www-form-urlencoded> format.  Key/value pairs are
+  separated by "&", and the key is separated from the value by a "="
+  character.
+  
+  The form can be set either by passing separate key/value pairs, or via
+  an array or hash reference.  Passing an empty array or an empty hash
+  removes the query component, whereas passing no arguments at all leaves
+  the component unchanged.  The order of keys is undefined if a hash
+  reference is passed.  The old value is always returned as a list of
+  separate key/value pairs.  Assigning this list to a hash is unwise as
+  the keys returned might repeat.
+  
+  The values passed when setting the form can be plain strings or
+  references to arrays of strings.  Passing an array of values has the
+  same effect as passing the key repeatedly with one value at a time.
+  All the following statements have the same effect:
+  
+      $uri->query_form(foo => 1, foo => 2);
+      $uri->query_form(foo => [1, 2]);
+      $uri->query_form([ foo => 1, foo => 2 ]);
+      $uri->query_form([ foo => [1, 2] ]);
+      $uri->query_form({ foo => [1, 2] });
+  
+  The $delim parameter can be passed as ";" to force the key/value pairs
+  to be delimited by ";" instead of "&" in the query string.  This
+  practice is often recommended for URLs embedded in HTML or XML
+  documents as this avoids the trouble of escaping the "&" character.
+  You might also set the $URI::DEFAULT_QUERY_FORM_DELIMITER variable to
+  ";" for the same global effect.
+  
+  The C<URI::QueryParam> module can be loaded to add further methods to
+  manipulate the form of a URI.  See L<URI::QueryParam> for details.
+  
+  =item $uri->query_keywords
+  
+  =item $uri->query_keywords( $keywords, ... )
+  
+  =item $uri->query_keywords( \@keywords )
+  
+  Sets and returns query components that use the
+  keywords separated by "+" format.
+  
+  The keywords can be set either by passing separate keywords directly
+  or by passing a reference to an array of keywords.  Passing an empty
+  array removes the query component, whereas passing no arguments at
+  all leaves the component unchanged.  The old value is always returned
+  as a list of separate words.
+  
+  =back
+  
+  =head1 SERVER METHODS
+  
+  For schemes where the I<authority> component denotes an Internet host,
+  the following methods are available in addition to the generic
+  methods.
+  
+  =over 4
+  
+  =item $uri->userinfo
+  
+  =item $uri->userinfo( $new_userinfo )
+  
+  Sets and returns the escaped userinfo part of the
+  authority component.
+  
+  For some schemes this is a user name and a password separated by
+  a colon.  This practice is not recommended. Embedding passwords in
+  clear text (such as URI) has proven to be a security risk in almost
+  every case where it has been used.
+  
+  =item $uri->host
+  
+  =item $uri->host( $new_host )
+  
+  Sets and returns the unescaped hostname.
+  
+  If the $new_host string ends with a colon and a number, then this
+  number also sets the port.
+  
+  For IPv6 addresses the brackets around the raw address is removed in the return
+  value from $uri->host.  When setting the host attribute to an IPv6 address you
+  can use a raw address or one enclosed in brackets.  The address needs to be
+  enclosed in brackets if you want to pass in a new port value as well.
+  
+  =item $uri->ihost
+  
+  Returns the host in Unicode form.  Any IDNA A-labels are turned into U-labels.
+  
+  =item $uri->port
+  
+  =item $uri->port( $new_port )
+  
+  Sets and returns the port.  The port is a simple integer
+  that should be greater than 0.
+  
+  If a port is not specified explicitly in the URI, then the URI scheme's default port
+  is returned. If you don't want the default port
+  substituted, then you can use the $uri->_port method instead.
+  
+  =item $uri->host_port
+  
+  =item $uri->host_port( $new_host_port )
+  
+  Sets and returns the host and port as a single
+  unit.  The returned value includes a port, even if it matches the
+  default port.  The host part and the port part are separated by a
+  colon: ":".
+  
+  For IPv6 addresses the bracketing is preserved; thus
+  URI->new("http://[::1]/")->host_port returns "[::1]:80".  Contrast this with
+  $uri->host which will remove the brackets.
+  
+  =item $uri->default_port
+  
+  Returns the default port of the URI scheme to which $uri
+  belongs.  For I<http> this is the number 80, for I<ftp> this
+  is the number 21, etc.  The default port for a scheme can not be
+  changed.
+  
+  =back
+  
+  =head1 SCHEME-SPECIFIC SUPPORT
+  
+  Scheme-specific support is provided for the following URI schemes.  For C<URI>
+  objects that do not belong to one of these, you can only use the common and
+  generic methods.
+  
+  =over 4
+  
+  =item B<data>:
+  
+  The I<data> URI scheme is specified in RFC 2397.  It allows inclusion
+  of small data items as "immediate" data, as if it had been included
+  externally.
+  
+  C<URI> objects belonging to the data scheme support the common methods
+  and two new methods to access their scheme-specific components:
+  $uri->media_type and $uri->data.  See L<URI::data> for details.
+  
+  =item B<file>:
+  
+  An old specification of the I<file> URI scheme is found in RFC 1738.
+  A new RFC 2396 based specification in not available yet, but file URI
+  references are in common use.
+  
+  C<URI> objects belonging to the file scheme support the common and
+  generic methods.  In addition, they provide two methods for mapping file URIs
+  back to local file names; $uri->file and $uri->dir.  See L<URI::file>
+  for details.
+  
+  =item B<ftp>:
+  
+  An old specification of the I<ftp> URI scheme is found in RFC 1738.  A
+  new RFC 2396 based specification in not available yet, but ftp URI
+  references are in common use.
+  
+  C<URI> objects belonging to the ftp scheme support the common,
+  generic and server methods.  In addition, they provide two methods for
+  accessing the userinfo sub-components: $uri->user and $uri->password.
+  
+  =item B<gopher>:
+  
+  The I<gopher> URI scheme is specified in
+  <draft-murali-url-gopher-1996-12-04> and will hopefully be available
+  as a RFC 2396 based specification.
+  
+  C<URI> objects belonging to the gopher scheme support the common,
+  generic and server methods. In addition, they support some methods for
+  accessing gopher-specific path components: $uri->gopher_type,
+  $uri->selector, $uri->search, $uri->string.
+  
+  =item B<http>:
+  
+  The I<http> URI scheme is specified in RFC 2616.
+  The scheme is used to reference resources hosted by HTTP servers.
+  
+  C<URI> objects belonging to the http scheme support the common,
+  generic and server methods.
+  
+  =item B<https>:
+  
+  The I<https> URI scheme is a Netscape invention which is commonly
+  implemented.  The scheme is used to reference HTTP servers through SSL
+  connections.  Its syntax is the same as http, but the default
+  port is different.
+  
+  =item B<ldap>:
+  
+  The I<ldap> URI scheme is specified in RFC 2255.  LDAP is the
+  Lightweight Directory Access Protocol.  An ldap URI describes an LDAP
+  search operation to perform to retrieve information from an LDAP
+  directory.
+  
+  C<URI> objects belonging to the ldap scheme support the common,
+  generic and server methods as well as ldap-specific methods: $uri->dn,
+  $uri->attributes, $uri->scope, $uri->filter, $uri->extensions.  See
+  L<URI::ldap> for details.
+  
+  =item B<ldapi>:
+  
+  Like the I<ldap> URI scheme, but uses a UNIX domain socket.  The
+  server methods are not supported, and the local socket path is
+  available as $uri->un_path.  The I<ldapi> scheme is used by the
+  OpenLDAP package.  There is no real specification for it, but it is
+  mentioned in various OpenLDAP manual pages.
+  
+  =item B<ldaps>:
+  
+  Like the I<ldap> URI scheme, but uses an SSL connection.  This
+  scheme is deprecated, as the preferred way is to use the I<start_tls>
+  mechanism.
+  
+  =item B<mailto>:
+  
+  The I<mailto> URI scheme is specified in RFC 2368.  The scheme was
+  originally used to designate the Internet mailing address of an
+  individual or service.  It has (in RFC 2368) been extended to allow
+  setting of other mail header fields and the message body.
+  
+  C<URI> objects belonging to the mailto scheme support the common
+  methods and the generic query methods.  In addition, they support the
+  following mailto-specific methods: $uri->to, $uri->headers.
+  
+  Note that the "foo@example.com" part of a mailto is I<not> the
+  C<userinfo> and C<host> but instead the C<path>.  This allows a
+  mailto URI to contain multiple comma separated email addresses.
+  
+  =item B<mms>:
+  
+  The I<mms> URL specification can be found at L<http://sdp.ppona.com/>.
+  C<URI> objects belonging to the mms scheme support the common,
+  generic, and server methods, with the exception of userinfo and
+  query-related sub-components.
+  
+  =item B<news>:
+  
+  The I<news>, I<nntp> and I<snews> URI schemes are specified in
+  <draft-gilman-news-url-01> and will hopefully be available as an RFC
+  2396 based specification soon. (Update: as of April 2010, they are in
+  L<RFC 5538|https://tools.ietf.org/html/rfc5538>.
+  
+  C<URI> objects belonging to the news scheme support the common,
+  generic and server methods.  In addition, they provide some methods to
+  access the path: $uri->group and $uri->message.
+  
+  =item B<nntp>:
+  
+  See I<news> scheme.
+  
+  =item B<nntps>:
+  
+  See I<news> scheme and L<RFC 5538|https://tools.ietf.org/html/rfc5538>.
+  
+  =item B<pop>:
+  
+  The I<pop> URI scheme is specified in RFC 2384. The scheme is used to
+  reference a POP3 mailbox.
+  
+  C<URI> objects belonging to the pop scheme support the common, generic
+  and server methods.  In addition, they provide two methods to access the
+  userinfo components: $uri->user and $uri->auth
+  
+  =item B<rlogin>:
+  
+  An old specification of the I<rlogin> URI scheme is found in RFC
+  1738. C<URI> objects belonging to the rlogin scheme support the
+  common, generic and server methods.
+  
+  =item B<rtsp>:
+  
+  The I<rtsp> URL specification can be found in section 3.2 of RFC 2326.
+  C<URI> objects belonging to the rtsp scheme support the common,
+  generic, and server methods, with the exception of userinfo and
+  query-related sub-components.
+  
+  =item B<rtspu>:
+  
+  The I<rtspu> URI scheme is used to talk to RTSP servers over UDP
+  instead of TCP.  The syntax is the same as rtsp.
+  
+  =item B<rsync>:
+  
+  Information about rsync is available from L<http://rsync.samba.org/>.
+  C<URI> objects belonging to the rsync scheme support the common,
+  generic and server methods.  In addition, they provide methods to
+  access the userinfo sub-components: $uri->user and $uri->password.
+  
+  =item B<sip>:
+  
+  The I<sip> URI specification is described in sections 19.1 and 25
+  of RFC 3261.  C<URI> objects belonging to the sip scheme support the
+  common, generic, and server methods with the exception of path related
+  sub-components.  In addition, they provide two methods to get and set
+  I<sip> parameters: $uri->params_form and $uri->params.
+  
+  =item B<sips>:
+  
+  See I<sip> scheme.  Its syntax is the same as sip, but the default
+  port is different.
+  
+  =item B<snews>:
+  
+  See I<news> scheme.  Its syntax is the same as news, but the default
+  port is different.
+  
+  =item B<telnet>:
+  
+  An old specification of the I<telnet> URI scheme is found in RFC
+  1738. C<URI> objects belonging to the telnet scheme support the
+  common, generic and server methods.
+  
+  =item B<tn3270>:
+  
+  These URIs are used like I<telnet> URIs but for connections to IBM
+  mainframes.  C<URI> objects belonging to the tn3270 scheme support the
+  common, generic and server methods.
+  
+  =item B<ssh>:
+  
+  Information about ssh is available at L<http://www.openssh.com/>.
+  C<URI> objects belonging to the ssh scheme support the common,
+  generic and server methods. In addition, they provide methods to
+  access the userinfo sub-components: $uri->user and $uri->password.
+  
+  =item B<sftp>:
+  
+  C<URI> objects belonging to the sftp scheme support the common,
+  generic and server methods. In addition, they provide methods to
+  access the userinfo sub-components: $uri->user and $uri->password.
+  
+  =item B<urn>:
+  
+  The syntax of Uniform Resource Names is specified in RFC 2141.  C<URI>
+  objects belonging to the urn scheme provide the common methods, and also the
+  methods $uri->nid and $uri->nss, which return the Namespace Identifier
+  and the Namespace-Specific String respectively.
+  
+  The Namespace Identifier basically works like the Scheme identifier of
+  URIs, and further divides the URN namespace.  Namespace Identifier
+  assignments are maintained at
+  L<http://www.iana.org/assignments/urn-namespaces>.
+  
+  Letter case is not significant for the Namespace Identifier.  It is
+  always returned in lower case by the $uri->nid method.  The $uri->_nid
+  method can be used if you want it in its original case.
+  
+  =item B<urn>:B<isbn>:
+  
+  The C<urn:isbn:> namespace contains International Standard Book
+  Numbers (ISBNs) and is described in RFC 3187.  A C<URI> object belonging
+  to this namespace has the following extra methods (if the
+  Business::ISBN module is available): $uri->isbn,
+  $uri->isbn_publisher_code, $uri->isbn_group_code (formerly isbn_country_code,
+  which is still supported by issues a deprecation warning), $uri->isbn_as_ean.
+  
+  =item B<urn>:B<oid>:
+  
+  The C<urn:oid:> namespace contains Object Identifiers (OIDs) and is
+  described in RFC 3061.  An object identifier consists of sequences of digits
+  separated by dots.  A C<URI> object belonging to this namespace has an
+  additional method called $uri->oid that can be used to get/set the oid
+  value.  In a list context, oid numbers are returned as separate elements.
+  
+  =back
+  
+  =head1 CONFIGURATION VARIABLES
+  
+  The following configuration variables influence how the class and its
+  methods behave:
+  
+  =over 4
+  
+  =item $URI::ABS_ALLOW_RELATIVE_SCHEME
+  
+  Some older parsers used to allow the scheme name to be present in the
+  relative URL if it was the same as the base URL scheme.  RFC 2396 says
+  that this should be avoided, but you can enable this old behaviour by
+  setting the $URI::ABS_ALLOW_RELATIVE_SCHEME variable to a TRUE value.
+  The difference is demonstrated by the following examples:
+  
+    URI->new("http:foo")->abs("http://host/a/b")
+        ==>  "http:foo"
+  
+    local $URI::ABS_ALLOW_RELATIVE_SCHEME = 1;
+    URI->new("http:foo")->abs("http://host/a/b")
+        ==>  "http:/host/a/foo"
+  
+  
+  =item $URI::ABS_REMOTE_LEADING_DOTS
+  
+  You can also have the abs() method ignore excess ".."
+  segments in the relative URI by setting $URI::ABS_REMOTE_LEADING_DOTS
+  to a TRUE value.  The difference is demonstrated by the following
+  examples:
+  
+    URI->new("../../../foo")->abs("http://host/a/b")
+        ==> "http://host/../../foo"
+  
+    local $URI::ABS_REMOTE_LEADING_DOTS = 1;
+    URI->new("../../../foo")->abs("http://host/a/b")
+        ==> "http://host/foo"
+  
+  =item $URI::DEFAULT_QUERY_FORM_DELIMITER
+  
+  This value can be set to ";" to have the query form C<key=value> pairs
+  delimited by ";" instead of "&" which is the default.
+  
+  =back
+  
+  =head1 ENVIRONMENT VARIABLES
+  
+  =over 4
+  
+  =item URI_HAS_RESERVED_SQUARE_BRACKETS
+  
+  Before version 5.11, URI treated square brackets as reserved characters
+  throughout the whole URI string. However, these brackets are reserved
+  only within the authority/host part of the URI and nowhere else (RFC 3986).
+  
+  Starting with version 5.11, URI takes this distinction into account.
+  Setting the environment variable C<URI_HAS_RESERVED_SQUARE_BRACKETS>
+  (programmatically or via the shell), restores the old behavior.
+  
+    #-- restore 5.10 behavior programmatically
+    BEGIN {
+      $ENV{URI_HAS_RESERVED_SQUARE_BRACKETS} = 1;
+    }
+    use URI ();
+  
+  I<Note>: This environment variable is just used during initialization and has to be set
+        I<before> module URI is used/required. Changing it at run time has no effect.
+  
+  Its value can be checked programmatically by accessing the constant
+  C<URI::HAS_RESERVED_SQUARE_BRACKETS>.
+  
+  =back
+  
+  =head1 BUGS
+  
+  There are some things that are not quite right:
+  
+  =over
+  
+  =item *
+  
+  Using regexp variables like $1 directly as arguments to the URI accessor methods
+  does not work too well with current perl implementations.  I would argue
+  that this is actually a bug in perl.  The workaround is to quote
+  them. Example:
+  
+     /(...)/ || die;
+     $u->query("$1");
+  
+  
+  =item *
+  
+  The escaping (percent encoding) of chars in the 128 .. 255 range passed to the
+  URI constructor or when setting URI parts using the accessor methods depend on
+  the state of the internal UTF8 flag (see utf8::is_utf8) of the string passed.
+  If the UTF8 flag is set the UTF-8 encoded version of the character is percent
+  encoded.  If the UTF8 flag isn't set the Latin-1 version (byte) of the
+  character is percent encoded.  This basically exposes the internal encoding of
+  Perl strings.
+  
+  =back
+  
+  =head1 PARSING URIs WITH REGEXP
+  
+  As an alternative to this module, the following (official) regular
+  expression can be used to decode a URI:
+  
+    my($scheme, $authority, $path, $query, $fragment) =
+    $uri =~ m|(?:([^:/?#]+):)?(?://([^/?#]*))?([^?#]*)(?:\?([^#]*))?(?:#(.*))?|;
+  
+  The C<URI::Split> module provides the function uri_split() as a
+  readable alternative.
+  
+  =head1 SEE ALSO
+  
+  L<URI::file>, L<URI::WithBase>, L<URI::QueryParam>, L<URI::Escape>,
+  L<URI::Split>, L<URI::Heuristic>
+  
+  RFC 2396: "Uniform Resource Identifiers (URI): Generic Syntax",
+  Berners-Lee, Fielding, Masinter, August 1998.
+  
+  L<http://www.iana.org/assignments/uri-schemes>
+  
+  L<http://www.iana.org/assignments/urn-namespaces>
+  
+  L<http://www.w3.org/Addressing/>
+  
+  =head1 COPYRIGHT
+  
+  Copyright 1995-2009 Gisle Aas.
+  
+  Copyright 1995 Martijn Koster.
+  
+  This program is free software; you can redistribute it and/or modify
+  it under the same terms as Perl itself.
+  
+  =head1 AUTHORS / ACKNOWLEDGMENTS
+  
+  This module is based on the C<URI::URL> module, which in turn was
+  (distantly) based on the C<wwwurl.pl> code in the libwww-perl for
+  perl4 developed by Roy Fielding, as part of the Arcadia project at the
+  University of California, Irvine, with contributions from Brooks
+  Cutter.
+  
+  C<URI::URL> was developed by Gisle Aas, Tim Bunce, Roy Fielding and
+  Martijn Koster with input from other people on the libwww-perl mailing
+  list.
+  
+  C<URI> and related subclasses was developed by Gisle Aas.
+  
+  =cut
+URI
+
+$fatpacked{"URI/Escape.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'URI_ESCAPE';
+  package URI::Escape;
+  
+  use strict;
+  use warnings;
+  
+  =head1 NAME
+  
+  URI::Escape - Percent-encode and percent-decode unsafe characters
+  
+  =head1 SYNOPSIS
+  
+   use URI::Escape;
+   $safe = uri_escape("10% is enough\n");
+   $verysafe = uri_escape("foo", "\0-\377");
+   $str  = uri_unescape($safe);
+  
+  =head1 DESCRIPTION
+  
+  This module provides functions to percent-encode and percent-decode URI strings as
+  defined by RFC 3986. Percent-encoding URI's is informally called "URI escaping".
+  This is the terminology used by this module, which predates the formalization of the
+  terms by the RFC by several years.
+  
+  A URI consists of a restricted set of characters.  The restricted set
+  of characters consists of digits, letters, and a few graphic symbols
+  chosen from those common to most of the character encodings and input
+  facilities available to Internet users.  They are made up of the
+  "unreserved" and "reserved" character sets as defined in RFC 3986.
+  
+     unreserved    = ALPHA / DIGIT / "-" / "." / "_" / "~"
+     reserved      = ":" / "/" / "?" / "#" / "[" / "]" / "@"
+                     "!" / "$" / "&" / "'" / "(" / ")"
+                   / "*" / "+" / "," / ";" / "="
+  
+  In addition, any byte (octet) can be represented in a URI by an escape
+  sequence: a triplet consisting of the character "%" followed by two
+  hexadecimal digits.  A byte can also be represented directly by a
+  character, using the US-ASCII character for that octet.
+  
+  Some of the characters are I<reserved> for use as delimiters or as
+  part of certain URI components.  These must be escaped if they are to
+  be treated as ordinary data.  Read RFC 3986 for further details.
+  
+  The functions provided (and exported by default) from this module are:
+  
+  =over 4
+  
+  =item uri_escape( $string )
+  
+  =item uri_escape( $string, $unsafe )
+  
+  Replaces each unsafe character in the $string with the corresponding
+  escape sequence and returns the result.  The $string argument should
+  be a string of bytes.  The uri_escape() function will croak if given a
+  characters with code above 255.  Use uri_escape_utf8() if you know you
+  have such chars or/and want chars in the 128 .. 255 range treated as
+  UTF-8.
+  
+  The uri_escape() function takes an optional second argument that
+  overrides the set of characters that are to be escaped.  The set is
+  specified as a string that can be used in a regular expression
+  character class (between [ ]).  E.g.:
+  
+    "\x00-\x1f\x7f-\xff"          # all control and hi-bit characters
+    "a-z"                         # all lower case characters
+    "^A-Za-z"                     # everything not a letter
+  
+  The default set of characters to be escaped is all those which are
+  I<not> part of the C<unreserved> character class shown above as well
+  as the reserved characters.  I.e. the default is:
+  
+      "^A-Za-z0-9\-\._~"
+  
+  =item uri_escape_utf8( $string )
+  
+  =item uri_escape_utf8( $string, $unsafe )
+  
+  Works like uri_escape(), but will encode chars as UTF-8 before
+  escaping them.  This makes this function able to deal with characters
+  with code above 255 in $string.  Note that chars in the 128 .. 255
+  range will be escaped differently by this function compared to what
+  uri_escape() would.  For chars in the 0 .. 127 range there is no
+  difference.
+  
+  Equivalent to:
+  
+      utf8::encode($string);
+      my $uri = uri_escape($string);
+  
+  Note: JavaScript has a function called escape() that produces the
+  sequence "%uXXXX" for chars in the 256 .. 65535 range.  This function
+  has really nothing to do with URI escaping but some folks got confused
+  since it "does the right thing" in the 0 .. 255 range.  Because of
+  this you sometimes see "URIs" with these kind of escapes.  The
+  JavaScript encodeURIComponent() function is similar to uri_escape_utf8().
+  
+  =item uri_unescape($string,...)
+  
+  Returns a string with each %XX sequence replaced with the actual byte
+  (octet).
+  
+  This does the same as:
+  
+     $string =~ s/%([0-9A-Fa-f]{2})/chr(hex($1))/eg;
+  
+  but does not modify the string in-place as this RE would.  Using the
+  uri_unescape() function instead of the RE might make the code look
+  cleaner and is a few characters less to type.
+  
+  In a simple benchmark test I did,
+  calling the function (instead of the inline RE above) if a few chars
+  were unescaped was something like 40% slower, and something like 700% slower if none were.  If
+  you are going to unescape a lot of times it might be a good idea to
+  inline the RE.
+  
+  If the uri_unescape() function is passed multiple strings, then each
+  one is returned unescaped.
+  
+  =back
+  
+  The module can also export the C<%escapes> hash, which contains the
+  mapping from all 256 bytes to the corresponding escape codes.  Lookup
+  in this hash is faster than evaluating C<sprintf("%%%02X", ord($byte))>
+  each time.
+  
+  =head1 SEE ALSO
+  
+  L<URI>
+  
+  
+  =head1 COPYRIGHT
+  
+  Copyright 1995-2004 Gisle Aas.
+  
+  This program is free software; you can redistribute it and/or modify
+  it under the same terms as Perl itself.
+  
+  =cut
+  
+  use Exporter 5.57 'import';
+  our %escapes;
+  our @EXPORT = qw(uri_escape uri_unescape uri_escape_utf8);
+  our @EXPORT_OK = qw(%escapes);
+  our $VERSION = '5.12';
+  
+  use Carp ();
+  
+  # Build a char->hex map
+  for (0..255) {
+      $escapes{chr($_)} = sprintf("%%%02X", $_);
+  }
+  
+  my %subst;  # compiled patterns
+  
+  my %Unsafe = (
+      RFC2732 => qr/[^A-Za-z0-9\-_.!~*'()]/,
+      RFC3986 => qr/[^A-Za-z0-9\-\._~]/,
+  );
+  
+  sub uri_escape {
+      my($text, $patn) = @_;
+      return undef unless defined $text;
+      if (defined $patn){
+          unless (exists  $subst{$patn}) {
+              # Because we can't compile the regex we fake it with a cached sub
+              (my $tmp = $patn) =~ s,/,\\/,g;
+              eval "\$subst{\$patn} = sub {\$_[0] =~ s/([$tmp])/\$escapes{\$1} || _fail_hi(\$1)/ge; }";
+              Carp::croak("uri_escape: $@") if $@;
+          }
+          &{$subst{$patn}}($text);
+      } else {
+          $text =~ s/($Unsafe{RFC3986})/$escapes{$1} || _fail_hi($1)/ge;
+      }
+      $text;
+  }
+  
+  sub _fail_hi {
+      my $chr = shift;
+      Carp::croak(sprintf "Can't escape \\x{%04X}, try uri_escape_utf8() instead", ord($chr));
+  }
+  
+  sub uri_escape_utf8 {
+      my $text = shift;
+      return undef unless defined $text;
+      utf8::encode($text);
+      return uri_escape($text, @_);
+  }
+  
+  sub uri_unescape {
+      # Note from RFC1630:  "Sequences which start with a percent sign
+      # but are not followed by two hexadecimal characters are reserved
+      # for future extension"
+      my $str = shift;
+      if (@_ && wantarray) {
+          # not executed for the common case of a single argument
+          my @str = ($str, @_);  # need to copy
+          for (@str) {
+              s/%([0-9A-Fa-f]{2})/chr(hex($1))/eg;
+          }
+          return @str;
+      }
+      $str =~ s/%([0-9A-Fa-f]{2})/chr(hex($1))/eg if defined $str;
+      $str;
+  }
+  
+  # XXX FIXME escape_char is buggy as it assigns meaning to the string's storage format.
+  sub escape_char {
+      # Old versions of utf8::is_utf8() didn't properly handle magical vars (e.g. $1).
+      # The following forces a fetch to occur beforehand.
+      my $dummy = substr($_[0], 0, 0);
+  
+      if (utf8::is_utf8($_[0])) {
+          my $s = shift;
+          utf8::encode($s);
+          unshift(@_, $s);
+      }
+  
+      return join '', @URI::Escape::escapes{split //, $_[0]};
+  }
+  
+  1;
+URI_ESCAPE
+
+$fatpacked{"URI/Heuristic.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'URI_HEURISTIC';
+  package URI::Heuristic;
+  
+  =head1 NAME
+  
+  URI::Heuristic - Expand URI using heuristics
+  
+  =head1 SYNOPSIS
+  
+   use URI::Heuristic qw(uf_uristr);
+   $u = uf_uristr("example");          # http://www.example.com
+   $u = uf_uristr("www.sol.no/sol");   # http://www.sol.no/sol
+   $u = uf_uristr("aas");              # http://www.aas.no
+   $u = uf_uristr("ftp.funet.fi");     # ftp://ftp.funet.fi
+   $u = uf_uristr("/etc/passwd");      # file:/etc/passwd
+  
+  =head1 DESCRIPTION
+  
+  This module provides functions that expand strings into real absolute
+  URIs using some built-in heuristics.  Strings that already represent
+  absolute URIs (i.e. that start with a C<scheme:> part) are never modified
+  and are returned unchanged.  The main use of these functions is to
+  allow abbreviated URIs similar to what many web browsers allow for URIs
+  typed in by the user.
+  
+  The following functions are provided:
+  
+  =over 4
+  
+  =item uf_uristr($str)
+  
+  Tries to make the argument string
+  into a proper absolute URI string.  The "uf_" prefix stands for "User 
+  Friendly".  Under MacOS, it assumes that any string with a common URL 
+  scheme (http, ftp, etc.) is a URL rather than a local path.  So don't name 
+  your volumes after common URL schemes and expect uf_uristr() to construct 
+  valid file: URL's on those volumes for you, because it won't.
+  
+  =item uf_uri($str)
+  
+  Works the same way as uf_uristr() but
+  returns a C<URI> object.
+  
+  =back
+  
+  =head1 ENVIRONMENT
+  
+  If the hostname portion of a URI does not contain any dots, then
+  certain qualified guesses are made.  These guesses are governed by
+  the following environment variables:
+  
+  =over 10
+  
+  =item COUNTRY
+  
+  The two-letter country code (ISO 3166) for your location.  If
+  the domain name of your host ends with two letters, then it is taken
+  to be the default country. See also L<Locale::Country>.
+  
+  =item HTTP_ACCEPT_LANGUAGE, LC_ALL, LANG
+  
+  If COUNTRY is not set, these standard environment variables are
+  examined and country (not language) information possibly found in them
+  is used as the default country.
+  
+  =item URL_GUESS_PATTERN
+  
+  Contains a space-separated list of URL patterns to try.  The string
+  "ACME" is for some reason used as a placeholder for the host name in
+  the URL provided.  Example:
+  
+   URL_GUESS_PATTERN="www.ACME.no www.ACME.se www.ACME.com"
+   export URL_GUESS_PATTERN
+  
+  Specifying URL_GUESS_PATTERN disables any guessing rules based on
+  country.  An empty URL_GUESS_PATTERN disables any guessing that
+  involves host name lookups.
+  
+  =back
+  
+  =head1 COPYRIGHT
+  
+  Copyright 1997-1998, Gisle Aas
+  
+  This library is free software; you can redistribute it and/or
+  modify it under the same terms as Perl itself.
+  
+  =cut
+  
+  use strict;
+  use warnings;
+  
+  use Exporter 5.57 'import';
+  our @EXPORT_OK = qw(uf_uri uf_uristr uf_url uf_urlstr);
+  our $VERSION = '5.12';
+  
+  our ($MY_COUNTRY, $DEBUG);
+  
+  sub MY_COUNTRY() {
+      for ($MY_COUNTRY) {
+  	return $_ if defined;
+  
+  	# First try the environment.
+  	$_ = $ENV{COUNTRY};
+  	return $_ if defined;
+  
+  	# Try the country part of LC_ALL and LANG from environment
+  	my @srcs = ($ENV{LC_ALL}, $ENV{LANG});
+  	# ...and HTTP_ACCEPT_LANGUAGE before those if present
+  	if (my $httplang = $ENV{HTTP_ACCEPT_LANGUAGE}) {
+  	    # TODO: q-value processing/ordering
+  	    for $httplang (split(/\s*,\s*/, $httplang)) {
+  		if ($httplang =~ /^\s*([a-zA-Z]+)[_-]([a-zA-Z]{2})\s*$/) {
+  		    unshift(@srcs, "${1}_${2}");
+  		    last;
+  		}
+  	    }
+  	}
+  	for (@srcs) {
+  	    next unless defined;
+  	    return lc($1) if /^[a-zA-Z]+_([a-zA-Z]{2})(?:[.@]|$)/;
+  	}
+  
+  	# Last bit of domain name.  This may access the network.
+  	require Net::Domain;
+  	my $fqdn = Net::Domain::hostfqdn();
+  	$_ = lc($1) if $fqdn =~ /\.([a-zA-Z]{2})$/;
+  	return $_ if defined;
+  
+  	# Give up.  Defined but false.
+  	return ($_ = 0);
+      }
+  }
+  
+  our %LOCAL_GUESSING =
+  (
+   'us' => [qw(www.ACME.gov www.ACME.mil)],
+   'gb' => [qw(www.ACME.co.uk www.ACME.org.uk www.ACME.ac.uk)],
+   'au' => [qw(www.ACME.com.au www.ACME.org.au www.ACME.edu.au)],
+   'il' => [qw(www.ACME.co.il www.ACME.org.il www.ACME.net.il)],
+   # send corrections and new entries to <gisle@aas.no>
+  );
+  # Backwards compatibility; uk != United Kingdom in ISO 3166
+  $LOCAL_GUESSING{uk} = $LOCAL_GUESSING{gb};
+  
+  
+  sub uf_uristr ($)
+  {
+      local($_) = @_;
+      print STDERR "uf_uristr: resolving $_\n" if $DEBUG;
+      return unless defined;
+  
+      s/^\s+//;
+      s/\s+$//;
+  
+      if (/^(www|web|home)[a-z0-9-]*(?:\.|$)/i) {
+  	$_ = "http://$_";
+  
+      } elsif (/^(ftp|gopher|news|wais|https|http)[a-z0-9-]*(?:\.|$)/i) {
+  	$_ = lc($1) . "://$_";
+  
+      } elsif ($^O ne "MacOS" && 
+  	    (m,^/,      ||          # absolute file name
+  	     m,^\.\.?/, ||          # relative file name
+  	     m,^[a-zA-Z]:[/\\],)    # dosish file name
+  	    )
+      {
+  	$_ = "file:$_";
+  
+      } elsif ($^O eq "MacOS" && m/:/) {
+          # potential MacOS file name
+  	unless (m/^(ftp|gopher|news|wais|http|https|mailto):/) {
+  	    require URI::file;
+  	    my $a = URI::file->new($_)->as_string;
+  	    $_ = ($a =~ m/^file:/) ? $a : "file:$a";
+  	}
+      } elsif (/^\w+([\.\-]\w+)*\@(\w+\.)+\w{2,3}$/) {
+  	$_ = "mailto:$_";
+  
+      } elsif (!/^[a-zA-Z][a-zA-Z0-9.+\-]*:/) {      # no scheme specified
+  	if (s/^([-\w]+(?:\.[-\w]+)*)([\/:\?\#]|$)/$2/) {
+  	    my $host = $1;
+  
+  	    my $scheme = "http";
+  	    if (/^:(\d+)\b/) {
+  		# Some more or less well known ports
+  		if ($1 =~ /^[56789]?443$/) {
+  		    $scheme = "https";
+  		} elsif ($1 eq "21") {
+  		    $scheme = "ftp";
+  		}
+  	    }
+  
+  	    if ($host !~ /\./ && $host ne "localhost") {
+  		my @guess;
+  		if (exists $ENV{URL_GUESS_PATTERN}) {
+  		    @guess = map { s/\bACME\b/$host/; $_ }
+  		             split(' ', $ENV{URL_GUESS_PATTERN});
+  		} else {
+  		    if (MY_COUNTRY()) {
+  			my $special = $LOCAL_GUESSING{MY_COUNTRY()};
+  			if ($special) {
+  			    my @special = @$special;
+  			    push(@guess, map { s/\bACME\b/$host/; $_ }
+                                                 @special);
+  			} else {
+  			    push(@guess, "www.$host." . MY_COUNTRY());
+  			}
+  		    }
+  		    push(@guess, map "www.$host.$_",
+  			             "com", "org", "net", "edu", "int");
+  		}
+  
+  
+  		my $guess;
+  		for $guess (@guess) {
+  		    print STDERR "uf_uristr: gethostbyname('$guess.')..."
+  		      if $DEBUG;
+  		    if (gethostbyname("$guess.")) {
+  			print STDERR "yes\n" if $DEBUG;
+  			$host = $guess;
+  			last;
+  		    }
+  		    print STDERR "no\n" if $DEBUG;
+  		}
+  	    }
+  	    $_ = "$scheme://$host$_";
+  
+  	} else {
+  	    # pure junk, just return it unchanged...
+  
+  	}
+      }
+      print STDERR "uf_uristr: ==> $_\n" if $DEBUG;
+  
+      $_;
+  }
+  
+  sub uf_uri ($)
+  {
+      require URI;
+      URI->new(uf_uristr($_[0]));
+  }
+  
+  # legacy
+  *uf_urlstr = \*uf_uristr;
+  
+  sub uf_url ($)
+  {
+      require URI::URL;
+      URI::URL->new(uf_uristr($_[0]));
+  }
+  
+  1;
+URI_HEURISTIC
+
+$fatpacked{"URI/IRI.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'URI_IRI';
+  package URI::IRI;
+  
+  # Experimental
+  
+  use strict;
+  use warnings;
+  use URI ();
+  
+  use overload '""' => sub { shift->as_string };
+  
+  our $VERSION = '5.12';
+  
+  sub new {
+      my($class, $uri, $scheme) = @_;
+      utf8::upgrade($uri);
+      return bless {
+  	uri => URI->new($uri, $scheme),
+      }, $class;
+  }
+  
+  sub clone {
+      my $self = shift;
+      return bless {
+  	uri => $self->{uri}->clone,
+      }, ref($self);
+  }
+  
+  sub as_string {
+      my $self = shift;
+      return $self->{uri}->as_iri;
+  }
+  
+  our $AUTOLOAD;
+  sub AUTOLOAD
+  {
+      my $method = substr($AUTOLOAD, rindex($AUTOLOAD, '::')+2);
+  
+      # We create the function here so that it will not need to be
+      # autoloaded the next time.
+      no strict 'refs';
+      *$method = sub { shift->{uri}->$method(@_) };
+      goto &$method;
+  }
+  
+  sub DESTROY {}   # avoid AUTOLOADing it
+  
+  1;
+URI_IRI
+
+$fatpacked{"URI/QueryParam.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'URI_QUERYPARAM';
+  package URI::QueryParam;
+  
+  use strict;
+  use warnings;
+  
+  our $VERSION = '5.12';
+  
+  sub URI::_query::query_param {
+      my $self = shift;
+      my @old = $self->query_form;
+  
+      if (@_ == 0) {
+  	# get keys
+  	my (%seen, $i);
+  	return grep !($i++ % 2 || $seen{$_}++), @old;
+      }
+  
+      my $key = shift;
+      my @i = grep $_ % 2 == 0 && $old[$_] eq $key, 0 .. $#old;
+  
+      if (@_) {
+  	my @new = @old;
+  	my @new_i = @i;
+  	my @vals = map { ref($_) eq 'ARRAY' ? @$_ : $_ } @_;
+  
+  	while (@new_i > @vals) {
+  	    splice @new, pop @new_i, 2;
+  	}
+  	if (@vals > @new_i) {
+  	    my $i = @new_i ? $new_i[-1] + 2 : @new;
+  	    my @splice = splice @vals, @new_i, @vals - @new_i;
+  
+  	    splice @new, $i, 0, map { $key => $_ } @splice;
+  	}
+  	if (@vals) {
+  	    #print "SET $new_i[0]\n";
+  	    @new[ map $_ + 1, @new_i ] = @vals;
+  	}
+  
+  	$self->query_form(\@new);
+      }
+  
+      return wantarray ? @old[map $_+1, @i] : @i ? $old[$i[0]+1] : undef;
+  }
+  
+  sub URI::_query::query_param_append {
+      my $self = shift;
+      my $key = shift;
+      my @vals = map { ref $_ eq 'ARRAY' ? @$_ : $_ } @_;
+      $self->query_form($self->query_form, $key => \@vals);  # XXX
+      return;
+  }
+  
+  sub URI::_query::query_param_delete {
+      my $self = shift;
+      my $key = shift;
+      my @old = $self->query_form;
+      my @vals;
+  
+      for (my $i = @old - 2; $i >= 0; $i -= 2) {
+  	next if $old[$i] ne $key;
+  	push(@vals, (splice(@old, $i, 2))[1]);
+      }
+      $self->query_form(\@old) if @vals;
+      return wantarray ? reverse @vals : $vals[-1];
+  }
+  
+  sub URI::_query::query_form_hash {
+      my $self = shift;
+      my @old = $self->query_form;
+      if (@_) {
+  	$self->query_form(@_ == 1 ? %{shift(@_)} : @_);
+      }
+      my %hash;
+      while (my($k, $v) = splice(@old, 0, 2)) {
+  	if (exists $hash{$k}) {
+  	    for ($hash{$k}) {
+  		$_ = [$_] unless ref($_) eq "ARRAY";
+  		push(@$_, $v);
+  	    }
+  	}
+  	else {
+  	    $hash{$k} = $v;
+  	}
+      }
+      return \%hash;
+  }
+  
+  1;
+  
+  __END__
+  
+  =head1 NAME
+  
+  URI::QueryParam - Additional query methods for URIs
+  
+  =head1 SYNOPSIS
+  
+    use URI;
+    use URI::QueryParam;
+  
+    $u = URI->new("", "http");
+    $u->query_param(foo => 1, 2, 3);
+    print $u->query;    # prints foo=1&foo=2&foo=3
+  
+    for my $key ($u->query_param) {
+        print "$key: ", join(", ", $u->query_param($key)), "\n";
+    }
+  
+  =head1 DESCRIPTION
+  
+  Loading the C<URI::QueryParam> module adds some extra methods to
+  URIs that support query methods.  These methods provide an alternative
+  interface to the $u->query_form data.
+  
+  The query_param_* methods have deliberately been made identical to the
+  interface of the corresponding C<CGI.pm> methods.
+  
+  The following additional methods are made available:
+  
+  =over
+  
+  =item @keys = $u->query_param
+  
+  =item @values = $u->query_param( $key )
+  
+  =item $first_value = $u->query_param( $key )
+  
+  =item $u->query_param( $key, $value,... )
+  
+  If $u->query_param is called with no arguments, it returns all the
+  distinct parameter keys of the URI.  In a scalar context it returns the
+  number of distinct keys.
+  
+  When a $key argument is given, the method returns the parameter values with the
+  given key.  In a scalar context, only the first parameter value is
+  returned.
+  
+  If additional arguments are given, they are used to update successive
+  parameters with the given key.  If any of the values provided are
+  array references, then the array is dereferenced to get the actual
+  values.
+  
+  Please note that you can supply multiple values to this method, but you cannot
+  supply multiple keys.
+  
+  Do this:
+  
+      $uri->query_param( widget_id => 1, 5, 9 );
+  
+  Do NOT do this:
+  
+      $uri->query_param( widget_id => 1, frobnicator_id => 99 );
+  
+  =item $u->query_param_append($key, $value,...)
+  
+  Adds new parameters with the given
+  key without touching any old parameters with the same key.  It
+  can be explained as a more efficient version of:
+  
+     $u->query_param($key,
+                     $u->query_param($key),
+                     $value,...);
+  
+  One difference is that this expression would return the old values
+  of $key, whereas the query_param_append() method does not.
+  
+  =item @values = $u->query_param_delete($key)
+  
+  =item $first_value = $u->query_param_delete($key)
+  
+  Deletes all key/value pairs with the given key.
+  The old values are returned.  In a scalar context, only the first value
+  is returned.
+  
+  Using the query_param_delete() method is slightly more efficient than
+  the equivalent:
+  
+     $u->query_param($key, []);
+  
+  =item $hashref = $u->query_form_hash
+  
+  =item $u->query_form_hash( \%new_form )
+  
+  Returns a reference to a hash that represents the
+  query form's key/value pairs.  If a key occurs multiple times, then the hash
+  value becomes an array reference.
+  
+  Note that sequence information is lost.  This means that:
+  
+     $u->query_form_hash($u->query_form_hash);
+  
+  is not necessarily a no-op, as it may reorder the key/value pairs.
+  The values returned by the query_param() method should stay the same
+  though.
+  
+  =back
+  
+  =head1 SEE ALSO
+  
+  L<URI>, L<CGI>
+  
+  =head1 COPYRIGHT
+  
+  Copyright 2002 Gisle Aas.
+  
+  =cut
+URI_QUERYPARAM
+
+$fatpacked{"URI/Split.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'URI_SPLIT';
+  package URI::Split;
+  
+  use strict;
+  use warnings;
+  
+  our $VERSION = '5.12';
+  
+  use Exporter 5.57 'import';
+  our @EXPORT_OK = qw(uri_split uri_join);
+  
+  use URI::Escape ();
+  
+  sub uri_split {
+       return $_[0] =~ m,(?:([^:/?#]+):)?(?://([^/?#]*))?([^?#]*)(?:\?([^#]*))?(?:#(.*))?,;
+  }
+  
+  sub uri_join {
+      my($scheme, $auth, $path, $query, $frag) = @_;
+      my $uri = defined($scheme) ? "$scheme:" : "";
+      $path = "" unless defined $path;
+      if (defined $auth) {
+  	$auth =~ s,([/?\#]), URI::Escape::escape_char($1),eg;
+  	$uri .= "//$auth";
+  	$path = "/$path" if length($path) && $path !~ m,^/,;
+      }
+      elsif ($path =~ m,^//,) {
+  	$uri .= "//";  # XXX force empty auth
+      }
+      unless (length $uri) {
+  	$path =~ s,(:), URI::Escape::escape_char($1),e while $path =~ m,^[^:/?\#]+:,;
+      }
+      $path =~ s,([?\#]), URI::Escape::escape_char($1),eg;
+      $uri .= $path;
+      if (defined $query) {
+  	$query =~ s,(\#), URI::Escape::escape_char($1),eg;
+  	$uri .= "?$query";
+      }
+      $uri .= "#$frag" if defined $frag;
+      $uri;
+  }
+  
+  1;
+  
+  __END__
+  
+  =head1 NAME
+  
+  URI::Split - Parse and compose URI strings
+  
+  =head1 SYNOPSIS
+  
+   use URI::Split qw(uri_split uri_join);
+   ($scheme, $auth, $path, $query, $frag) = uri_split($uri);
+   $uri = uri_join($scheme, $auth, $path, $query, $frag);
+  
+  =head1 DESCRIPTION
+  
+  Provides functions to parse and compose URI
+  strings.  The following functions are provided:
+  
+  =over
+  
+  =item ($scheme, $auth, $path, $query, $frag) = uri_split($uri)
+  
+  Breaks up a URI string into its component
+  parts.  An C<undef> value is returned for those parts that are not
+  present.  The $path part is always present (but can be the empty
+  string) and is thus never returned as C<undef>.
+  
+  No sensible value is returned if this function is called in a scalar
+  context.
+  
+  =item $uri = uri_join($scheme, $auth, $path, $query, $frag)
+  
+  Puts together a URI string from its parts.
+  Missing parts are signaled by passing C<undef> for the corresponding
+  argument.
+  
+  Minimal escaping is applied to parts that contain reserved chars
+  that would confuse a parser.  For instance, any occurrence of '?' or '#'
+  in $path is always escaped, as it would otherwise be parsed back
+  as a query or fragment.
+  
+  =back
+  
+  =head1 SEE ALSO
+  
+  L<URI>, L<URI::Escape>
+  
+  =head1 COPYRIGHT
+  
+  Copyright 2003, Gisle Aas
+  
+  This library is free software; you can redistribute it and/or
+  modify it under the same terms as Perl itself.
+  
+  =cut
+URI_SPLIT
+
+$fatpacked{"URI/URL.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'URI_URL';
+  package URI::URL;
+  
+  use strict;
+  use warnings;
+  
+  use parent 'URI::WithBase';
+  
+  our $VERSION = '5.12';
+  
+  # Provide as much as possible of the old URI::URL interface for backwards
+  # compatibility...
+  
+  use Exporter 5.57 'import';
+  our @EXPORT = qw(url);
+  
+  # Easy to use constructor
+  sub url ($;$) { URI::URL->new(@_); }
+  
+  use URI::Escape qw(uri_unescape);
+  
+  sub new
+  {
+      my $class = shift;
+      my $self = $class->SUPER::new(@_);
+      $self->[0] = $self->[0]->canonical;
+      $self;
+  }
+  
+  sub newlocal
+  {
+      my $class = shift;
+      require URI::file;
+      bless [URI::file->new_abs(shift)], $class;
+  }
+  
+  {package URI::_foreign;
+      sub _init  # hope it is not defined
+      {
+  	my $class = shift;
+  	die "Unknown URI::URL scheme $_[1]:" if $URI::URL::STRICT;
+  	$class->SUPER::_init(@_);
+      }
+  }
+  
+  sub strict
+  {
+      my $old = $URI::URL::STRICT;
+      $URI::URL::STRICT = shift if @_;
+      $old;
+  }
+  
+  sub print_on
+  {
+      my $self = shift;
+      require Data::Dumper;
+      print STDERR Data::Dumper::Dumper($self);
+  }
+  
+  sub _try
+  {
+      my $self = shift;
+      my $method = shift;
+      scalar(eval { $self->$method(@_) });
+  }
+  
+  sub crack
+  {
+      # should be overridden by subclasses
+      my $self = shift;
+      (scalar($self->scheme),
+       $self->_try("user"),
+       $self->_try("password"),
+       $self->_try("host"),
+       $self->_try("port"),
+       $self->_try("path"),
+       $self->_try("params"),
+       $self->_try("query"),
+       scalar($self->fragment),
+      )
+  }
+  
+  sub full_path
+  {
+      my $self = shift;
+      my $path = $self->path_query;
+      $path = "/" unless length $path;
+      $path;
+  }
+  
+  sub netloc
+  {
+      shift->authority(@_);
+  }
+  
+  sub epath
+  {
+      my $path = shift->SUPER::path(@_);
+      $path =~ s/;.*//;
+      $path;
+  }
+  
+  sub eparams
+  {
+      my $self = shift;
+      my @p = $self->path_segments;
+      return undef unless ref($p[-1]);
+      @p = @{$p[-1]};
+      shift @p;
+      join(";", @p);
+  }
+  
+  sub params { shift->eparams(@_); }
+  
+  sub path {
+      my $self = shift;
+      my $old = $self->epath(@_);
+      return unless defined wantarray;
+      return '/' if !defined($old) || !length($old);
+      Carp::croak("Path components contain '/' (you must call epath)")
+  	if $old =~ /%2[fF]/ and !@_;
+      $old = "/$old" if $old !~ m|^/| && defined $self->netloc;
+      return uri_unescape($old);
+  }
+  
+  sub path_components {
+      shift->path_segments(@_);
+  }
+  
+  sub query {
+      my $self = shift;
+      my $old = $self->equery(@_);
+      if (defined(wantarray) && defined($old)) {
+  	if ($old =~ /%(?:26|2[bB]|3[dD])/) {  # contains escaped '=' '&' or '+'
+  	    my $mess;
+  	    for ($old) {
+  		$mess = "Query contains both '+' and '%2B'"
+  		  if /\+/ && /%2[bB]/;
+  		$mess = "Form query contains escaped '=' or '&'"
+  		  if /=/  && /%(?:3[dD]|26)/;
+  	    }
+  	    if ($mess) {
+  		Carp::croak("$mess (you must call equery)");
+  	    }
+  	}
+  	# Now it should be safe to unescape the string without losing
+  	# information
+  	return uri_unescape($old);
+      }
+      undef;
+  
+  }
+  
+  sub abs
+  {
+      my $self = shift;
+      my $base = shift;
+      my $allow_scheme = shift;
+      $allow_scheme = $URI::URL::ABS_ALLOW_RELATIVE_SCHEME
+  	unless defined $allow_scheme;
+      local $URI::ABS_ALLOW_RELATIVE_SCHEME = $allow_scheme;
+      local $URI::ABS_REMOTE_LEADING_DOTS = $URI::URL::ABS_REMOTE_LEADING_DOTS;
+      $self->SUPER::abs($base);
+  }
+  
+  sub frag { shift->fragment(@_); }
+  sub keywords { shift->query_keywords(@_); }
+  
+  # file:
+  sub local_path { shift->file; }
+  sub unix_path  { shift->file("unix"); }
+  sub dos_path   { shift->file("dos");  }
+  sub mac_path   { shift->file("mac");  }
+  sub vms_path   { shift->file("vms");  }
+  
+  # mailto:
+  sub address { shift->to(@_); }
+  sub encoded822addr { shift->to(@_); }
+  sub URI::mailto::authority { shift->to(@_); }  # make 'netloc' method work
+  
+  # news:
+  sub groupart { shift->_group(@_); }
+  sub article  { shift->message(@_); }
+  
+  1;
+  
+  __END__
+  
+  =head1 NAME
+  
+  URI::URL - Uniform Resource Locators
+  
+  =head1 SYNOPSIS
+  
+   $u1 = URI::URL->new($str, $base);
+   $u2 = $u1->abs;
+  
+  =head1 DESCRIPTION
+  
+  This module is provided for backwards compatibility with modules that
+  depend on the interface provided by the C<URI::URL> class that used to
+  be distributed with the libwww-perl library.
+  
+  The following differences exist compared to the C<URI> class interface:
+  
+  =over 3
+  
+  =item *
+  
+  The URI::URL module exports the url() function as an alternate
+  constructor interface.
+  
+  =item *
+  
+  The constructor takes an optional $base argument.  The C<URI::URL>
+  class is a subclass of C<URI::WithBase>.
+  
+  =item *
+  
+  The URI::URL->newlocal class method is the same as URI::file->new_abs.
+  
+  =item *
+  
+  URI::URL::strict(1)
+  
+  =item *
+  
+  $url->print_on method
+  
+  =item *
+  
+  $url->crack method
+  
+  =item *
+  
+  $url->full_path: same as ($uri->abs_path || "/")
+  
+  =item *
+  
+  $url->netloc: same as $uri->authority
+  
+  =item *
+  
+  $url->epath, $url->equery: same as $uri->path, $uri->query
+  
+  =item *
+  
+  $url->path and $url->query pass unescaped strings.
+  
+  =item *
+  
+  $url->path_components: same as $uri->path_segments (if you don't
+  consider path segment parameters)
+  
+  =item *
+  
+  $url->params and $url->eparams methods
+  
+  =item *
+  
+  $url->base method.  See L<URI::WithBase>.
+  
+  =item *
+  
+  $url->abs and $url->rel have an optional $base argument.  See
+  L<URI::WithBase>.
+  
+  =item *
+  
+  $url->frag: same as $uri->fragment
+  
+  =item *
+  
+  $url->keywords: same as $uri->query_keywords
+  
+  =item *
+  
+  $url->localpath and friends map to $uri->file.
+  
+  =item *
+  
+  $url->address and $url->encoded822addr: same as $uri->to for mailto URI
+  
+  =item *
+  
+  $url->groupart method for news URI
+  
+  =item *
+  
+  $url->article: same as $uri->message
+  
+  =back
+  
+  
+  
+  =head1 SEE ALSO
+  
+  L<URI>, L<URI::WithBase>
+  
+  =head1 COPYRIGHT
+  
+  Copyright 1998-2000 Gisle Aas.
+  
+  =cut
+URI_URL
+
+$fatpacked{"URI/WithBase.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'URI_WITHBASE';
+  package URI::WithBase;
+  
+  use strict;
+  use warnings;
+  
+  use URI ();
+  use Scalar::Util qw(blessed);
+  
+  our $VERSION = '5.12';
+  
+  use overload '""' => "as_string", fallback => 1;
+  
+  sub as_string;  # help overload find it
+  
+  sub new
+  {
+      my($class, $uri, $base) = @_;
+      my $ibase = $base;
+      if ($base && blessed($base) && $base->isa(__PACKAGE__)) {
+  	$base = $base->abs;
+  	$ibase = $base->[0];
+      }
+      bless [URI->new($uri, $ibase), $base], $class;
+  }
+  
+  sub new_abs
+  {
+      my $class = shift;
+      my $self = $class->new(@_);
+      $self->abs;
+  }
+  
+  sub _init
+  {
+      my $class = shift;
+      my($str, $scheme) = @_;
+      bless [URI->new($str, $scheme), undef], $class;
+  }
+  
+  sub eq
+  {
+      my($self, $other) = @_;
+      $other = $other->[0] if blessed($other) and $other->isa(__PACKAGE__);
+      $self->[0]->eq($other);
+  }
+  
+  our $AUTOLOAD;
+  sub AUTOLOAD
+  {
+      my $self = shift;
+      my $method = substr($AUTOLOAD, rindex($AUTOLOAD, '::')+2);
+      return if $method eq "DESTROY";
+      $self->[0]->$method(@_);
+  }
+  
+  sub can {                                  # override UNIVERSAL::can
+      my $self = shift;
+      $self->SUPER::can(@_) || (
+        ref($self)
+        ? $self->[0]->can(@_)
+        : undef
+      )
+  }
+  
+  sub base {
+      my $self = shift;
+      my $base  = $self->[1];
+  
+      if (@_) { # set
+  	my $new_base = shift;
+  	# ensure absoluteness
+  	$new_base = $new_base->abs if ref($new_base) && $new_base->isa(__PACKAGE__);
+  	$self->[1] = $new_base;
+      }
+      return unless defined wantarray;
+  
+      # The base attribute supports 'lazy' conversion from URL strings
+      # to URL objects. Strings may be stored but when a string is
+      # fetched it will automatically be converted to a URL object.
+      # The main benefit is to make it much cheaper to say:
+      #   URI::WithBase->new($random_url_string, 'http:')
+      if (defined($base) && !ref($base)) {
+  	$base = ref($self)->new($base);
+  	$self->[1] = $base unless @_;
+      }
+      $base;
+  }
+  
+  sub clone
+  {
+      my $self = shift;
+      my $base = $self->[1];
+      $base = $base->clone if ref($base);
+      bless [$self->[0]->clone, $base], ref($self);
+  }
+  
+  sub abs
+  {
+      my $self = shift;
+      my $base = shift || $self->base || return $self->clone;
+      $base = $base->as_string if ref($base);
+      bless [$self->[0]->abs($base, @_), $base], ref($self);
+  }
+  
+  sub rel
+  {
+      my $self = shift;
+      my $base = shift || $self->base || return $self->clone;
+      $base = $base->as_string if ref($base);
+      bless [$self->[0]->rel($base, @_), $base], ref($self);
+  }
+  
+  1;
+  
+  __END__
+  
+  =head1 NAME
+  
+  URI::WithBase - URIs which remember their base
+  
+  =head1 SYNOPSIS
+  
+   $u1 = URI::WithBase->new($str, $base);
+   $u2 = $u1->abs;
+  
+   $base = $u1->base;
+   $u1->base( $new_base )
+  
+  =head1 DESCRIPTION
+  
+  This module provides the C<URI::WithBase> class.  Objects of this class
+  are like C<URI> objects, but can keep their base too.  The base
+  represents the context where this URI was found and can be used to
+  absolutize or relativize the URI.  All the methods described in L<URI>
+  are supported for C<URI::WithBase> objects.
+  
+  The methods provided in addition to or modified from those of C<URI> are:
+  
+  =over 4
+  
+  =item $uri = URI::WithBase->new($str, [$base])
+  
+  The constructor takes an optional base URI as the second argument.
+  If provided, this argument initializes the base attribute.
+  
+  =item $uri->base( [$new_base] )
+  
+  Can be used to get or set the value of the base attribute.
+  The return value, which is the old value, is a URI object or C<undef>.
+  
+  =item $uri->abs( [$base_uri] )
+  
+  The $base_uri argument is now made optional as the object carries its
+  base with it.  A new object is returned even if $uri is already
+  absolute (while plain URI objects simply return themselves in
+  that case).
+  
+  =item $uri->rel( [$base_uri] )
+  
+  The $base_uri argument is now made optional as the object carries its
+  base with it.  A new object is always returned.
+  
+  =back
+  
+  
+  =head1 SEE ALSO
+  
+  L<URI>
+  
+  =head1 COPYRIGHT
+  
+  Copyright 1998-2002 Gisle Aas.
+  
+  =cut
+URI_WITHBASE
+
+$fatpacked{"URI/_foreign.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'URI__FOREIGN';
+  package URI::_foreign;
+  
+  use strict;
+  use warnings;
+  
+  use parent 'URI::_generic';
+  
+  our $VERSION = '5.12';
+  
+  1;
+URI__FOREIGN
+
+$fatpacked{"URI/_generic.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'URI__GENERIC';
+  package URI::_generic;
+  
+  use strict;
+  use warnings;
+  
+  use parent qw(URI URI::_query);
+  
+  use URI::Escape qw(uri_unescape);
+  use Carp ();
+  
+  our $VERSION = '5.12';
+  
+  my $ACHAR = URI::HAS_RESERVED_SQUARE_BRACKETS ? $URI::uric : $URI::uric4host;  $ACHAR =~ s,\\[/?],,g;
+  my $PCHAR = $URI::uric;                                                        $PCHAR =~ s,\\[?],,g;
+  
+  sub _no_scheme_ok { 1 }
+  
+  our $IPv6_re;
+  
+  sub _looks_like_raw_ip6_address {
+    my $addr = shift;
+  
+    if ( !$IPv6_re ) { #-- lazy / runs once / use Regexp::IPv6 if installed
+      eval {
+        require Regexp::IPv6;
+        Regexp::IPv6->import( qw($IPv6_re) );
+        1;
+      }  ||  do { $IPv6_re = qr/[:0-9a-f]{3,}/; }; #-- fallback: unambitious guess
+    }
+  
+    return 0 unless $addr;
+    return 0 if $addr =~ tr/:/:/ < 2;  #-- fallback must not create false positive for IPv4:Port = 0:0
+    return 1 if $addr =~ /^$IPv6_re$/i;
+    return 0;
+  }
+  
+  
+  sub authority
+  {
+      my $self = shift;
+      $$self =~ m,^((?:$URI::scheme_re:)?)(?://([^/?\#]*))?(.*)$,os or die;
+  
+      if (@_) {
+  	my $auth = shift;
+  	$$self = $1;
+  	my $rest = $3;
+  	if (defined $auth) {
+  	    $auth =~ s/([^$ACHAR])/ URI::Escape::escape_char($1)/ego;
+              if ( my ($user, $host) = $auth =~ /^(.*@)?([^@]+)$/ ) { #-- special escape userinfo part
+                $user ||= '';
+                $user =~ s/([^$URI::uric4user])/ URI::Escape::escape_char($1)/ego;
+                $user =~ s/%40$/\@/; # recover final '@'
+                $host = "[$host]" if _looks_like_raw_ip6_address( $host );
+                $auth = $user . $host;
+              }
+  	    utf8::downgrade($auth);
+  	    $$self .= "//$auth";
+  	}
+  	_check_path($rest, $$self);
+  	$$self .= $rest;
+      }
+      $2;
+  }
+  
+  sub path
+  {
+      my $self = shift;
+      $$self =~ m,^((?:[^:/?\#]+:)?(?://[^/?\#]*)?)([^?\#]*)(.*)$,s or die;
+  
+      if (@_) {
+  	$$self = $1;
+  	my $rest = $3;
+  	my $new_path = shift;
+  	$new_path = "" unless defined $new_path;
+  	$new_path =~ s/([^$PCHAR])/ URI::Escape::escape_char($1)/ego;
+  	utf8::downgrade($new_path);
+  	_check_path($new_path, $$self);
+  	$$self .= $new_path . $rest;
+      }
+      $2;
+  }
+  
+  sub path_query
+  {
+      my $self = shift;
+      $$self =~ m,^((?:[^:/?\#]+:)?(?://[^/?\#]*)?)([^\#]*)(.*)$,s or die;
+  
+      if (@_) {
+  	$$self = $1;
+  	my $rest = $3;
+  	my $new_path = shift;
+  	$new_path = "" unless defined $new_path;
+  	$new_path =~ s/([^$URI::uric])/ URI::Escape::escape_char($1)/ego;
+  	utf8::downgrade($new_path);
+  	_check_path($new_path, $$self);
+  	$$self .= $new_path . $rest;
+      }
+      $2;
+  }
+  
+  sub _check_path
+  {
+      my($path, $pre) = @_;
+      my $prefix;
+      if ($pre =~ m,/,) {  # authority present
+  	$prefix = "/" if length($path) && $path !~ m,^[/?\#],;
+      }
+      else {
+  	if ($path =~ m,^//,) {
+  	    Carp::carp("Path starting with double slash is confusing")
+  		if $^W;
+  	}
+  	elsif (!length($pre) && $path =~ m,^[^:/?\#]+:,) {
+  	    Carp::carp("Path might look like scheme, './' prepended")
+  		if $^W;
+  	    $prefix = "./";
+  	}
+      }
+      substr($_[0], 0, 0) = $prefix if defined $prefix;
+  }
+  
+  sub path_segments
+  {
+      my $self = shift;
+      my $path = $self->path;
+      if (@_) {
+  	my @arg = @_;  # make a copy
+  	for (@arg) {
+  	    if (ref($_)) {
+  		my @seg = @$_;
+  		$seg[0] =~ s/%/%25/g;
+  		for (@seg) { s/;/%3B/g; }
+  		$_ = join(";", @seg);
+  	    }
+  	    else {
+  		 s/%/%25/g; s/;/%3B/g;
+  	    }
+  	    s,/,%2F,g;
+  	}
+  	$self->path(join("/", @arg));
+      }
+      return $path unless wantarray;
+      map {/;/ ? $self->_split_segment($_)
+               : uri_unescape($_) }
+          split('/', $path, -1);
+  }
+  
+  
+  sub _split_segment
+  {
+      my $self = shift;
+      require URI::_segment;
+      URI::_segment->new(@_);
+  }
+  
+  
+  sub abs
+  {
+      my $self = shift;
+      my $base = shift || Carp::croak("Missing base argument");
+  
+      if (my $scheme = $self->scheme) {
+  	return $self unless $URI::ABS_ALLOW_RELATIVE_SCHEME;
+  	$base = URI->new($base) unless ref $base;
+  	return $self unless $scheme eq $base->scheme;
+      }
+  
+      $base = URI->new($base) unless ref $base;
+      my $abs = $self->clone;
+      $abs->scheme($base->scheme);
+      return $abs if $$self =~ m,^(?:$URI::scheme_re:)?//,o;
+      $abs->authority($base->authority);
+  
+      my $path = $self->path;
+      return $abs if $path =~ m,^/,;
+  
+      if (!length($path)) {
+  	my $abs = $base->clone;
+  	my $query = $self->query;
+  	$abs->query($query) if defined $query;
+  	my $fragment = $self->fragment;
+  	$abs->fragment($fragment) if defined $fragment;
+  	return $abs;
+      }
+  
+      my $p = $base->path;
+      $p =~ s,[^/]+$,,;
+      $p .= $path;
+      my @p = split('/', $p, -1);
+      shift(@p) if @p && !length($p[0]);
+      my $i = 1;
+      while ($i < @p) {
+  	#print "$i ", join("/", @p), " ($p[$i])\n";
+  	if ($p[$i-1] eq ".") {
+  	    splice(@p, $i-1, 1);
+  	    $i-- if $i > 1;
+  	}
+  	elsif ($p[$i] eq ".." && $p[$i-1] ne "..") {
+  	    splice(@p, $i-1, 2);
+  	    if ($i > 1) {
+  		$i--;
+  		push(@p, "") if $i == @p;
+  	    }
+  	}
+  	else {
+  	    $i++;
+  	}
+      }
+      $p[-1] = "" if @p && $p[-1] eq ".";  # trailing "/."
+      if ($URI::ABS_REMOTE_LEADING_DOTS) {
+          shift @p while @p && $p[0] =~ /^\.\.?$/;
+      }
+      $abs->path("/" . join("/", @p));
+      $abs;
+  }
+  
+  # The opposite of $url->abs.  Return a URI which is as relative as possible
+  sub rel {
+      my $self = shift;
+      my $base = shift || Carp::croak("Missing base argument");
+      my $rel = $self->clone;
+      $base = URI->new($base) unless ref $base;
+  
+      #my($scheme, $auth, $path) = @{$rel}{qw(scheme authority path)};
+      my $scheme = $rel->scheme;
+      my $auth   = $rel->canonical->authority;
+      my $path   = $rel->path;
+  
+      if (!defined($scheme) && !defined($auth)) {
+  	# it is already relative
+  	return $rel;
+      }
+  
+      #my($bscheme, $bauth, $bpath) = @{$base}{qw(scheme authority path)};
+      my $bscheme = $base->scheme;
+      my $bauth   = $base->canonical->authority;
+      my $bpath   = $base->path;
+  
+      for ($bscheme, $bauth, $auth) {
+  	$_ = '' unless defined
+      }
+  
+      unless ($scheme eq $bscheme && $auth eq $bauth) {
+  	# different location, can't make it relative
+  	return $rel;
+      }
+  
+      for ($path, $bpath) {  $_ = "/$_" unless m,^/,; }
+  
+      # Make it relative by eliminating scheme and authority
+      $rel->scheme(undef);
+      $rel->authority(undef);
+  
+      # This loop is based on code from Nicolai Langfeldt <janl@ifi.uio.no>.
+      # First we calculate common initial path components length ($li).
+      my $li = 1;
+      while (1) {
+  	my $i = index($path, '/', $li);
+  	last if $i < 0 ||
+                  $i != index($bpath, '/', $li) ||
+  	        substr($path,$li,$i-$li) ne substr($bpath,$li,$i-$li);
+  	$li=$i+1;
+      }
+      # then we nuke it from both paths
+      substr($path, 0,$li) = '';
+      substr($bpath,0,$li) = '';
+  
+      if ($path eq $bpath &&
+          defined($rel->fragment) &&
+          !defined($rel->query)) {
+          $rel->path("");
+      }
+      else {
+          # Add one "../" for each path component left in the base path
+          $path = ('../' x $bpath =~ tr|/|/|) . $path;
+  	$path = "./" if $path eq "";
+          $rel->path($path);
+      }
+  
+      $rel;
+  }
+  
+  1;
+URI__GENERIC
+
+$fatpacked{"URI/_idna.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'URI__IDNA';
+  package URI::_idna;
+  
+  # This module implements the RFCs 3490 (IDNA) and 3491 (Nameprep)
+  # based on Python-2.6.4/Lib/encodings/idna.py
+  
+  use strict;
+  use warnings;
+  
+  use URI::_punycode qw(decode_punycode encode_punycode);
+  use Carp qw(croak);
+  
+  our $VERSION = '5.12';
+  
+  BEGIN {
+    *URI::_idna::_ENV_::JOIN_LEAKS_UTF8_FLAGS = "$]" < 5.008_003
+      ? sub () { 1 }
+      : sub () { 0 }
+    ;
+  }
+  
+  my $ASCII = qr/^[\x00-\x7F]*\z/;
+  
+  sub encode {
+      my $idomain = shift;
+      my @labels = split(/\./, $idomain, -1);
+      my @last_empty;
+      push(@last_empty, pop @labels) if @labels > 1 && $labels[-1] eq "";
+      for (@labels) {
+  	$_ = ToASCII($_);
+      }
+  
+      return eval 'join(".", @labels, @last_empty)' if URI::_idna::_ENV_::JOIN_LEAKS_UTF8_FLAGS;
+      return join(".", @labels, @last_empty);
+  }
+  
+  sub decode {
+      my $domain = shift;
+      return join(".", map ToUnicode($_), split(/\./, $domain, -1))
+  }
+  
+  sub nameprep { # XXX real implementation missing
+      my $label = shift;
+      $label = lc($label);
+      return $label;
+  }
+  
+  sub check_size {
+      my $label = shift;
+      croak "Label empty" if $label eq "";
+      croak "Label too long" if length($label) > 63;
+      return $label;
+  }
+  
+  sub ToASCII {
+      my $label = shift;
+      return check_size($label) if $label =~ $ASCII;
+  
+      # Step 2: nameprep
+      $label = nameprep($label);
+      # Step 3: UseSTD3ASCIIRules is false
+      # Step 4: try ASCII again
+      return check_size($label) if $label =~ $ASCII;
+  
+      # Step 5: Check ACE prefix
+      if ($label =~ /^xn--/) {
+          croak "Label starts with ACE prefix";
+      }
+  
+      # Step 6: Encode with PUNYCODE
+      $label = encode_punycode($label);
+  
+      # Step 7: Prepend ACE prefix
+      $label = "xn--$label";
+  
+      # Step 8: Check size
+      return check_size($label);
+  }
+  
+  sub ToUnicode {
+      my $label = shift;
+      $label = nameprep($label) unless $label =~ $ASCII;
+      return $label unless $label =~ /^xn--/;
+      my $result = decode_punycode(substr($label, 4));
+      my $label2 = ToASCII($result);
+      if (lc($label) ne $label2) {
+  	croak "IDNA does not round-trip: '\L$label\E' vs '$label2'";
+      }
+      return $result;
+  }
+  
+  1;
+URI__IDNA
+
+$fatpacked{"URI/_ldap.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'URI__LDAP';
+  # Copyright (c) 1998 Graham Barr <gbarr@pobox.com>. All rights reserved.
+  # This program is free software; you can redistribute it and/or
+  # modify it under the same terms as Perl itself.
+  
+  package URI::_ldap;
+  
+  use strict;
+  use warnings;
+  
+  our $VERSION = '5.12';
+  
+  use URI::Escape qw(uri_unescape);
+  
+  sub _ldap_elem {
+    my $self  = shift;
+    my $elem  = shift;
+    my $query = $self->query;
+    my @bits  = (split(/\?/,defined($query) ? $query : ""),("")x4);
+    my $old   = $bits[$elem];
+  
+    if (@_) {
+      my $new = shift;
+      $new =~ s/\?/%3F/g;
+      $bits[$elem] = $new;
+      $query = join("?",@bits);
+      $query =~ s/\?+$//;
+      $query = undef unless length($query);
+      $self->query($query);
+    }
+  
+    $old;
+  }
+  
+  sub dn {
+    my $old = shift->path(@_);
+    $old =~ s:^/::;
+    uri_unescape($old);
+  }
+  
+  sub attributes {
+    my $self = shift;
+    my $old = _ldap_elem($self,0, @_ ? join(",", map { my $tmp = $_; $tmp =~ s/,/%2C/g; $tmp } @_) : ());
+    return $old unless wantarray;
+    map { uri_unescape($_) } split(/,/,$old);
+  }
+  
+  sub _scope {
+    my $self = shift;
+    my $old = _ldap_elem($self,1, @_);
+    return undef unless defined wantarray && defined $old;
+    uri_unescape($old);
+  }
+  
+  sub scope {
+    my $old = &_scope;
+    $old = "base" unless length $old;
+    $old;
+  }
+  
+  sub _filter {
+    my $self = shift;
+    my $old = _ldap_elem($self,2, @_);
+    return undef unless defined wantarray && defined $old;
+    uri_unescape($old); # || "(objectClass=*)";
+  }
+  
+  sub filter {
+    my $old = &_filter;
+    $old = "(objectClass=*)" unless length $old;
+    $old;
+  }
+  
+  sub extensions {
+    my $self = shift;
+    my @ext;
+    while (@_) {
+      my $key = shift;
+      my $value = shift;
+      push(@ext, join("=", map { $_="" unless defined; s/,/%2C/g; $_ } $key, $value));
+    }
+    @ext = join(",", @ext) if @ext;
+    my $old = _ldap_elem($self,3, @ext);
+    return $old unless wantarray;
+    map { uri_unescape($_) } map { /^([^=]+)=(.*)$/ } split(/,/,$old);
+  }
+  
+  sub canonical
+  {
+      my $self = shift;
+      my $other = $self->_nonldap_canonical;
+  
+      # The stuff below is not as efficient as one might hope...
+  
+      $other = $other->clone if $other == $self;
+  
+      $other->dn(_normalize_dn($other->dn));
+  
+      # Should really know about mixed case "postalAddress", etc...
+      $other->attributes(map lc, $other->attributes);
+  
+      # Lowercase scope, remove default
+      my $old_scope = $other->scope;
+      my $new_scope = lc($old_scope);
+      $new_scope = "" if $new_scope eq "base";
+      $other->scope($new_scope) if $new_scope ne $old_scope;
+  
+      # Remove filter if default
+      my $old_filter = $other->filter;
+      $other->filter("") if lc($old_filter) eq "(objectclass=*)" ||
+  	                  lc($old_filter) eq "objectclass=*";
+  
+      # Lowercase extensions types and deal with known extension values
+      my @ext = $other->extensions;
+      for (my $i = 0; $i < @ext; $i += 2) {
+  	my $etype = $ext[$i] = lc($ext[$i]);
+  	if ($etype =~ /^!?bindname$/) {
+  	    $ext[$i+1] = _normalize_dn($ext[$i+1]);
+  	}
+      }
+      $other->extensions(@ext) if @ext;
+      
+      $other;
+  }
+  
+  sub _normalize_dn  # RFC 2253
+  {
+      my $dn = shift;
+  
+      return $dn;
+      # The code below will fail if the "+" or "," is embedding in a quoted
+      # string or simply escaped...
+  
+      my @dn = split(/([+,])/, $dn);
+      for (@dn) {
+  	s/^([a-zA-Z]+=)/lc($1)/e;
+      }
+      join("", @dn);
+  }
+  
+  1;
+URI__LDAP
+
+$fatpacked{"URI/_login.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'URI__LOGIN';
+  package URI::_login;
+  
+  use strict;
+  use warnings;
+  
+  use parent qw(URI::_server URI::_userpass);
+  
+  our $VERSION = '5.12';
+  
+  # Generic terminal logins.  This is used as a base class for 'telnet',
+  # 'tn3270', and 'rlogin' URL schemes.
+  
+  1;
+URI__LOGIN
+
+$fatpacked{"URI/_punycode.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'URI__PUNYCODE';
+  package URI::_punycode;
+  
+  use strict;
+  use warnings;
+  
+  our $VERSION = '5.12';
+  
+  use Exporter 'import';
+  our @EXPORT = qw(encode_punycode decode_punycode);
+  
+  use integer;
+  
+  our $DEBUG = 0;
+  
+  use constant BASE => 36;
+  use constant TMIN => 1;
+  use constant TMAX => 26;
+  use constant SKEW => 38;
+  use constant DAMP => 700;
+  use constant INITIAL_BIAS => 72;
+  use constant INITIAL_N => 128;
+  
+  my $Delimiter = chr 0x2D;
+  my $BasicRE   = qr/[\x00-\x7f]/;
+  
+  sub _croak { require Carp; Carp::croak(@_); }
+  
+  sub digit_value {
+      my $code = shift;
+      return ord($code) - ord("A") if $code =~ /[A-Z]/;
+      return ord($code) - ord("a") if $code =~ /[a-z]/;
+      return ord($code) - ord("0") + 26 if $code =~ /[0-9]/;
+      return;
+  }
+  
+  sub code_point {
+      my $digit = shift;
+      return $digit + ord('a') if 0 <= $digit && $digit <= 25;
+      return $digit + ord('0') - 26 if 26 <= $digit && $digit <= 36;
+      die 'NOT COME HERE';
+  }
+  
+  sub adapt {
+      my($delta, $numpoints, $firsttime) = @_;
+      $delta = $firsttime ? $delta / DAMP : $delta / 2;
+      $delta += $delta / $numpoints;
+      my $k = 0;
+      while ($delta > ((BASE - TMIN) * TMAX) / 2) {
+  	$delta /= BASE - TMIN;
+  	$k += BASE;
+      }
+      return $k + (((BASE - TMIN + 1) * $delta) / ($delta + SKEW));
+  }
+  
+  sub decode_punycode {
+      my $code = shift;
+  
+      my $n      = INITIAL_N;
+      my $i      = 0;
+      my $bias   = INITIAL_BIAS;
+      my @output;
+  
+      if ($code =~ s/(.*)$Delimiter//o) {
+  	push @output, map ord, split //, $1;
+  	return _croak('non-basic code point') unless $1 =~ /^$BasicRE*$/o;
+      }
+  
+      while ($code) {
+  	my $oldi = $i;
+  	my $w    = 1;
+      LOOP:
+  	for (my $k = BASE; 1; $k += BASE) {
+  	    my $cp = substr($code, 0, 1, '');
+  	    my $digit = digit_value($cp);
+  	    defined $digit or return _croak("invalid punycode input");
+  	    $i += $digit * $w;
+  	    my $t = ($k <= $bias) ? TMIN
+  		: ($k >= $bias + TMAX) ? TMAX : $k - $bias;
+  	    last LOOP if $digit < $t;
+  	    $w *= (BASE - $t);
+  	}
+  	$bias = adapt($i - $oldi, @output + 1, $oldi == 0);
+  	warn "bias becomes $bias" if $DEBUG;
+  	$n += $i / (@output + 1);
+  	$i = $i % (@output + 1);
+  	splice(@output, $i, 0, $n);
+  	warn join " ", map sprintf('%04x', $_), @output if $DEBUG;
+  	$i++;
+      }
+      return join '', map chr, @output;
+  }
+  
+  sub encode_punycode {
+      my $input = shift;
+      my @input = split //, $input;
+  
+      my $n     = INITIAL_N;
+      my $delta = 0;
+      my $bias  = INITIAL_BIAS;
+  
+      my @output;
+      my @basic = grep /$BasicRE/, @input;
+      my $h = my $b = @basic;
+      push @output, @basic;
+      push @output, $Delimiter if $b && $h < @input;
+      warn "basic codepoints: (@output)" if $DEBUG;
+  
+      while ($h < @input) {
+  	my $m = min(grep { $_ >= $n } map ord, @input);
+  	warn sprintf "next code point to insert is %04x", $m if $DEBUG;
+  	$delta += ($m - $n) * ($h + 1);
+  	$n = $m;
+  	for my $i (@input) {
+  	    my $c = ord($i);
+  	    $delta++ if $c < $n;
+  	    if ($c == $n) {
+  		my $q = $delta;
+  	    LOOP:
+  		for (my $k = BASE; 1; $k += BASE) {
+  		    my $t = ($k <= $bias) ? TMIN :
+  			($k >= $bias + TMAX) ? TMAX : $k - $bias;
+  		    last LOOP if $q < $t;
+  		    my $cp = code_point($t + (($q - $t) % (BASE - $t)));
+  		    push @output, chr($cp);
+  		    $q = ($q - $t) / (BASE - $t);
+  		}
+  		push @output, chr(code_point($q));
+  		$bias = adapt($delta, $h + 1, $h == $b);
+  		warn "bias becomes $bias" if $DEBUG;
+  		$delta = 0;
+  		$h++;
+  	    }
+  	}
+  	$delta++;
+  	$n++;
+      }
+      return join '', @output;
+  }
+  
+  sub min {
+      my $min = shift;
+      for (@_) { $min = $_ if $_ <= $min }
+      return $min;
+  }
+  
+  1;
+  __END__
+  
+  =encoding utf8
+  
+  =head1 NAME
+  
+  URI::_punycode - encodes Unicode string in Punycode
+  
+  =head1 SYNOPSIS
+  
+    use strict;
+    use warnings;
+    use utf8;
+  
+    use URI::_punycode qw(encode_punycode decode_punycode);
+  
+    # encode a unicode string
+    my $punycode = encode_punycode('http://☃.net'); # http://.net-xc8g
+    $punycode = encode_punycode('bücher'); # bcher-kva
+    $punycode = encode_punycode('他们为什么不说中文'); # ihqwcrb4cv8a8dqg056pqjye
+  
+    # decode a punycode string back into a unicode string
+    my $unicode = decode_punycode('http://.net-xc8g'); # http://☃.net
+    $unicode = decode_punycode('bcher-kva'); # bücher
+    $unicode = decode_punycode('ihqwcrb4cv8a8dqg056pqjye'); # 他们为什么不说中文
+  
+  =head1 DESCRIPTION
+  
+  L<URI::_punycode> is a module to encode / decode Unicode strings into
+  L<Punycode|https://tools.ietf.org/html/rfc3492>, an efficient
+  encoding of Unicode for use with L<IDNA|https://tools.ietf.org/html/rfc5890>.
+  
+  =head1 FUNCTIONS
+  
+  All functions throw exceptions on failure. You can C<catch> them with
+  L<Syntax::Keyword::Try> or L<Try::Tiny>. The following functions are exported
+  by default.
+  
+  =head2 encode_punycode
+  
+    my $punycode = encode_punycode('http://☃.net');  # http://.net-xc8g
+    $punycode = encode_punycode('bücher'); # bcher-kva
+    $punycode = encode_punycode('他们为什么不说中文') # ihqwcrb4cv8a8dqg056pqjye
+  
+  Takes a Unicode string (UTF8-flagged variable) and returns a Punycode
+  encoding for it.
+  
+  =head2 decode_punycode
+  
+    my $unicode = decode_punycode('http://.net-xc8g'); # http://☃.net
+    $unicode = decode_punycode('bcher-kva'); # bücher
+    $unicode = decode_punycode('ihqwcrb4cv8a8dqg056pqjye'); # 他们为什么不说中文
+  
+  Takes a Punycode encoding and returns original Unicode string.
+  
+  =head1 AUTHOR
+  
+  Tatsuhiko Miyagawa <F<miyagawa@bulknews.net>> is the author of
+  L<IDNA::Punycode> which was the basis for this module.
+  
+  =head1 SEE ALSO
+  
+  L<IDNA::Punycode>, L<RFC 3492|https://tools.ietf.org/html/rfc3492>,
+  L<RFC 5891|https://tools.ietf.org/html/rfc5891>
+  
+  =head1 COPYRIGHT AND LICENSE
+  
+  This library is free software; you can redistribute it and/or modify
+  it under the same terms as Perl itself.
+  
+  =cut
+URI__PUNYCODE
+
+$fatpacked{"URI/_query.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'URI__QUERY';
+  package URI::_query;
+  
+  use strict;
+  use warnings;
+  
+  use URI ();
+  use URI::Escape qw(uri_unescape);
+  
+  our $VERSION = '5.12';
+  
+  sub query
+  {
+      my $self = shift;
+      $$self =~ m,^([^?\#]*)(?:\?([^\#]*))?(.*)$,s or die;
+  
+      if (@_) {
+  	my $q = shift;
+  	$$self = $1;
+  	if (defined $q) {
+  	    $q =~ s/([^$URI::uric])/ URI::Escape::escape_char($1)/ego;
+  	    utf8::downgrade($q);
+  	    $$self .= "?$q";
+  	}
+  	$$self .= $3;
+      }
+      $2;
+  }
+  
+  # Handle ...?foo=bar&bar=foo type of query
+  sub query_form {
+      my $self = shift;
+      my $old = $self->query;
+      if (@_) {
+          # Try to set query string
+          my $delim;
+          my $r = $_[0];
+          if (ref($r) eq "ARRAY") {
+              $delim = $_[1];
+              @_ = @$r;
+          }
+          elsif (ref($r) eq "HASH") {
+              $delim = $_[1];
+              @_ = map { $_ => $r->{$_} } sort keys %$r;
+          }
+          $delim = pop if @_ % 2;
+  
+          my @query;
+          while (my($key,$vals) = splice(@_, 0, 2)) {
+              $key = '' unless defined $key;
+  	    $key =~ s/([;\/?:@&=+,\$\[\]%])/ URI::Escape::escape_char($1)/eg;
+  	    $key =~ s/ /+/g;
+  	    $vals = [ref($vals) eq "ARRAY" ? @$vals : $vals];
+              for my $val (@$vals) {
+                  $val = '' unless defined $val;
+  		$val =~ s/([;\/?:@&=+,\$\[\]%])/ URI::Escape::escape_char($1)/eg;
+                  $val =~ s/ /+/g;
+                  push(@query, "$key=$val");
+              }
+          }
+          if (@query) {
+              unless ($delim) {
+                  $delim = $1 if $old && $old =~ /([&;])/;
+                  $delim ||= $URI::DEFAULT_QUERY_FORM_DELIMITER || "&";
+              }
+              $self->query(join($delim, @query));
+          }
+          else {
+              $self->query(undef);
+          }
+      }
+      return if !defined($old) || !length($old) || !defined(wantarray);
+      return unless $old =~ /=/; # not a form
+      map { s/\+/ /g; uri_unescape($_) }
+           map { /=/ ? split(/=/, $_, 2) : ($_ => '')} split(/[&;]/, $old);
+  }
+  
+  # Handle ...?dog+bones type of query
+  sub query_keywords
+  {
+      my $self = shift;
+      my $old = $self->query;
+      if (@_) {
+          # Try to set query string
+  	my @copy = @_;
+  	@copy = @{$copy[0]} if @copy == 1 && ref($copy[0]) eq "ARRAY";
+  	for (@copy) { s/([;\/?:@&=+,\$\[\]%])/ URI::Escape::escape_char($1)/eg; }
+  	$self->query(@copy ? join('+', @copy) : undef);
+      }
+      return if !defined($old) || !defined(wantarray);
+      return if $old =~ /=/;  # not keywords, but a form
+      map { uri_unescape($_) } split(/\+/, $old, -1);
+  }
+  
+  # Some URI::URL compatibility stuff
+  sub equery { goto &query }
+  
+  1;
+URI__QUERY
+
+$fatpacked{"URI/_segment.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'URI__SEGMENT';
+  package URI::_segment;
+  
+  # Represents a generic path_segment so that it can be treated as
+  # a string too.
+  
+  use strict;
+  use warnings;
+  
+  use URI::Escape qw(uri_unescape);
+  
+  use overload '""' => sub { $_[0]->[0] },
+               fallback => 1;
+  
+  our $VERSION = '5.12';
+  
+  sub new
+  {
+      my $class = shift;
+      my @segment = split(';', shift, -1);
+      $segment[0] = uri_unescape($segment[0]);
+      bless \@segment, $class;
+  }
+  
+  1;
+URI__SEGMENT
+
+$fatpacked{"URI/_server.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'URI__SERVER';
+  package URI::_server;
+  
+  use strict;
+  use warnings;
+  
+  use parent 'URI::_generic';
+  
+  use URI::Escape qw(uri_unescape);
+  
+  our $VERSION = '5.12';
+  
+  sub _uric_escape {
+      my($class, $str) = @_;
+      if ($str =~ m,^((?:$URI::scheme_re:)?)//([^/?\#]*)(.*)$,os) {
+  	my($scheme, $host, $rest) = ($1, $2, $3);
+  	my $ui = $host =~ s/(.*@)// ? $1 : "";
+  	my $port = $host =~ s/(:\d+)\z// ? $1 : "";
+  	if (_host_escape($host)) {
+  	    $str = "$scheme//$ui$host$port$rest";
+  	}
+      }
+      return $class->SUPER::_uric_escape($str);
+  }
+  
+  sub _host_escape {
+    return if  URI::HAS_RESERVED_SQUARE_BRACKETS  and  $_[0] !~ /[^$URI::uric]/;
+    return if !URI::HAS_RESERVED_SQUARE_BRACKETS  and  $_[0] !~ /[^$URI::uric4host]/;
+      eval {
+  	require URI::_idna;
+  	$_[0] = URI::_idna::encode($_[0]);
+      };
+      return 0 if $@;
+      return 1;
+  }
+  
+  sub as_iri {
+      my $self = shift;
+      my $str = $self->SUPER::as_iri;
+      if ($str =~ /\bxn--/) {
+  	if ($str =~ m,^((?:$URI::scheme_re:)?)//([^/?\#]*)(.*)$,os) {
+  	    my($scheme, $host, $rest) = ($1, $2, $3);
+  	    my $ui = $host =~ s/(.*@)// ? $1 : "";
+  	    my $port = $host =~ s/(:\d+)\z// ? $1 : "";
+  	    require URI::_idna;
+  	    $host = URI::_idna::decode($host);
+  	    $str = "$scheme//$ui$host$port$rest";
+  	}
+      }
+      return $str;
+  }
+  
+  sub userinfo
+  {
+      my $self = shift;
+      my $old = $self->authority;
+  
+      if (@_) {
+  	my $new = $old;
+  	$new = "" unless defined $new;
+  	$new =~ s/.*@//;  # remove old stuff
+  	my $ui = shift;
+  	if (defined $ui) {
+            $ui =~ s/([^$URI::uric4user])/ URI::Escape::escape_char($1)/ego;
+            $new = "$ui\@$new";
+  	}
+  	$self->authority($new);
+      }
+      return undef if !defined($old) || $old !~ /(.*)@/;
+      return $1;
+  }
+  
+  sub host
+  {
+      my $self = shift;
+      my $old = $self->authority;
+      if (@_) {
+  	my $tmp = $old;
+  	$tmp = "" unless defined $tmp;
+  	my $ui = ($tmp =~ /(.*@)/) ? $1 : "";
+  	my $port = ($tmp =~ /(:\d+)$/) ? $1 : "";
+  	my $new = shift;
+  	$new = "" unless defined $new;
+  	if (length $new) {
+  	    $new =~ s/[@]/%40/g;   # protect @
+  	    if ($new =~ /^[^:]*:\d*\z/ || $new =~ /]:\d*\z/) {
+  		$new =~ s/(:\d*)\z// || die "Assert";
+  		$port = $1;
+  	    }
+  	    $new = "[$new]" if $new =~ /:/ && $new !~ /^\[/; # IPv6 address
+  	    _host_escape($new);
+  	}
+  	$self->authority("$ui$new$port");
+      }
+      return undef unless defined $old;
+      $old =~ s/.*@//;
+      $old =~ s/:\d+$//;          # remove the port
+      $old =~ s{^\[(.*)\]$}{$1};  # remove brackets around IPv6 (RFC 3986 3.2.2)
+      return uri_unescape($old);
+  }
+  
+  sub ihost
+  {
+      my $self = shift;
+      my $old = $self->host(@_);
+      if ($old =~ /(^|\.)xn--/) {
+  	require URI::_idna;
+  	$old = URI::_idna::decode($old);
+      }
+      return $old;
+  }
+  
+  sub _port
+  {
+      my $self = shift;
+      my $old = $self->authority;
+      if (@_) {
+  	my $new = $old;
+  	$new =~ s/:\d*$//;
+  	my $port = shift;
+  	$new .= ":$port" if defined $port;
+  	$self->authority($new);
+      }
+      return $1 if defined($old) && $old =~ /:(\d*)$/;
+      return;
+  }
+  
+  sub port
+  {
+      my $self = shift;
+      my $port = $self->_port(@_);
+      $port = $self->default_port if !defined($port) || $port eq "";
+      $port;
+  }
+  
+  sub host_port
+  {
+      my $self = shift;
+      my $old = $self->authority;
+      $self->host(shift) if @_;
+      return undef unless defined $old;
+      $old =~ s/.*@//;        # zap userinfo
+      $old =~ s/:$//;         # empty port should be treated the same a no port
+      $old .= ":" . $self->port unless $old =~ /:\d+$/;
+      $old;
+  }
+  
+  
+  sub default_port { undef }
+  
+  sub canonical
+  {
+      my $self = shift;
+      my $other = $self->SUPER::canonical;
+      my $host = $other->host || "";
+      my $port = $other->_port;
+      my $uc_host = $host =~ /[A-Z]/;
+      my $def_port = defined($port) && ($port eq "" ||
+                                        $port == $self->default_port);
+      if ($uc_host || $def_port) {
+  	$other = $other->clone if $other == $self;
+  	$other->host(lc $host) if $uc_host;
+  	$other->port(undef)    if $def_port;
+      }
+      $other;
+  }
+  
+  1;
+URI__SERVER
+
+$fatpacked{"URI/_userpass.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'URI__USERPASS';
+  package URI::_userpass;
+  
+  use strict;
+  use warnings;
+  
+  use URI::Escape qw(uri_unescape);
+  
+  our $VERSION = '5.12';
+  
+  sub user
+  {
+      my $self = shift;
+      my $info = $self->userinfo;
+      if (@_) {
+  	my $new = shift;
+  	my $pass = defined($info) ? $info : "";
+  	$pass =~ s/^[^:]*//;
+  
+  	if (!defined($new) && !length($pass)) {
+  	    $self->userinfo(undef);
+  	} else {
+  	    $new = "" unless defined($new);
+  	    $new =~ s/%/%25/g;
+  	    $new =~ s/:/%3A/g;
+  	    $self->userinfo("$new$pass");
+  	}
+      }
+      return undef unless defined $info;
+      $info =~ s/:.*//;
+      uri_unescape($info);
+  }
+  
+  sub password
+  {
+      my $self = shift;
+      my $info = $self->userinfo;
+      if (@_) {
+  	my $new = shift;
+  	my $user = defined($info) ? $info : "";
+  	$user =~ s/:.*//;
+  
+  	if (!defined($new) && !length($user)) {
+  	    $self->userinfo(undef);
+  	} else {
+  	    $new = "" unless defined($new);
+  	    $new =~ s/%/%25/g;
+  	    $self->userinfo("$user:$new");
+  	}
+      }
+      return undef unless defined $info;
+      return undef unless $info =~ s/^[^:]*://;
+      uri_unescape($info);
+  }
+  
+  1;
+URI__USERPASS
+
+$fatpacked{"URI/data.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'URI_DATA';
+  package URI::data;  # RFC 2397
+  
+  use strict;
+  use warnings;
+  
+  use parent 'URI';
+  
+  our $VERSION = '5.12';
+  
+  use MIME::Base64 qw(decode_base64 encode_base64);
+  use URI::Escape qw(uri_unescape);
+  
+  sub media_type
+  {
+      my $self = shift;
+      my $opaque = $self->opaque;
+      $opaque =~ /^([^,]*),?/ or die;
+      my $old = $1;
+      my $base64;
+      $base64 = $1 if $old =~ s/(;base64)$//i;
+      if (@_) {
+  	my $new = shift;
+  	$new = "" unless defined $new;
+  	$new =~ s/%/%25/g;
+  	$new =~ s/,/%2C/g;
+  	$base64 = "" unless defined $base64;
+  	$opaque =~ s/^[^,]*,?/$new$base64,/;
+  	$self->opaque($opaque);
+      }
+      return uri_unescape($old) if $old;  # media_type can't really be "0"
+      "text/plain;charset=US-ASCII";      # default type
+  }
+  
+  sub data
+  {
+      my $self = shift;
+      my($enc, $data) = split(",", $self->opaque, 2);
+      unless (defined $data) {
+  	$data = "";
+  	$enc  = "" unless defined $enc;
+      }
+      my $base64 = ($enc =~ /;base64$/i);
+      if (@_) {
+  	$enc =~ s/;base64$//i if $base64;
+  	my $new = shift;
+  	$new = "" unless defined $new;
+  	my $uric_count = _uric_count($new);
+  	my $urienc_len = $uric_count + (length($new) - $uric_count) * 3;
+  	my $base64_len = int((length($new)+2) / 3) * 4;
+  	$base64_len += 7;  # because of ";base64" marker
+  	if ($base64_len < $urienc_len || $_[0]) {
+  	    $enc .= ";base64";
+  	    $new = encode_base64($new, "");
+  	} else {
+  	    $new =~ s/%/%25/g;
+  	}
+  	$self->opaque("$enc,$new");
+      }
+      return unless defined wantarray;
+      $data = uri_unescape($data);
+      return $base64 ? decode_base64($data) : $data;
+  }
+  
+  # I could not find a better way to interpolate the tr/// chars from
+  # a variable.
+  my $ENC = $URI::uric;
+  $ENC =~ s/%//;
+  
+  eval <<EOT; die $@ if $@;
+  sub _uric_count
+  {
+      \$_[0] =~ tr/$ENC//;
+  }
+  EOT
+  
+  1;
+  
+  __END__
+  
+  =head1 NAME
+  
+  URI::data - URI that contains immediate data
+  
+  =head1 SYNOPSIS
+  
+   use URI;
+  
+   $u = URI->new("data:");
+   $u->media_type("image/gif");
+   $u->data(scalar(`cat camel.gif`));
+   print "$u\n";
+   open(XV, "|xv -") and print XV $u->data;
+  
+  =head1 DESCRIPTION
+  
+  The C<URI::data> class supports C<URI> objects belonging to the I<data>
+  URI scheme.  The I<data> URI scheme is specified in RFC 2397.  It
+  allows inclusion of small data items as "immediate" data, as if it had
+  been included externally.  Examples:
+  
+    data:,Perl%20is%20good
+  
+    data:image/gif;base64,R0lGODdhIAAgAIAAAAAAAPj8+CwAAAAAI
+      AAgAAAClYyPqcu9AJyCjtIKc5w5xP14xgeO2tlY3nWcajmZZdeJcG
+      Kxrmimms1KMTa1Wg8UROx4MNUq1HrycMjHT9b6xKxaFLM6VRKzI+p
+      KS9XtXpcbdun6uWVxJXA8pNPkdkkxhxc21LZHFOgD2KMoQXa2KMWI
+      JtnE2KizVUkYJVZZ1nczBxXlFopZBtoJ2diXGdNUymmJdFMAADs=
+  
+  
+  
+  C<URI> objects belonging to the data scheme support the common methods
+  (described in L<URI>) and the following two scheme-specific methods:
+  
+  =over 4
+  
+  =item $uri->media_type( [$new_media_type] )
+  
+  Can be used to get or set the media type specified in the
+  URI.  If no media type is specified, then the default
+  C<"text/plain;charset=US-ASCII"> is returned.
+  
+  =item $uri->data( [$new_data] )
+  
+  Can be used to get or set the data contained in the URI.
+  The data is passed unescaped (in binary form).  The decision about
+  whether to base64 encode the data in the URI is taken automatically,
+  based on the encoding that produces the shorter URI string.
+  
+  =back
+  
+  =head1 SEE ALSO
+  
+  L<URI>
+  
+  =head1 COPYRIGHT
+  
+  Copyright 1995-1998 Gisle Aas.
+  
+  This library is free software; you can redistribute it and/or
+  modify it under the same terms as Perl itself.
+  
+  =cut
+URI_DATA
+
+$fatpacked{"URI/file.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'URI_FILE';
+  package URI::file;
+  
+  use strict;
+  use warnings;
+  
+  use parent 'URI::_generic';
+  our $VERSION = '5.12';
+  
+  use URI::Escape qw(uri_unescape);
+  
+  our $DEFAULT_AUTHORITY = "";
+  
+  # Map from $^O values to implementation classes.  The Unix
+  # class is the default.
+  our %OS_CLASS = (
+       os2     => "OS2",
+       mac     => "Mac",
+       MacOS   => "Mac",
+       MSWin32 => "Win32",
+       win32   => "Win32",
+       msdos   => "FAT",
+       dos     => "FAT",
+       qnx     => "QNX",
+  );
+  
+  sub os_class
+  {
+      my($OS) = shift || $^O;
+  
+      my $class = "URI::file::" . ($OS_CLASS{$OS} || "Unix");
+      no strict 'refs';
+      unless (%{"$class\::"}) {
+  	eval "require $class";
+  	die $@ if $@;
+      }
+      $class;
+  }
+  
+  sub host { uri_unescape(shift->authority(@_)) }
+  
+  sub new
+  {
+      my($class, $path, $os) = @_;
+      os_class($os)->new($path);
+  }
+  
+  sub new_abs
+  {
+      my $class = shift;
+      my $file = $class->new(@_);
+      return $file->abs($class->cwd) unless $$file =~ /^file:/;
+      $file;
+  }
+  
+  sub cwd
+  {
+      my $class = shift;
+      require Cwd;
+      my $cwd = Cwd::cwd();
+      $cwd = VMS::Filespec::unixpath($cwd) if $^O eq 'VMS';
+      $cwd = $class->new($cwd);
+      $cwd .= "/" unless substr($cwd, -1, 1) eq "/";
+      $cwd;
+  }
+  
+  sub canonical {
+      my $self = shift;
+      my $other = $self->SUPER::canonical;
+  
+      my $scheme = $other->scheme;
+      my $auth = $other->authority;
+      return $other if !defined($scheme) && !defined($auth);  # relative
+  
+      if (!defined($auth) ||
+  	$auth eq "" ||
+  	lc($auth) eq "localhost" ||
+  	(defined($DEFAULT_AUTHORITY) && lc($auth) eq lc($DEFAULT_AUTHORITY))
+         )
+      {
+  	# avoid cloning if $auth already match
+  	if ((defined($auth) || defined($DEFAULT_AUTHORITY)) &&
+  	    (!defined($auth) || !defined($DEFAULT_AUTHORITY) || $auth ne $DEFAULT_AUTHORITY)
+  	   )
+  	{
+  	    $other = $other->clone if $self == $other;
+  	    $other->authority($DEFAULT_AUTHORITY);
+          }
+      }
+  
+      $other;
   }
   
   sub file
   {
-      my $self = shift;
-      exists $self->{'-file'} ? $self->{'-file'} : undef;
+      my($self, $os) = @_;
+      os_class($os)->file($self);
   }
   
-  sub line
+  sub dir
   {
-      my $self = shift;
-      exists $self->{'-line'} ? $self->{'-line'} : undef;
-  }
-  
-  sub text
-  {
-      my $self = shift;
-      exists $self->{'-text'} ? $self->{'-text'} : undef;
-  }
-  
-  # overload methods
-  
-  sub stringify
-  {
-      my $self = shift;
-      defined $self->{'-text'} ? $self->{'-text'} : "Died";
-  }
-  
-  sub value
-  {
-      my $self = shift;
-      exists $self->{'-value'} ? $self->{'-value'} : undef;
-  }
-  
-  package Error::Simple;
-  $Error::Simple::VERSION = '0.17029';
-  @Error::Simple::ISA = qw(Error);
-  
-  sub new
-  {
-      my $self   = shift;
-      my $text   = "" . shift;
-      my $value  = shift;
-      my (@args) = ();
-  
-      local $Error::Depth = $Error::Depth + 1;
-  
-      @args = ( -file => $1, -line => $2 )
-          if ( $text =~
-          s/\s+at\s+(\S+)\s+line\s+(\d+)(?:,\s*<[^>]*>\s+line\s+\d+)?\.?\n?$//s );
-      push( @args, '-value', 0 + $value )
-          if defined($value);
-  
-      $self->SUPER::new( -text => $text, @args );
-  }
-  
-  sub stringify
-  {
-      my $self = shift;
-      my $text = $self->SUPER::stringify;
-      $text .= sprintf( " at %s line %d.\n", $self->file, $self->line )
-          unless ( $text =~ /\n$/s );
-      $text;
-  }
-  
-  ##########################################################################
-  ##########################################################################
-  
-  # Inspired by code from Jesse Glick <jglick@sig.bsh.com> and
-  # Peter Seibel <peter@weblogic.com>
-  
-  package Error::subs;
-  $Error::subs::VERSION = '0.17029';
-  use Exporter ();
-  use vars qw(@EXPORT_OK @ISA %EXPORT_TAGS);
-  
-  @EXPORT_OK = qw(try with finally except otherwise);
-  %EXPORT_TAGS = ( try => \@EXPORT_OK );
-  
-  @ISA = qw(Exporter);
-  
-  sub run_clauses ($$$\@)
-  {
-      my ( $clauses, $err, $wantarray, $result ) = @_;
-      my $code = undef;
-  
-      $err = $Error::ObjectifyCallback->( { 'text' => $err } ) unless ref($err);
-  
-  CATCH:
-      {
-  
-          # catch
-          my $catch;
-          if ( defined( $catch = $clauses->{'catch'} ) )
-          {
-              my $i = 0;
-  
-          CATCHLOOP:
-              for ( ; $i < @$catch ; $i += 2 )
-              {
-                  my $pkg = $catch->[$i];
-                  unless ( defined $pkg )
-                  {
-                      #except
-                      splice( @$catch, $i, 2, $catch->[ $i + 1 ]->($err) );
-                      $i -= 2;
-                      next CATCHLOOP;
-                  }
-                  elsif ( Scalar::Util::blessed($err) && $err->isa($pkg) )
-                  {
-                      $code = $catch->[ $i + 1 ];
-                      while (1)
-                      {
-                          my $more = 0;
-                          local ( $Error::THROWN, $@ );
-                          my $ok = eval {
-                              $@ = $err;
-                              if ($wantarray)
-                              {
-                                  @{$result} = $code->( $err, \$more );
-                              }
-                              elsif ( defined($wantarray) )
-                              {
-                                  @{$result} = ();
-                                  $result->[0] = $code->( $err, \$more );
-                              }
-                              else
-                              {
-                                  $code->( $err, \$more );
-                              }
-                              1;
-                          };
-                          if ($ok)
-                          {
-                              next CATCHLOOP if $more;
-                              undef $err;
-                          }
-                          else
-                          {
-                              $err = $@ || $Error::THROWN;
-                              $err = $Error::ObjectifyCallback->(
-                                  { 'text' => $err } )
-                                  unless ref($err);
-                          }
-                          last CATCH;
-                      }
-                  }
-              }
-          }
-  
-          # otherwise
-          my $owise;
-          if ( defined( $owise = $clauses->{'otherwise'} ) )
-          {
-              my $code = $clauses->{'otherwise'};
-              my $more = 0;
-              local ( $Error::THROWN, $@ );
-              my $ok = eval {
-                  $@ = $err;
-                  if ($wantarray)
-                  {
-                      @{$result} = $code->( $err, \$more );
-                  }
-                  elsif ( defined($wantarray) )
-                  {
-                      @{$result} = ();
-                      $result->[0] = $code->( $err, \$more );
-                  }
-                  else
-                  {
-                      $code->( $err, \$more );
-                  }
-                  1;
-              };
-              if ($ok)
-              {
-                  undef $err;
-              }
-              else
-              {
-                  $err = $@ || $Error::THROWN;
-  
-                  $err = $Error::ObjectifyCallback->( { 'text' => $err } )
-                      unless ref($err);
-              }
-          }
-      }
-      $err;
-  }
-  
-  sub try (&;$)
-  {
-      my $try     = shift;
-      my $clauses = @_ ? shift : {};
-      my $ok      = 0;
-      my $err     = undef;
-      my @result  = ();
-  
-      unshift @Error::STACK, $clauses;
-  
-      my $wantarray = wantarray();
-  
-      do
-      {
-          local $Error::THROWN = undef;
-          local $@             = undef;
-  
-          $ok = eval {
-              if ($wantarray)
-              {
-                  @result = $try->();
-              }
-              elsif ( defined $wantarray )
-              {
-                  $result[0] = $try->();
-              }
-              else
-              {
-                  $try->();
-              }
-              1;
-          };
-  
-          $err = $@ || $Error::THROWN
-              unless $ok;
-      };
-  
-      shift @Error::STACK;
-  
-      $err = run_clauses( $clauses, $err, wantarray, @result )
-          unless ($ok);
-  
-      $clauses->{'finally'}->()
-          if ( defined( $clauses->{'finally'} ) );
-  
-      if ( defined($err) )
-      {
-          if ( Scalar::Util::blessed($err) && $err->can('throw') )
-          {
-              throw $err;
-          }
-          else
-          {
-              die $err;
-          }
-      }
-  
-      wantarray ? @result : $result[0];
-  }
-  
-  # Each clause adds a sub to the list of clauses. The finally clause is
-  # always the last, and the otherwise clause is always added just before
-  # the finally clause.
-  #
-  # All clauses, except the finally clause, add a sub which takes one argument
-  # this argument will be the error being thrown. The sub will return a code ref
-  # if that clause can handle that error, otherwise undef is returned.
-  #
-  # The otherwise clause adds a sub which unconditionally returns the users
-  # code reference, this is why it is forced to be last.
-  #
-  # The catch clause is defined in Error.pm, as the syntax causes it to
-  # be called as a method
-  
-  sub with (&;$)
-  {
-      @_;
-  }
-  
-  sub finally (&)
-  {
-      my $code = shift;
-      my $clauses = { 'finally' => $code };
-      $clauses;
-  }
-  
-  # The except clause is a block which returns a hashref or a list of
-  # key-value pairs, where the keys are the classes and the values are subs.
-  
-  sub except (&;$)
-  {
-      my $code    = shift;
-      my $clauses = shift || {};
-      my $catch   = $clauses->{'catch'} ||= [];
-  
-      my $sub = sub {
-          my $ref;
-          my (@array) = $code->( $_[0] );
-          if ( @array == 1 && ref( $array[0] ) )
-          {
-              $ref = $array[0];
-              $ref = [%$ref]
-                  if ( UNIVERSAL::isa( $ref, 'HASH' ) );
-          }
-          else
-          {
-              $ref = \@array;
-          }
-          @$ref;
-      };
-  
-      unshift @{$catch}, undef, $sub;
-  
-      $clauses;
-  }
-  
-  sub otherwise (&;$)
-  {
-      my $code = shift;
-      my $clauses = shift || {};
-  
-      if ( exists $clauses->{'otherwise'} )
-      {
-          require Carp;
-          Carp::croak("Multiple otherwise clauses");
-      }
-  
-      $clauses->{'otherwise'} = $code;
-  
-      $clauses;
-  }
-  
-  1;
-  
-  package Error::WarnDie;
-  $Error::WarnDie::VERSION = '0.17029';
-  sub gen_callstack($)
-  {
-      my ($start) = @_;
-  
-      require Carp;
-      local $Carp::CarpLevel = $start;
-      my $trace = Carp::longmess("");
-  
-      # Remove try calls from the trace
-      $trace =~
-  s/(\n\s+\S+__ANON__[^\n]+)?\n\s+eval[^\n]+\n\s+Error::subs::try[^\n]+(?=\n)//sog;
-      $trace =~
-  s/(\n\s+\S+__ANON__[^\n]+)?\n\s+eval[^\n]+\n\s+Error::subs::run_clauses[^\n]+\n\s+Error::subs::try[^\n]+(?=\n)//sog;
-      my @callstack = split( m/\n/, $trace );
-      return @callstack;
-  }
-  
-  my $old_DIE;
-  my $old_WARN;
-  
-  sub DEATH
-  {
-      my ($e) = @_;
-  
-      local $SIG{__DIE__} = $old_DIE if ( defined $old_DIE );
-  
-      die @_ if $^S;
-  
-      my ( $etype, $message, $location, @callstack );
-      if ( ref($e) && $e->isa("Error") )
-      {
-          $etype     = "exception of type " . ref($e);
-          $message   = $e->text;
-          $location  = $e->file . ":" . $e->line;
-          @callstack = split( m/\n/, $e->stacktrace );
-      }
-      else
-      {
-          # Don't apply subsequent layer of message formatting
-          die $e if ( $e =~ m/^\nUnhandled perl error caught at toplevel:\n\n/ );
-          $etype = "perl error";
-          my $stackdepth = 0;
-          while ( caller($stackdepth) =~ m/^Error(?:$|::)/ )
-          {
-              ++$stackdepth;
-          }
-  
-          @callstack = gen_callstack( $stackdepth + 1 );
-  
-          $message = "$e";
-          chomp $message;
-  
-          if ( $message =~ s/ at (.*?) line (\d+)\.$// )
-          {
-              $location = $1 . ":" . $2;
-          }
-          else
-          {
-              my @caller = caller($stackdepth);
-              $location = $caller[1] . ":" . $caller[2];
-          }
-      }
-  
-      shift @callstack;
-  
-      # Do it this way in case there are no elements; we don't print a spurious \n
-      my $callstack = join( "", map { "$_\n" } @callstack );
-  
-      die
-  "\nUnhandled $etype caught at toplevel:\n\n  $message\n\nThrown from: $location\n\nFull stack trace:\n\n$callstack\n";
-  }
-  
-  sub TAXES
-  {
-      my ($message) = @_;
-  
-      local $SIG{__WARN__} = $old_WARN if ( defined $old_WARN );
-  
-      $message =~ s/ at .*? line \d+\.$//;
-      chomp $message;
-  
-      my @callstack = gen_callstack(1);
-      my $location  = shift @callstack;
-  
-      # $location already starts in a leading space
-      $message .= $location;
-  
-      # Do it this way in case there are no elements; we don't print a spurious \n
-      my $callstack = join( "", map { "$_\n" } @callstack );
-  
-      warn "$message:\n$callstack";
-  }
-  
-  sub import
-  {
-      $old_DIE  = $SIG{__DIE__};
-      $old_WARN = $SIG{__WARN__};
-  
-      $SIG{__DIE__}  = \&DEATH;
-      $SIG{__WARN__} = \&TAXES;
-  }
-  
-  1;
-  
-  __END__
-  
-  =pod
-  
-  =encoding UTF-8
-  
-  =head1 NAME
-  
-  Error - Error/exception handling in an OO-ish way
-  
-  =head1 VERSION
-  
-  version 0.17029
-  
-  =head1 SYNOPSIS
-  
-      use Error qw(:try);
-  
-      throw Error::Simple( "A simple error");
-  
-      sub xyz {
-          ...
-  	record Error::Simple("A simple error")
-  	    and return;
-      }
-  
-      unlink($file) or throw Error::Simple("$file: $!",$!);
-  
-      try {
-  	do_some_stuff();
-  	die "error!" if $condition;
-  	throw Error::Simple "Oops!" if $other_condition;
-      }
-      catch Error::IO with {
-  	my $E = shift;
-  	print STDERR "File ", $E->{'-file'}, " had a problem\n";
-      }
-      except {
-  	my $E = shift;
-  	my $general_handler=sub {send_message $E->{-description}};
-  	return {
-  	    UserException1 => $general_handler,
-  	    UserException2 => $general_handler
-  	};
-      }
-      otherwise {
-  	print STDERR "Well I don't know what to say\n";
-      }
-      finally {
-  	close_the_garage_door_already(); # Should be reliable
-      }; # Don't forget the trailing ; or you might be surprised
-  
-  =head1 DESCRIPTION
-  
-  The C<Error> package provides two interfaces. Firstly C<Error> provides
-  a procedural interface to exception handling. Secondly C<Error> is a
-  base class for errors/exceptions that can either be thrown, for
-  subsequent catch, or can simply be recorded.
-  
-  Errors in the class C<Error> should not be thrown directly, but the
-  user should throw errors from a sub-class of C<Error>.
-  
-  =head1 WARNING
-  
-  Using the "Error" module is B<no longer recommended> due to the black-magical
-  nature of its syntactic sugar, which often tends to break. Its maintainers
-  have stopped actively writing code that uses it, and discourage people
-  from doing so. See the "SEE ALSO" section below for better recommendations.
-  
-  =head1 PROCEDURAL INTERFACE
-  
-  C<Error> exports subroutines to perform exception handling. These will
-  be exported if the C<:try> tag is used in the C<use> line.
-  
-  =over 4
-  
-  =item try BLOCK CLAUSES
-  
-  C<try> is the main subroutine called by the user. All other subroutines
-  exported are clauses to the try subroutine.
-  
-  The BLOCK will be evaluated and, if no error is throw, try will return
-  the result of the block.
-  
-  C<CLAUSES> are the subroutines below, which describe what to do in the
-  event of an error being thrown within BLOCK.
-  
-  =item catch CLASS with BLOCK
-  
-  This clauses will cause all errors that satisfy C<$err-E<gt>isa(CLASS)>
-  to be caught and handled by evaluating C<BLOCK>.
-  
-  C<BLOCK> will be passed two arguments. The first will be the error
-  being thrown. The second is a reference to a scalar variable. If this
-  variable is set by the catch block then, on return from the catch
-  block, try will continue processing as if the catch block was never
-  found. The error will also be available in C<$@>.
-  
-  To propagate the error the catch block may call C<$err-E<gt>throw>
-  
-  If the scalar reference by the second argument is not set, and the
-  error is not thrown. Then the current try block will return with the
-  result from the catch block.
-  
-  =item except BLOCK
-  
-  When C<try> is looking for a handler, if an except clause is found
-  C<BLOCK> is evaluated. The return value from this block should be a
-  HASHREF or a list of key-value pairs, where the keys are class names
-  and the values are CODE references for the handler of errors of that
-  type.
-  
-  =item otherwise BLOCK
-  
-  Catch any error by executing the code in C<BLOCK>
-  
-  When evaluated C<BLOCK> will be passed one argument, which will be the
-  error being processed. The error will also be available in C<$@>.
-  
-  Only one otherwise block may be specified per try block
-  
-  =item finally BLOCK
-  
-  Execute the code in C<BLOCK> either after the code in the try block has
-  successfully completed, or if the try block throws an error then
-  C<BLOCK> will be executed after the handler has completed.
-  
-  If the handler throws an error then the error will be caught, the
-  finally block will be executed and the error will be re-thrown.
-  
-  Only one finally block may be specified per try block
-  
-  =back
-  
-  =head1 COMPATIBILITY
-  
-  L<Moose> exports a keyword called C<with> which clashes with Error's. This
-  example returns a prototype mismatch error:
-  
-      package MyTest;
-  
-      use warnings;
-      use Moose;
-      use Error qw(:try);
-  
-  (Thanks to C<maik.hentsche@amd.com> for the report.).
-  
-  =head1 CLASS INTERFACE
-  
-  =head2 CONSTRUCTORS
-  
-  The C<Error> object is implemented as a HASH. This HASH is initialized
-  with the arguments that are passed to it's constructor. The elements
-  that are used by, or are retrievable by the C<Error> class are listed
-  below, other classes may add to these.
-  
-  	-file
-  	-line
-  	-text
-  	-value
-  	-object
-  
-  If C<-file> or C<-line> are not specified in the constructor arguments
-  then these will be initialized with the file name and line number where
-  the constructor was called from.
-  
-  If the error is associated with an object then the object should be
-  passed as the C<-object> argument. This will allow the C<Error> package
-  to associate the error with the object.
-  
-  The C<Error> package remembers the last error created, and also the
-  last error associated with a package. This could either be the last
-  error created by a sub in that package, or the last error which passed
-  an object blessed into that package as the C<-object> argument.
-  
-  =over 4
-  
-  =item Error->new()
-  
-  See the Error::Simple documentation.
-  
-  =item throw ( [ ARGS ] )
-  
-  Create a new C<Error> object and throw an error, which will be caught
-  by a surrounding C<try> block, if there is one. Otherwise it will cause
-  the program to exit.
-  
-  C<throw> may also be called on an existing error to re-throw it.
-  
-  =item with ( [ ARGS ] )
-  
-  Create a new C<Error> object and returns it. This is defined for
-  syntactic sugar, eg
-  
-      die with Some::Error ( ... );
-  
-  =item record ( [ ARGS ] )
-  
-  Create a new C<Error> object and returns it. This is defined for
-  syntactic sugar, eg
-  
-      record Some::Error ( ... )
-  	and return;
-  
-  =back
-  
-  =head2 STATIC METHODS
-  
-  =over 4
-  
-  =item prior ( [ PACKAGE ] )
-  
-  Return the last error created, or the last error associated with
-  C<PACKAGE>
-  
-  =item flush ( [ PACKAGE ] )
-  
-  Flush the last error created, or the last error associated with
-  C<PACKAGE>.It is necessary to clear the error stack before exiting the
-  package or uncaught errors generated using C<record> will be reported.
-  
-       $Error->flush;
-  
-  =back
-  
-  =head2 OBJECT METHODS
-  
-  =over 4
-  
-  =item stacktrace
-  
-  If the variable C<$Error::Debug> was non-zero when the error was
-  created, then C<stacktrace> returns a string created by calling
-  C<Carp::longmess>. If the variable was zero the C<stacktrace> returns
-  the text of the error appended with the filename and line number of
-  where the error was created, providing the text does not end with a
-  newline.
-  
-  =item object
-  
-  The object this error was associated with
-  
-  =item file
-  
-  The file where the constructor of this error was called from
-  
-  =item line
-  
-  The line where the constructor of this error was called from
-  
-  =item text
-  
-  The text of the error
-  
-  =item $err->associate($obj)
-  
-  Associates an error with an object to allow error propagation. I.e:
-  
-      $ber->encode(...) or
-          return Error->prior($ber)->associate($ldap);
-  
-  =back
-  
-  =head2 OVERLOAD METHODS
-  
-  =over 4
-  
-  =item stringify
-  
-  A method that converts the object into a string. This method may simply
-  return the same as the C<text> method, or it may append more
-  information. For example the file name and line number.
-  
-  By default this method returns the C<-text> argument that was passed to
-  the constructor, or the string C<"Died"> if none was given.
-  
-  =item value
-  
-  A method that will return a value that can be associated with the
-  error. For example if an error was created due to the failure of a
-  system call, then this may return the numeric value of C<$!> at the
-  time.
-  
-  By default this method returns the C<-value> argument that was passed
-  to the constructor.
-  
-  =back
-  
-  =head1 PRE-DEFINED ERROR CLASSES
-  
-  =head2 Error::Simple
-  
-  This class can be used to hold simple error strings and values. It's
-  constructor takes two arguments. The first is a text value, the second
-  is a numeric value. These values are what will be returned by the
-  overload methods.
-  
-  If the text value ends with C<at file line 1> as $@ strings do, then
-  this information will be used to set the C<-file> and C<-line> arguments
-  of the error object.
-  
-  This class is used internally if an eval'd block die's with an error
-  that is a plain string. (Unless C<$Error::ObjectifyCallback> is modified)
-  
-  =head1 $Error::ObjectifyCallback
-  
-  This variable holds a reference to a subroutine that converts errors that
-  are plain strings to objects. It is used by Error.pm to convert textual
-  errors to objects, and can be overridden by the user.
-  
-  It accepts a single argument which is a hash reference to named parameters.
-  Currently the only named parameter passed is C<'text'> which is the text
-  of the error, but others may be available in the future.
-  
-  For example the following code will cause Error.pm to throw objects of the
-  class MyError::Bar by default:
-  
-      sub throw_MyError_Bar
-      {
-          my $args = shift;
-          my $err = MyError::Bar->new();
-          $err->{'MyBarText'} = $args->{'text'};
-          return $err;
-      }
-  
-      {
-          local $Error::ObjectifyCallback = \&throw_MyError_Bar;
-  
-          # Error handling here.
-      }
-  
-  =head1 MESSAGE HANDLERS
-  
-  C<Error> also provides handlers to extend the output of the C<warn()> perl
-  function, and to handle the printing of a thrown C<Error> that is not caught
-  or otherwise handled. These are not installed by default, but are requested
-  using the C<:warndie> tag in the C<use> line.
-  
-   use Error qw( :warndie );
-  
-  These new error handlers are installed in C<$SIG{__WARN__}> and
-  C<$SIG{__DIE__}>. If these handlers are already defined when the tag is
-  imported, the old values are stored, and used during the new code. Thus, to
-  arrange for custom handling of warnings and errors, you will need to perform
-  something like the following:
-  
-   BEGIN {
-     $SIG{__WARN__} = sub {
-       print STDERR "My special warning handler: $_[0]"
-     };
-   }
-  
-   use Error qw( :warndie );
-  
-  Note that setting C<$SIG{__WARN__}> after the C<:warndie> tag has been
-  imported will overwrite the handler that C<Error> provides. If this cannot be
-  avoided, then the tag can be explicitly C<import>ed later
-  
-   use Error;
-  
-   $SIG{__WARN__} = ...;
-  
-   import Error qw( :warndie );
-  
-  =head2 EXAMPLE
-  
-  The C<__DIE__> handler turns messages such as
-  
-   Can't call method "foo" on an undefined value at examples/warndie.pl line 16.
-  
-  into
-  
-   Unhandled perl error caught at toplevel:
-  
-     Can't call method "foo" on an undefined value
-  
-   Thrown from: examples/warndie.pl:16
-  
-   Full stack trace:
-  
-           main::inner('undef') called at examples/warndie.pl line 20
-           main::outer('undef') called at examples/warndie.pl line 23
-  
-  =head1 SEE ALSO
-  
-  See L<Exception::Class> for a different module providing Object-Oriented
-  exception handling, along with a convenient syntax for declaring hierarchies
-  for them. It doesn't provide Error's syntactic sugar of C<try { ... }>,
-  C<catch { ... }>, etc. which may be a good thing or a bad thing based
-  on what you want. (Because Error's syntactic sugar tends to break.)
-  
-  L<Error::Exception> aims to combine L<Error> and L<Exception::Class>
-  "with correct stringification".
-  
-  L<TryCatch> and L<Try::Tiny> are similar in concept to Error.pm only providing
-  a syntax that hopefully breaks less.
-  
-  =head1 KNOWN BUGS
-  
-  None, but that does not mean there are not any.
-  
-  =head1 AUTHORS
-  
-  Graham Barr <gbarr@pobox.com>
-  
-  The code that inspired me to write this was originally written by
-  Peter Seibel <peter@weblogic.com> and adapted by Jesse Glick
-  <jglick@sig.bsh.com>.
-  
-  C<:warndie> handlers added by Paul Evans <leonerd@leonerd.org.uk>
-  
-  =head1 MAINTAINER
-  
-  Shlomi Fish, L<http://www.shlomifish.org/> .
-  
-  =head1 PAST MAINTAINERS
-  
-  Arun Kumar U <u_arunkumar@yahoo.com>
-  
-  =head1 COPYRIGHT
-  
-  Copyright (c) 1997-8  Graham Barr. All rights reserved.
-  This program is free software; you can redistribute it and/or modify it
-  under the same terms as Perl itself.
-  
-  =for :stopwords cpan testmatrix url bugtracker rt cpants kwalitee diff irc mailto metadata placeholders metacpan
-  
-  =head1 SUPPORT
-  
-  =head2 Websites
-  
-  The following websites have more information about this module, and may be of help to you. As always,
-  in addition to those websites please use your favorite search engine to discover more resources.
-  
-  =over 4
-  
-  =item *
-  
-  MetaCPAN
-  
-  A modern, open-source CPAN search engine, useful to view POD in HTML format.
-  
-  L<https://metacpan.org/release/Error>
-  
-  =item *
-  
-  Search CPAN
-  
-  The default CPAN search engine, useful to view POD in HTML format.
-  
-  L<http://search.cpan.org/dist/Error>
-  
-  =item *
-  
-  RT: CPAN's Bug Tracker
-  
-  The RT ( Request Tracker ) website is the default bug/issue tracking system for CPAN.
-  
-  L<https://rt.cpan.org/Public/Dist/Display.html?Name=Error>
-  
-  =item *
-  
-  CPAN Ratings
-  
-  The CPAN Ratings is a website that allows community ratings and reviews of Perl modules.
-  
-  L<http://cpanratings.perl.org/d/Error>
-  
-  =item *
-  
-  CPANTS
-  
-  The CPANTS is a website that analyzes the Kwalitee ( code metrics ) of a distribution.
-  
-  L<http://cpants.cpanauthors.org/dist/Error>
-  
-  =item *
-  
-  CPAN Testers
-  
-  The CPAN Testers is a network of smoke testers who run automated tests on uploaded CPAN distributions.
-  
-  L<http://www.cpantesters.org/distro/E/Error>
-  
-  =item *
-  
-  CPAN Testers Matrix
-  
-  The CPAN Testers Matrix is a website that provides a visual overview of the test results for a distribution on various Perls/platforms.
-  
-  L<http://matrix.cpantesters.org/?dist=Error>
-  
-  =item *
-  
-  CPAN Testers Dependencies
-  
-  The CPAN Testers Dependencies is a website that shows a chart of the test results of all dependencies for a distribution.
-  
-  L<http://deps.cpantesters.org/?module=Error>
-  
-  =back
-  
-  =head2 Bugs / Feature Requests
-  
-  Please report any bugs or feature requests by email to C<bug-error at rt.cpan.org>, or through
-  the web interface at L<https://rt.cpan.org/Public/Bug/Report.html?Queue=Error>. You will be automatically notified of any
-  progress on the request by the system.
-  
-  =head2 Source Code
-  
-  The code is open to the world, and available for you to hack on. Please feel free to browse it and play
-  with it, or whatever. If you want to contribute patches, please send me a diff or prod me to pull
-  from your repository :)
-  
-  L<https://github.com/shlomif/perl-error.pm>
-  
-    git clone git://github.com/shlomif/perl-error.pm.git
-  
-  =head1 AUTHOR
-  
-  Shlomi Fish ( http://www.shlomifish.org/ )
-  
-  =head1 BUGS
-  
-  Please report any bugs or feature requests on the bugtracker website
-  L<https://github.com/shlomif/perl-error.pm/issues>
-  
-  When submitting a bug or request, please include a test-file or a
-  patch to an existing test-file that illustrates the bug or desired
-  feature.
-  
-  =head1 COPYRIGHT AND LICENSE
-  
-  This software is copyright (c) 2020 by Shlomi Fish ( http://www.shlomifish.org/ ).
-  
-  This is free software; you can redistribute it and/or modify it under
-  the same terms as the Perl 5 programming language system itself.
-  
-  =cut
-ERROR
-
-$fatpacked{"Error/Simple.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'ERROR_SIMPLE';
-  # Error/Simple.pm
-  #
-  # Copyright (c) 2006 Shlomi Fish <shlomif@shlomifish.org>.
-  # This file is free software; you can redistribute it and/or
-  # modify it under the terms of the MIT/X11 license (whereas the licence
-  # of the Error distribution as a whole is the GPLv1+ and the Artistic
-  # licence).
-  
-  package Error::Simple;
-  $Error::Simple::VERSION = '0.17029';
-  use strict;
-  use warnings;
-  
-  use Error;
-  
-  1;
-  
-  __END__
-  
-  =pod
-  
-  =encoding UTF-8
-  
-  =head1 NAME
-  
-  Error::Simple - the simple error sub-class of Error
-  
-  =head1 VERSION
-  
-  version 0.17029
-  
-  =head1 SYNOPSIS
-  
-      use base 'Error::Simple';
-  
-  =head1 DESCRIPTION
-  
-  The only purpose of this module is to allow one to say:
-  
-      use base 'Error::Simple';
-  
-  and the only thing it does is "use" Error.pm. Refer to the documentation
-  of L<Error> for more information about Error::Simple.
-  
-  =head1 METHODS
-  
-  =head2 Error::Simple->new($text [, $value])
-  
-  Constructs an Error::Simple with the text C<$text> and the optional value
-  C<$value>.
-  
-  =head2 $err->stringify()
-  
-  Error::Simple overloads this method.
-  
-  =head1 KNOWN BUGS
-  
-  None.
-  
-  =head1 AUTHORS
-  
-  Shlomi Fish ( L<http://www.shlomifish.org/> )
-  
-  =head1 SEE ALSO
-  
-  L<Error>
-  
-  =for :stopwords cpan testmatrix url bugtracker rt cpants kwalitee diff irc mailto metadata placeholders metacpan
-  
-  =head1 SUPPORT
-  
-  =head2 Websites
-  
-  The following websites have more information about this module, and may be of help to you. As always,
-  in addition to those websites please use your favorite search engine to discover more resources.
-  
-  =over 4
-  
-  =item *
-  
-  MetaCPAN
-  
-  A modern, open-source CPAN search engine, useful to view POD in HTML format.
-  
-  L<https://metacpan.org/release/Error>
-  
-  =item *
-  
-  Search CPAN
-  
-  The default CPAN search engine, useful to view POD in HTML format.
-  
-  L<http://search.cpan.org/dist/Error>
-  
-  =item *
-  
-  RT: CPAN's Bug Tracker
-  
-  The RT ( Request Tracker ) website is the default bug/issue tracking system for CPAN.
-  
-  L<https://rt.cpan.org/Public/Dist/Display.html?Name=Error>
-  
-  =item *
-  
-  CPAN Ratings
-  
-  The CPAN Ratings is a website that allows community ratings and reviews of Perl modules.
-  
-  L<http://cpanratings.perl.org/d/Error>
-  
-  =item *
-  
-  CPANTS
-  
-  The CPANTS is a website that analyzes the Kwalitee ( code metrics ) of a distribution.
-  
-  L<http://cpants.cpanauthors.org/dist/Error>
-  
-  =item *
-  
-  CPAN Testers
-  
-  The CPAN Testers is a network of smoke testers who run automated tests on uploaded CPAN distributions.
-  
-  L<http://www.cpantesters.org/distro/E/Error>
-  
-  =item *
-  
-  CPAN Testers Matrix
-  
-  The CPAN Testers Matrix is a website that provides a visual overview of the test results for a distribution on various Perls/platforms.
-  
-  L<http://matrix.cpantesters.org/?dist=Error>
-  
-  =item *
-  
-  CPAN Testers Dependencies
-  
-  The CPAN Testers Dependencies is a website that shows a chart of the test results of all dependencies for a distribution.
-  
-  L<http://deps.cpantesters.org/?module=Error>
-  
-  =back
-  
-  =head2 Bugs / Feature Requests
-  
-  Please report any bugs or feature requests by email to C<bug-error at rt.cpan.org>, or through
-  the web interface at L<https://rt.cpan.org/Public/Bug/Report.html?Queue=Error>. You will be automatically notified of any
-  progress on the request by the system.
-  
-  =head2 Source Code
-  
-  The code is open to the world, and available for you to hack on. Please feel free to browse it and play
-  with it, or whatever. If you want to contribute patches, please send me a diff or prod me to pull
-  from your repository :)
-  
-  L<https://github.com/shlomif/perl-error.pm>
-  
-    git clone git://github.com/shlomif/perl-error.pm.git
-  
-  =head1 AUTHOR
-  
-  Shlomi Fish ( http://www.shlomifish.org/ )
-  
-  =head1 BUGS
-  
-  Please report any bugs or feature requests on the bugtracker website
-  L<https://github.com/shlomif/perl-error.pm/issues>
-  
-  When submitting a bug or request, please include a test-file or a
-  patch to an existing test-file that illustrates the bug or desired
-  feature.
-  
-  =head1 COPYRIGHT AND LICENSE
-  
-  This software is copyright (c) 2020 by Shlomi Fish ( http://www.shlomifish.org/ ).
-  
-  This is free software; you can redistribute it and/or modify it under
-  the same terms as the Perl 5 programming language system itself.
-  
-  =cut
-ERROR_SIMPLE
-
-$fatpacked{"Git.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'GIT';
-  =head1 NAME
-  
-  Git - Perl interface to the Git version control system
-  
-  =cut
-  
-  
-  package Git;
-  
-  use 5.008;
-  use strict;
-  
-  
-  BEGIN {
-  
-  our ($VERSION, @ISA, @EXPORT, @EXPORT_OK);
-  
-  # Totally unstable API.
-  $VERSION = '0.42';
-  # pulled from github, commit 217f2767cbcb562872437eed4dec62e00846d90c
-  
-  
-  =head1 SYNOPSIS
-  
-    use Git;
-  
-    my $version = Git::command_oneline('version');
-  
-    git_cmd_try { Git::command_noisy('update-server-info') }
-                '%s failed w/ code %d';
-  
-    my $repo = Git->repository (Directory => '/srv/git/cogito.git');
-  
-  
-    my @revs = $repo->command('rev-list', '--since=last monday', '--all');
-  
-    my ($fh, $c) = $repo->command_output_pipe('rev-list', '--since=last monday', '--all');
-    my $lastrev = <$fh>; chomp $lastrev;
-    $repo->command_close_pipe($fh, $c);
-  
-    my $lastrev = $repo->command_oneline( [ 'rev-list', '--all' ],
-                                          STDERR => 0 );
-  
-    my $sha1 = $repo->hash_and_insert_object('file.txt');
-    my $tempfile = tempfile();
-    my $size = $repo->cat_blob($sha1, $tempfile);
-  
-  =cut
-  
-  
-  require Exporter;
-  
-  @ISA = qw(Exporter);
-  
-  @EXPORT = qw(git_cmd_try);
-  
-  # Methods which can be called as standalone functions as well:
-  @EXPORT_OK = qw(command command_oneline command_noisy
-                  command_output_pipe command_input_pipe command_close_pipe
-                  command_bidi_pipe command_close_bidi_pipe
-                  version exec_path html_path hash_object git_cmd_try
-                  remote_refs prompt
-                  get_tz_offset get_record
-                  credential credential_read credential_write
-                  temp_acquire temp_is_locked temp_release temp_reset temp_path
-                  unquote_path);
-  
-  
-  =head1 DESCRIPTION
-  
-  [MAINTAINER NOTE: This is Git.pm, plus the other files in the perl/Git directory,
-  from github's git/git, which is a mirror of the git source.  I (cpan msouth, or
-  current maintainer) update the VERSION string (necessary on CPAN because of another
-  CPAN distribution that confused the CPAN toolchain about which was the actual
-  official Git.pm), add this explanatory paragraph, and use Dist::Zilla to package
-  and release on CPAN.  The only reason that I know of that you would need this is
-  if you are using something like Git::Hooks and you are using a perlbrewed (or
-  otherwise separate) perl from the one git is using on your system (e.g. if you
-  have a dev perl that’s separate from system perl, and git uses the system perl.
-  Then the Git.pm gets installed in the system lib and you have no way of getting
-  it from CPAN, so your code--that uses modules that depend on Git.pm--doesn’t work).
-  I try to keep this up to date, so that if you do pull this from CPAN it will be,
-  hopefully, identical in functionality to the Git.pm and Git/*.pm from the git
-  distribution.  If that is not the case, contact me and I'll look into it.]
-  
-  This module provides Perl scripts easy way to interface the Git version control
-  system. The modules have an easy and well-tested way to call arbitrary Git
-  commands; in the future, the interface will also provide specialized methods
-  for doing easily operations which are not totally trivial to do over
-  the generic command interface.
-  
-  While some commands can be executed outside of any context (e.g. 'version'
-  or 'init'), most operations require a repository context, which in practice
-  means getting an instance of the Git object using the repository() constructor.
-  (In the future, we will also get a new_repository() constructor.) All commands
-  called as methods of the object are then executed in the context of the
-  repository.
-  
-  Part of the "repository state" is also information about path to the attached
-  working copy (unless you work with a bare repository). You can also navigate
-  inside of the working copy using the C<wc_chdir()> method. (Note that
-  the repository object is self-contained and will not change working directory
-  of your process.)
-  
-  TODO: In the future, we might also do
-  
-  	my $remoterepo = $repo->remote_repository (Name => 'cogito', Branch => 'master');
-  	$remoterepo ||= Git->remote_repository ('http://git.or.cz/cogito.git/');
-  	my @refs = $remoterepo->refs();
-  
-  Currently, the module merely wraps calls to external Git tools. In the future,
-  it will provide a much faster way to interact with Git by linking directly
-  to libgit. This should be completely opaque to the user, though (performance
-  increase notwithstanding).
-  
-  =cut
-  
-  
-  use Carp qw(carp croak); # but croak is bad - throw instead
-  use Error qw(:try);
-  use Cwd qw(abs_path cwd);
-  use IPC::Open2 qw(open2);
-  use Fcntl qw(SEEK_SET SEEK_CUR);
-  use Time::Local qw(timegm);
-  }
-  
-  
-  =head1 CONSTRUCTORS
-  
-  =over 4
-  
-  =item repository ( OPTIONS )
-  
-  =item repository ( DIRECTORY )
-  
-  =item repository ()
-  
-  Construct a new repository object.
-  C<OPTIONS> are passed in a hash like fashion, using key and value pairs.
-  Possible options are:
-  
-  B<Repository> - Path to the Git repository.
-  
-  B<WorkingCopy> - Path to the associated working copy; not strictly required
-  as many commands will happily crunch on a bare repository.
-  
-  B<WorkingSubdir> - Subdirectory in the working copy to work inside.
-  Just left undefined if you do not want to limit the scope of operations.
-  
-  B<Directory> - Path to the Git working directory in its usual setup.
-  The C<.git> directory is searched in the directory and all the parent
-  directories; if found, C<WorkingCopy> is set to the directory containing
-  it and C<Repository> to the C<.git> directory itself. If no C<.git>
-  directory was found, the C<Directory> is assumed to be a bare repository,
-  C<Repository> is set to point at it and C<WorkingCopy> is left undefined.
-  If the C<$GIT_DIR> environment variable is set, things behave as expected
-  as well.
-  
-  You should not use both C<Directory> and either of C<Repository> and
-  C<WorkingCopy> - the results of that are undefined.
-  
-  Alternatively, a directory path may be passed as a single scalar argument
-  to the constructor; it is equivalent to setting only the C<Directory> option
-  field.
-  
-  Calling the constructor with no options whatsoever is equivalent to
-  calling it with C<< Directory => '.' >>. In general, if you are building
-  a standard porcelain command, simply doing C<< Git->repository() >> should
-  do the right thing and setup the object to reflect exactly where the user
-  is right now.
-  
-  =cut
-  
-  sub repository {
-  	my $class = shift;
-  	my @args = @_;
-  	my %opts = ();
-  	my $self;
-  
-  	if (defined $args[0]) {
-  		if ($#args % 2 != 1) {
-  			# Not a hash.
-  			$#args == 0 or throw Error::Simple("bad usage");
-  			%opts = ( Directory => $args[0] );
-  		} else {
-  			%opts = @args;
-  		}
-  	}
-  
-  	if (not defined $opts{Repository} and not defined $opts{WorkingCopy}
-  		and not defined $opts{Directory}) {
-  		$opts{Directory} = '.';
-  	}
-  
-  	if (defined $opts{Directory}) {
-  		-d $opts{Directory} or throw Error::Simple("Directory not found: $opts{Directory} $!");
-  
-  		my $search = Git->repository(WorkingCopy => $opts{Directory});
-  		my $dir;
-  		try {
-  			$dir = $search->command_oneline(['rev-parse', '--git-dir'],
-  			                                STDERR => 0);
-  		} catch Git::Error::Command with {
-  			$dir = undef;
-  		};
-  
-  		if ($dir) {
-  			_verify_require();
-  			File::Spec->file_name_is_absolute($dir) or $dir = $opts{Directory} . '/' . $dir;
-  			$opts{Repository} = abs_path($dir);
-  
-  			# If --git-dir went ok, this shouldn't die either.
-  			my $prefix = $search->command_oneline('rev-parse', '--show-prefix');
-  			$dir = abs_path($opts{Directory}) . '/';
-  			if ($prefix) {
-  				if (substr($dir, -length($prefix)) ne $prefix) {
-  					throw Error::Simple("rev-parse confused me - $dir does not have trailing $prefix");
-  				}
-  				substr($dir, -length($prefix)) = '';
-  			}
-  			$opts{WorkingCopy} = $dir;
-  			$opts{WorkingSubdir} = $prefix;
-  
-  		} else {
-  			# A bare repository? Let's see...
-  			$dir = $opts{Directory};
-  
-  			unless (-d "$dir/refs" and -d "$dir/objects" and -e "$dir/HEAD") {
-  				# Mimic git-rev-parse --git-dir error message:
-  				throw Error::Simple("fatal: Not a git repository: $dir");
-  			}
-  			my $search = Git->repository(Repository => $dir);
-  			try {
-  				$search->command('symbolic-ref', 'HEAD');
-  			} catch Git::Error::Command with {
-  				# Mimic git-rev-parse --git-dir error message:
-  				throw Error::Simple("fatal: Not a git repository: $dir");
-  			}
-  
-  			$opts{Repository} = abs_path($dir);
-  		}
-  
-  		delete $opts{Directory};
-  	}
-  
-  	$self = { opts => \%opts };
-  	bless $self, $class;
-  }
-  
-  =back
-  
-  =head1 METHODS
-  
-  =over 4
-  
-  =item command ( COMMAND [, ARGUMENTS... ] )
-  
-  =item command ( [ COMMAND, ARGUMENTS... ], { Opt => Val ... } )
-  
-  Execute the given Git C<COMMAND> (specify it without the 'git-'
-  prefix), optionally with the specified extra C<ARGUMENTS>.
-  
-  The second more elaborate form can be used if you want to further adjust
-  the command execution. Currently, only one option is supported:
-  
-  B<STDERR> - How to deal with the command's error output. By default (C<undef>)
-  it is delivered to the caller's C<STDERR>. A false value (0 or '') will cause
-  it to be thrown away. If you want to process it, you can get it in a filehandle
-  you specify, but you must be extremely careful; if the error output is not
-  very short and you want to read it in the same process as where you called
-  C<command()>, you are set up for a nice deadlock!
-  
-  The method can be called without any instance or on a specified Git repository
-  (in that case the command will be run in the repository context).
-  
-  In scalar context, it returns all the command output in a single string
-  (verbatim).
-  
-  In array context, it returns an array containing lines printed to the
-  command's stdout (without trailing newlines).
-  
-  In both cases, the command's stdin and stderr are the same as the caller's.
-  
-  =cut
-  
-  sub command {
-  	my ($fh, $ctx) = command_output_pipe(@_);
-  
-  	if (not defined wantarray) {
-  		# Nothing to pepper the possible exception with.
-  		_cmd_close($ctx, $fh);
-  
-  	} elsif (not wantarray) {
-  		local $/;
-  		my $text = <$fh>;
-  		try {
-  			_cmd_close($ctx, $fh);
-  		} catch Git::Error::Command with {
-  			# Pepper with the output:
-  			my $E = shift;
-  			$E->{'-outputref'} = \$text;
-  			throw $E;
-  		};
-  		return $text;
-  
-  	} else {
-  		my @lines = <$fh>;
-  		defined and chomp for @lines;
-  		try {
-  			_cmd_close($ctx, $fh);
-  		} catch Git::Error::Command with {
-  			my $E = shift;
-  			$E->{'-outputref'} = \@lines;
-  			throw $E;
-  		};
-  		return @lines;
-  	}
-  }
-  
-  
-  =item command_oneline ( COMMAND [, ARGUMENTS... ] )
-  
-  =item command_oneline ( [ COMMAND, ARGUMENTS... ], { Opt => Val ... } )
-  
-  Execute the given C<COMMAND> in the same way as command()
-  does but always return a scalar string containing the first line
-  of the command's standard output.
-  
-  =cut
-  
-  sub command_oneline {
-  	my ($fh, $ctx) = command_output_pipe(@_);
-  
-  	my $line = <$fh>;
-  	defined $line and chomp $line;
-  	try {
-  		_cmd_close($ctx, $fh);
-  	} catch Git::Error::Command with {
-  		# Pepper with the output:
-  		my $E = shift;
-  		$E->{'-outputref'} = \$line;
-  		throw $E;
-  	};
-  	return $line;
-  }
-  
-  
-  =item command_output_pipe ( COMMAND [, ARGUMENTS... ] )
-  
-  =item command_output_pipe ( [ COMMAND, ARGUMENTS... ], { Opt => Val ... } )
-  
-  Execute the given C<COMMAND> in the same way as command()
-  does but return a pipe filehandle from which the command output can be
-  read.
-  
-  The function can return C<($pipe, $ctx)> in array context.
-  See C<command_close_pipe()> for details.
-  
-  =cut
-  
-  sub command_output_pipe {
-  	_command_common_pipe('-|', @_);
-  }
-  
-  
-  =item command_input_pipe ( COMMAND [, ARGUMENTS... ] )
-  
-  =item command_input_pipe ( [ COMMAND, ARGUMENTS... ], { Opt => Val ... } )
-  
-  Execute the given C<COMMAND> in the same way as command_output_pipe()
-  does but return an input pipe filehandle instead; the command output
-  is not captured.
-  
-  The function can return C<($pipe, $ctx)> in array context.
-  See C<command_close_pipe()> for details.
-  
-  =cut
-  
-  sub command_input_pipe {
-  	_command_common_pipe('|-', @_);
-  }
-  
-  
-  =item command_close_pipe ( PIPE [, CTX ] )
-  
-  Close the C<PIPE> as returned from C<command_*_pipe()>, checking
-  whether the command finished successfully. The optional C<CTX> argument
-  is required if you want to see the command name in the error message,
-  and it is the second value returned by C<command_*_pipe()> when
-  called in array context. The call idiom is:
-  
-  	my ($fh, $ctx) = $r->command_output_pipe('status');
-  	while (<$fh>) { ... }
-  	$r->command_close_pipe($fh, $ctx);
-  
-  Note that you should not rely on whatever actually is in C<CTX>;
-  currently it is simply the command name but in future the context might
-  have more complicated structure.
-  
-  =cut
-  
-  sub command_close_pipe {
-  	my ($self, $fh, $ctx) = _maybe_self(@_);
-  	$ctx ||= '<unknown>';
-  	_cmd_close($ctx, $fh);
-  }
-  
-  =item command_bidi_pipe ( COMMAND [, ARGUMENTS... ] )
-  
-  Execute the given C<COMMAND> in the same way as command_output_pipe()
-  does but return both an input pipe filehandle and an output pipe filehandle.
-  
-  The function will return C<($pid, $pipe_in, $pipe_out, $ctx)>.
-  See C<command_close_bidi_pipe()> for details.
-  
-  =cut
-  
-  sub command_bidi_pipe {
-  	my ($pid, $in, $out);
-  	my ($self) = _maybe_self(@_);
-  	local %ENV = %ENV;
-  	my $cwd_save = undef;
-  	if ($self) {
-  		shift;
-  		$cwd_save = cwd();
-  		_setup_git_cmd_env($self);
-  	}
-  	$pid = open2($in, $out, 'git', @_);
-  	chdir($cwd_save) if $cwd_save;
-  	return ($pid, $in, $out, join(' ', @_));
-  }
-  
-  =item command_close_bidi_pipe ( PID, PIPE_IN, PIPE_OUT [, CTX] )
-  
-  Close the C<PIPE_IN> and C<PIPE_OUT> as returned from C<command_bidi_pipe()>,
-  checking whether the command finished successfully. The optional C<CTX>
-  argument is required if you want to see the command name in the error message,
-  and it is the fourth value returned by C<command_bidi_pipe()>.  The call idiom
-  is:
-  
-  	my ($pid, $in, $out, $ctx) = $r->command_bidi_pipe('cat-file --batch-check');
-  	print $out "000000000\n";
-  	while (<$in>) { ... }
-  	$r->command_close_bidi_pipe($pid, $in, $out, $ctx);
-  
-  Note that you should not rely on whatever actually is in C<CTX>;
-  currently it is simply the command name but in future the context might
-  have more complicated structure.
-  
-  C<PIPE_IN> and C<PIPE_OUT> may be C<undef> if they have been closed prior to
-  calling this function.  This may be useful in a query-response type of
-  commands where caller first writes a query and later reads response, eg:
-  
-  	my ($pid, $in, $out, $ctx) = $r->command_bidi_pipe('cat-file --batch-check');
-  	print $out "000000000\n";
-  	close $out;
-  	while (<$in>) { ... }
-  	$r->command_close_bidi_pipe($pid, $in, undef, $ctx);
-  
-  This idiom may prevent potential dead locks caused by data sent to the output
-  pipe not being flushed and thus not reaching the executed command.
-  
-  =cut
-  
-  sub command_close_bidi_pipe {
-  	local $?;
-  	my ($self, $pid, $in, $out, $ctx) = _maybe_self(@_);
-  	_cmd_close($ctx, (grep { defined } ($in, $out)));
-  	waitpid $pid, 0;
-  	if ($? >> 8) {
-  		throw Git::Error::Command($ctx, $? >>8);
-  	}
-  }
-  
-  
-  =item command_noisy ( COMMAND [, ARGUMENTS... ] )
-  
-  Execute the given C<COMMAND> in the same way as command() does but do not
-  capture the command output - the standard output is not redirected and goes
-  to the standard output of the caller application.
-  
-  While the method is called command_noisy(), you might want to as well use
-  it for the most silent Git commands which you know will never pollute your
-  stdout but you want to avoid the overhead of the pipe setup when calling them.
-  
-  The function returns only after the command has finished running.
-  
-  =cut
-  
-  sub command_noisy {
-  	my ($self, $cmd, @args) = _maybe_self(@_);
-  	_check_valid_cmd($cmd);
-  
-  	my $pid = fork;
-  	if (not defined $pid) {
-  		throw Error::Simple("fork failed: $!");
-  	} elsif ($pid == 0) {
-  		_cmd_exec($self, $cmd, @args);
-  	}
-  	if (waitpid($pid, 0) > 0 and $?>>8 != 0) {
-  		throw Git::Error::Command(join(' ', $cmd, @args), $? >> 8);
-  	}
-  }
-  
-  
-  =item version ()
-  
-  Return the Git version in use.
-  
-  =cut
-  
-  sub version {
-  	my $verstr = command_oneline('--version');
-  	$verstr =~ s/^git version //;
-  	$verstr;
-  }
-  
-  
-  =item exec_path ()
-  
-  Return path to the Git sub-command executables (the same as
-  C<git --exec-path>). Useful mostly only internally.
-  
-  =cut
-  
-  sub exec_path { command_oneline('--exec-path') }
-  
-  
-  =item html_path ()
-  
-  Return path to the Git html documentation (the same as
-  C<git --html-path>). Useful mostly only internally.
-  
-  =cut
-  
-  sub html_path { command_oneline('--html-path') }
-  
-  
-  =item get_tz_offset ( TIME )
-  
-  Return the time zone offset from GMT in the form +/-HHMM where HH is
-  the number of hours from GMT and MM is the number of minutes.  This is
-  the equivalent of what strftime("%z", ...) would provide on a GNU
-  platform.
-  
-  If TIME is not supplied, the current local time is used.
-  
-  =cut
-  
-  sub get_tz_offset {
-  	# some systems don't handle or mishandle %z, so be creative.
-  	my $t = shift || time;
-  	my $gm = timegm(localtime($t));
-  	my $sign = qw( + + - )[ $gm <=> $t ];
-  	return sprintf("%s%02d%02d", $sign, (gmtime(abs($t - $gm)))[2,1]);
-  }
-  
-  =item get_record ( FILEHANDLE, INPUT_RECORD_SEPARATOR )
-  
-  Read one record from FILEHANDLE delimited by INPUT_RECORD_SEPARATOR,
-  removing any trailing INPUT_RECORD_SEPARATOR.
-  
-  =cut
-  
-  sub get_record {
-  	my ($fh, $rs) = @_;
-  	local $/ = $rs;
-  	my $rec = <$fh>;
-  	chomp $rec if defined $rs;
-  	$rec;
-  }
-  
-  =item prompt ( PROMPT , ISPASSWORD  )
-  
-  Query user C<PROMPT> and return answer from user.
-  
-  Honours GIT_ASKPASS and SSH_ASKPASS environment variables for querying
-  the user. If no *_ASKPASS variable is set or an error occoured,
-  the terminal is tried as a fallback.
-  If C<ISPASSWORD> is set and true, the terminal disables echo.
-  
-  =cut
-  
-  sub prompt {
-  	my ($prompt, $isPassword) = @_;
-  	my $ret;
-  	if (exists $ENV{'GIT_ASKPASS'}) {
-  		$ret = _prompt($ENV{'GIT_ASKPASS'}, $prompt);
-  	}
-  	if (!defined $ret && exists $ENV{'SSH_ASKPASS'}) {
-  		$ret = _prompt($ENV{'SSH_ASKPASS'}, $prompt);
-  	}
-  	if (!defined $ret) {
-  		print STDERR $prompt;
-  		STDERR->flush;
-  		if (defined $isPassword && $isPassword) {
-  			require Term::ReadKey;
-  			Term::ReadKey::ReadMode('noecho');
-  			$ret = '';
-  			while (defined(my $key = Term::ReadKey::ReadKey(0))) {
-  				last if $key =~ /[\012\015]/; # \n\r
-  				$ret .= $key;
-  			}
-  			Term::ReadKey::ReadMode('restore');
-  			print STDERR "\n";
-  			STDERR->flush;
-  		} else {
-  			chomp($ret = <STDIN>);
-  		}
-  	}
-  	return $ret;
-  }
-  
-  sub _prompt {
-  	my ($askpass, $prompt) = @_;
-  	return unless length $askpass;
-  	$prompt =~ s/\n/ /g;
-  	my $ret;
-  	open my $fh, "-|", $askpass, $prompt or return;
-  	$ret = <$fh>;
-  	$ret =~ s/[\015\012]//g; # strip \r\n, chomp does not work on all systems (i.e. windows) as expected
-  	close ($fh);
-  	return $ret;
-  }
-  
-  =item repo_path ()
-  
-  Return path to the git repository. Must be called on a repository instance.
-  
-  =cut
-  
-  sub repo_path { $_[0]->{opts}->{Repository} }
-  
-  
-  =item wc_path ()
-  
-  Return path to the working copy. Must be called on a repository instance.
-  
-  =cut
-  
-  sub wc_path { $_[0]->{opts}->{WorkingCopy} }
-  
-  
-  =item wc_subdir ()
-  
-  Return path to the subdirectory inside of a working copy. Must be called
-  on a repository instance.
-  
-  =cut
-  
-  sub wc_subdir { $_[0]->{opts}->{WorkingSubdir} ||= '' }
-  
-  
-  =item wc_chdir ( SUBDIR )
-  
-  Change the working copy subdirectory to work within. The C<SUBDIR> is
-  relative to the working copy root directory (not the current subdirectory).
-  Must be called on a repository instance attached to a working copy
-  and the directory must exist.
-  
-  =cut
-  
-  sub wc_chdir {
-  	my ($self, $subdir) = @_;
-  	$self->wc_path()
-  		or throw Error::Simple("bare repository");
-  
-  	-d $self->wc_path().'/'.$subdir
-  		or throw Error::Simple("subdir not found: $subdir $!");
-  	# Of course we will not "hold" the subdirectory so anyone
-  	# can delete it now and we will never know. But at least we tried.
-  
-  	$self->{opts}->{WorkingSubdir} = $subdir;
-  }
-  
-  
-  =item config ( VARIABLE )
-  
-  Retrieve the configuration C<VARIABLE> in the same manner as C<config>
-  does. In scalar context requires the variable to be set only one time
-  (exception is thrown otherwise), in array context returns allows the
-  variable to be set multiple times and returns all the values.
-  
-  =cut
-  
-  sub config {
-  	return _config_common({}, @_);
-  }
-  
-  
-  =item config_bool ( VARIABLE )
-  
-  Retrieve the bool configuration C<VARIABLE>. The return value
-  is usable as a boolean in perl (and C<undef> if it's not defined,
-  of course).
-  
-  =cut
-  
-  sub config_bool {
-  	my $val = scalar _config_common({'kind' => '--bool'}, @_);
-  
-  	# Do not rewrite this as return (defined $val && $val eq 'true')
-  	# as some callers do care what kind of falsehood they receive.
-  	if (!defined $val) {
-  		return undef;
-  	} else {
-  		return $val eq 'true';
-  	}
-  }
-  
-  
-  =item config_path ( VARIABLE )
-  
-  Retrieve the path configuration C<VARIABLE>. The return value
-  is an expanded path or C<undef> if it's not defined.
-  
-  =cut
-  
-  sub config_path {
-  	return _config_common({'kind' => '--path'}, @_);
-  }
-  
-  
-  =item config_int ( VARIABLE )
-  
-  Retrieve the integer configuration C<VARIABLE>. The return value
-  is simple decimal number.  An optional value suffix of 'k', 'm',
-  or 'g' in the config file will cause the value to be multiplied
-  by 1024, 1048576 (1024^2), or 1073741824 (1024^3) prior to output.
-  It would return C<undef> if configuration variable is not defined.
-  
-  =cut
-  
-  sub config_int {
-  	return scalar _config_common({'kind' => '--int'}, @_);
-  }
-  
-  # Common subroutine to implement bulk of what the config* family of methods
-  # do. This currently wraps command('config') so it is not so fast.
-  sub _config_common {
-  	my ($opts) = shift @_;
-  	my ($self, $var) = _maybe_self(@_);
-  
-  	try {
-  		my @cmd = ('config', $opts->{'kind'} ? $opts->{'kind'} : ());
-  		unshift @cmd, $self if $self;
-  		if (wantarray) {
-  			return command(@cmd, '--get-all', $var);
-  		} else {
-  			return command_oneline(@cmd, '--get', $var);
-  		}
-  	} catch Git::Error::Command with {
-  		my $E = shift;
-  		if ($E->value() == 1) {
-  			# Key not found.
-  			return;
-  		} else {
-  			throw $E;
-  		}
-  	};
-  }
-  
-  =item get_colorbool ( NAME )
-  
-  Finds if color should be used for NAMEd operation from the configuration,
-  and returns boolean (true for "use color", false for "do not use color").
-  
-  =cut
-  
-  sub get_colorbool {
-  	my ($self, $var) = @_;
-  	my $stdout_to_tty = (-t STDOUT) ? "true" : "false";
-  	my $use_color = $self->command_oneline('config', '--get-colorbool',
-  					       $var, $stdout_to_tty);
-  	return ($use_color eq 'true');
-  }
-  
-  =item get_color ( SLOT, COLOR )
-  
-  Finds color for SLOT from the configuration, while defaulting to COLOR,
-  and returns the ANSI color escape sequence:
-  
-  	print $repo->get_color("color.interactive.prompt", "underline blue white");
-  	print "some text";
-  	print $repo->get_color("", "normal");
-  
-  =cut
-  
-  sub get_color {
-  	my ($self, $slot, $default) = @_;
-  	my $color = $self->command_oneline('config', '--get-color', $slot, $default);
-  	if (!defined $color) {
-  		$color = "";
-  	}
-  	return $color;
-  }
-  
-  =item remote_refs ( REPOSITORY [, GROUPS [, REFGLOBS ] ] )
-  
-  This function returns a hashref of refs stored in a given remote repository.
-  The hash is in the format C<refname =\> hash>. For tags, the C<refname> entry
-  contains the tag object while a C<refname^{}> entry gives the tagged objects.
-  
-  C<REPOSITORY> has the same meaning as the appropriate C<git-ls-remote>
-  argument; either a URL or a remote name (if called on a repository instance).
-  C<GROUPS> is an optional arrayref that can contain 'tags' to return all the
-  tags and/or 'heads' to return all the heads. C<REFGLOB> is an optional array
-  of strings containing a shell-like glob to further limit the refs returned in
-  the hash; the meaning is again the same as the appropriate C<git-ls-remote>
-  argument.
-  
-  This function may or may not be called on a repository instance. In the former
-  case, remote names as defined in the repository are recognized as repository
-  specifiers.
-  
-  =cut
-  
-  sub remote_refs {
-  	my ($self, $repo, $groups, $refglobs) = _maybe_self(@_);
-  	my @args;
-  	if (ref $groups eq 'ARRAY') {
-  		foreach (@$groups) {
-  			if ($_ eq 'heads') {
-  				push (@args, '--heads');
-  			} elsif ($_ eq 'tags') {
-  				push (@args, '--tags');
-  			} else {
-  				# Ignore unknown groups for future
-  				# compatibility
-  			}
-  		}
-  	}
-  	push (@args, $repo);
-  	if (ref $refglobs eq 'ARRAY') {
-  		push (@args, @$refglobs);
-  	}
-  
-  	my @self = $self ? ($self) : (); # Ultra trickery
-  	my ($fh, $ctx) = Git::command_output_pipe(@self, 'ls-remote', @args);
-  	my %refs;
-  	while (<$fh>) {
-  		chomp;
-  		my ($hash, $ref) = split(/\t/, $_, 2);
-  		$refs{$ref} = $hash;
-  	}
-  	Git::command_close_pipe(@self, $fh, $ctx);
-  	return \%refs;
-  }
-  
-  
-  =item ident ( TYPE | IDENTSTR )
-  
-  =item ident_person ( TYPE | IDENTSTR | IDENTARRAY )
-  
-  This suite of functions retrieves and parses ident information, as stored
-  in the commit and tag objects or produced by C<var GIT_type_IDENT> (thus
-  C<TYPE> can be either I<author> or I<committer>; case is insignificant).
-  
-  The C<ident> method retrieves the ident information from C<git var>
-  and either returns it as a scalar string or as an array with the fields parsed.
-  Alternatively, it can take a prepared ident string (e.g. from the commit
-  object) and just parse it.
-  
-  C<ident_person> returns the person part of the ident - name and email;
-  it can take the same arguments as C<ident> or the array returned by C<ident>.
-  
-  The synopsis is like:
-  
-  	my ($name, $email, $time_tz) = ident('author');
-  	"$name <$email>" eq ident_person('author');
-  	"$name <$email>" eq ident_person($name);
-  	$time_tz =~ /^\d+ [+-]\d{4}$/;
-  
-  =cut
-  
-  sub ident {
-  	my ($self, $type) = _maybe_self(@_);
-  	my $identstr;
-  	if (lc $type eq lc 'committer' or lc $type eq lc 'author') {
-  		my @cmd = ('var', 'GIT_'.uc($type).'_IDENT');
-  		unshift @cmd, $self if $self;
-  		$identstr = command_oneline(@cmd);
-  	} else {
-  		$identstr = $type;
-  	}
-  	if (wantarray) {
-  		return $identstr =~ /^(.*) <(.*)> (\d+ [+-]\d{4})$/;
-  	} else {
-  		return $identstr;
-  	}
-  }
-  
-  sub ident_person {
-  	my ($self, @ident) = _maybe_self(@_);
-  	$#ident == 0 and @ident = $self ? $self->ident($ident[0]) : ident($ident[0]);
-  	return "$ident[0] <$ident[1]>";
-  }
-  
-  =item parse_mailboxes
-  
-  Return an array of mailboxes extracted from a string.
-  
-  =cut
-  
-  # Very close to Mail::Address's parser, but we still have minor
-  # differences in some cases (see t9000 for examples).
-  sub parse_mailboxes {
-  	my $re_comment = qr/\((?:[^)]*)\)/;
-  	my $re_quote = qr/"(?:[^\"\\]|\\.)*"/;
-  	my $re_word = qr/(?:[^]["\s()<>:;@\\,.]|\\.)+/;
-  
-  	# divide the string in tokens of the above form
-  	my $re_token = qr/(?:$re_quote|$re_word|$re_comment|\S)/;
-  	my @tokens = map { $_ =~ /\s*($re_token)\s*/g } @_;
-  	my $end_of_addr_seen = 0;
-  
-  	# add a delimiter to simplify treatment for the last mailbox
-  	push @tokens, ",";
-  
-  	my (@addr_list, @phrase, @address, @comment, @buffer) = ();
-  	foreach my $token (@tokens) {
-  		if ($token =~ /^[,;]$/) {
-  			# if buffer still contains undeterminated strings
-  			# append it at the end of @address or @phrase
-  			if ($end_of_addr_seen) {
-  				push @phrase, @buffer;
-  			} else {
-  				push @address, @buffer;
-  			}
-  
-  			my $str_phrase = join ' ', @phrase;
-  			my $str_address = join '', @address;
-  			my $str_comment = join ' ', @comment;
-  
-  			# quote are necessary if phrase contains
-  			# special characters
-  			if ($str_phrase =~ /[][()<>:;@\\,.\000-\037\177]/) {
-  				$str_phrase =~ s/(^|[^\\])"/$1/g;
-  				$str_phrase = qq["$str_phrase"];
-  			}
-  
-  			# add "<>" around the address if necessary
-  			if ($str_address ne "" && $str_phrase ne "") {
-  				$str_address = qq[<$str_address>];
-  			}
-  
-  			my $str_mailbox = "$str_phrase $str_address $str_comment";
-  			$str_mailbox =~ s/^\s*|\s*$//g;
-  			push @addr_list, $str_mailbox if ($str_mailbox);
-  
-  			@phrase = @address = @comment = @buffer = ();
-  			$end_of_addr_seen = 0;
-  		} elsif ($token =~ /^\(/) {
-  			push @comment, $token;
-  		} elsif ($token eq "<") {
-  			push @phrase, (splice @address), (splice @buffer);
-  		} elsif ($token eq ">") {
-  			$end_of_addr_seen = 1;
-  			push @address, (splice @buffer);
-  		} elsif ($token eq "@" && !$end_of_addr_seen) {
-  			push @address, (splice @buffer), "@";
-  		} else {
-  			push @buffer, $token;
-  		}
-  	}
-  
-  	return @addr_list;
-  }
-  
-  =item hash_object ( TYPE, FILENAME )
-  
-  Compute the SHA1 object id of the given C<FILENAME> considering it is
-  of the C<TYPE> object type (C<blob>, C<commit>, C<tree>).
-  
-  The method can be called without any instance or on a specified Git repository,
-  it makes zero difference.
-  
-  The function returns the SHA1 hash.
-  
-  =cut
-  
-  # TODO: Support for passing FILEHANDLE instead of FILENAME
-  sub hash_object {
-  	my ($self, $type, $file) = _maybe_self(@_);
-  	command_oneline('hash-object', '-t', $type, $file);
-  }
-  
-  
-  =item hash_and_insert_object ( FILENAME )
-  
-  Compute the SHA1 object id of the given C<FILENAME> and add the object to the
-  object database.
-  
-  The function returns the SHA1 hash.
-  
-  =cut
-  
-  # TODO: Support for passing FILEHANDLE instead of FILENAME
-  sub hash_and_insert_object {
-  	my ($self, $filename) = @_;
-  
-  	carp "Bad filename \"$filename\"" if $filename =~ /[\r\n]/;
-  
-  	$self->_open_hash_and_insert_object_if_needed();
-  	my ($in, $out) = ($self->{hash_object_in}, $self->{hash_object_out});
-  
-  	unless (print $out $filename, "\n") {
-  		$self->_close_hash_and_insert_object();
-  		throw Error::Simple("out pipe went bad");
-  	}
-  
-  	chomp(my $hash = <$in>);
-  	unless (defined($hash)) {
-  		$self->_close_hash_and_insert_object();
-  		throw Error::Simple("in pipe went bad");
-  	}
-  
-  	return $hash;
-  }
-  
-  sub _open_hash_and_insert_object_if_needed {
-  	my ($self) = @_;
-  
-  	return if defined($self->{hash_object_pid});
-  
-  	($self->{hash_object_pid}, $self->{hash_object_in},
-  	 $self->{hash_object_out}, $self->{hash_object_ctx}) =
-  		$self->command_bidi_pipe(qw(hash-object -w --stdin-paths --no-filters));
-  }
-  
-  sub _close_hash_and_insert_object {
-  	my ($self) = @_;
-  
-  	return unless defined($self->{hash_object_pid});
-  
-  	my @vars = map { 'hash_object_' . $_ } qw(pid in out ctx);
-  
-  	command_close_bidi_pipe(@$self{@vars});
-  	delete @$self{@vars};
-  }
-  
-  =item cat_blob ( SHA1, FILEHANDLE )
-  
-  Prints the contents of the blob identified by C<SHA1> to C<FILEHANDLE> and
-  returns the number of bytes printed.
-  
-  =cut
-  
-  sub cat_blob {
-  	my ($self, $sha1, $fh) = @_;
-  
-  	$self->_open_cat_blob_if_needed();
-  	my ($in, $out) = ($self->{cat_blob_in}, $self->{cat_blob_out});
-  
-  	unless (print $out $sha1, "\n") {
-  		$self->_close_cat_blob();
-  		throw Error::Simple("out pipe went bad");
-  	}
-  
-  	my $description = <$in>;
-  	if ($description =~ / missing$/) {
-  		carp "$sha1 doesn't exist in the repository";
-  		return -1;
-  	}
-  
-  	if ($description !~ /^[0-9a-fA-F]{40} \S+ (\d+)$/) {
-  		carp "Unexpected result returned from git cat-file";
-  		return -1;
-  	}
-  
-  	my $size = $1;
-  
-  	my $blob;
-  	my $bytesLeft = $size;
-  
-  	while (1) {
-  		last unless $bytesLeft;
-  
-  		my $bytesToRead = $bytesLeft < 1024 ? $bytesLeft : 1024;
-  		my $read = read($in, $blob, $bytesToRead);
-  		unless (defined($read)) {
-  			$self->_close_cat_blob();
-  			throw Error::Simple("in pipe went bad");
-  		}
-  		unless (print $fh $blob) {
-  			$self->_close_cat_blob();
-  			throw Error::Simple("couldn't write to passed in filehandle");
-  		}
-  		$bytesLeft -= $read;
-  	}
-  
-  	# Skip past the trailing newline.
-  	my $newline;
-  	my $read = read($in, $newline, 1);
-  	unless (defined($read)) {
-  		$self->_close_cat_blob();
-  		throw Error::Simple("in pipe went bad");
-  	}
-  	unless ($read == 1 && $newline eq "\n") {
-  		$self->_close_cat_blob();
-  		throw Error::Simple("didn't find newline after blob");
-  	}
-  
-  	return $size;
-  }
-  
-  sub _open_cat_blob_if_needed {
-  	my ($self) = @_;
-  
-  	return if defined($self->{cat_blob_pid});
-  
-  	($self->{cat_blob_pid}, $self->{cat_blob_in},
-  	 $self->{cat_blob_out}, $self->{cat_blob_ctx}) =
-  		$self->command_bidi_pipe(qw(cat-file --batch));
-  }
-  
-  sub _close_cat_blob {
-  	my ($self) = @_;
-  
-  	return unless defined($self->{cat_blob_pid});
-  
-  	my @vars = map { 'cat_blob_' . $_ } qw(pid in out ctx);
-  
-  	command_close_bidi_pipe(@$self{@vars});
-  	delete @$self{@vars};
-  }
-  
-  
-  =item credential_read( FILEHANDLE )
-  
-  Reads credential key-value pairs from C<FILEHANDLE>.  Reading stops at EOF or
-  when an empty line is encountered.  Each line must be of the form C<key=value>
-  with a non-empty key.  Function returns hash with all read values.  Any white
-  space (other than new-line character) is preserved.
-  
-  =cut
-  
-  sub credential_read {
-  	my ($self, $reader) = _maybe_self(@_);
-  	my %credential;
-  	while (<$reader>) {
-  		chomp;
-  		if ($_ eq '') {
-  			last;
-  		} elsif (!/^([^=]+)=(.*)$/) {
-  			throw Error::Simple("unable to parse git credential data:\n$_");
-  		}
-  		$credential{$1} = $2;
-  	}
-  	return %credential;
-  }
-  
-  =item credential_write( FILEHANDLE, CREDENTIAL_HASHREF )
-  
-  Writes credential key-value pairs from hash referenced by
-  C<CREDENTIAL_HASHREF> to C<FILEHANDLE>.  Keys and values cannot contain
-  new-lines or NUL bytes characters, and key cannot contain equal signs nor be
-  empty (if they do Error::Simple is thrown).  Any white space is preserved.  If
-  value for a key is C<undef>, it will be skipped.
-  
-  If C<'url'> key exists it will be written first.  (All the other key-value
-  pairs are written in sorted order but you should not depend on that).  Once
-  all lines are written, an empty line is printed.
-  
-  =cut
-  
-  sub credential_write {
-  	my ($self, $writer, $credential) = _maybe_self(@_);
-  	my ($key, $value);
-  
-  	# Check if $credential is valid prior to writing anything
-  	while (($key, $value) = each %$credential) {
-  		if (!defined $key || !length $key) {
-  			throw Error::Simple("credential key empty or undefined");
-  		} elsif ($key =~ /[=\n\0]/) {
-  			throw Error::Simple("credential key contains invalid characters: $key");
-  		} elsif (defined $value && $value =~ /[\n\0]/) {
-  			throw Error::Simple("credential value for key=$key contains invalid characters: $value");
-  		}
-  	}
-  
-  	for $key (sort {
-  		# url overwrites other fields, so it must come first
-  		return -1 if $a eq 'url';
-  		return  1 if $b eq 'url';
-  		return $a cmp $b;
-  	} keys %$credential) {
-  		if (defined $credential->{$key}) {
-  			print $writer $key, '=', $credential->{$key}, "\n";
-  		}
-  	}
-  	print $writer "\n";
-  }
-  
-  sub _credential_run {
-  	my ($self, $credential, $op) = _maybe_self(@_);
-  	my ($pid, $reader, $writer, $ctx) = command_bidi_pipe('credential', $op);
-  
-  	credential_write $writer, $credential;
-  	close $writer;
-  
-  	if ($op eq "fill") {
-  		%$credential = credential_read $reader;
-  	}
-  	if (<$reader>) {
-  		throw Error::Simple("unexpected output from git credential $op response:\n$_\n");
-  	}
-  
-  	command_close_bidi_pipe($pid, $reader, undef, $ctx);
-  }
-  
-  =item credential( CREDENTIAL_HASHREF [, OPERATION ] )
-  
-  =item credential( CREDENTIAL_HASHREF, CODE )
-  
-  Executes C<git credential> for a given set of credentials and specified
-  operation.  In both forms C<CREDENTIAL_HASHREF> needs to be a reference to
-  a hash which stores credentials.  Under certain conditions the hash can
-  change.
-  
-  In the first form, C<OPERATION> can be C<'fill'>, C<'approve'> or C<'reject'>,
-  and function will execute corresponding C<git credential> sub-command.  If
-  it's omitted C<'fill'> is assumed.  In case of C<'fill'> the values stored in
-  C<CREDENTIAL_HASHREF> will be changed to the ones returned by the C<git
-  credential fill> command.  The usual usage would look something like:
-  
-  	my %cred = (
-  		'protocol' => 'https',
-  		'host' => 'example.com',
-  		'username' => 'bob'
-  	);
-  	Git::credential \%cred;
-  	if (try_to_authenticate($cred{'username'}, $cred{'password'})) {
-  		Git::credential \%cred, 'approve';
-  		... do more stuff ...
-  	} else {
-  		Git::credential \%cred, 'reject';
-  	}
-  
-  In the second form, C<CODE> needs to be a reference to a subroutine.  The
-  function will execute C<git credential fill> to fill the provided credential
-  hash, then call C<CODE> with C<CREDENTIAL_HASHREF> as the sole argument.  If
-  C<CODE>'s return value is defined, the function will execute C<git credential
-  approve> (if return value yields true) or C<git credential reject> (if return
-  value is false).  If the return value is undef, nothing at all is executed;
-  this is useful, for example, if the credential could neither be verified nor
-  rejected due to an unrelated network error.  The return value is the same as
-  what C<CODE> returns.  With this form, the usage might look as follows:
-  
-  	if (Git::credential {
-  		'protocol' => 'https',
-  		'host' => 'example.com',
-  		'username' => 'bob'
-  	}, sub {
-  		my $cred = shift;
-  		return !!try_to_authenticate($cred->{'username'},
-  		                             $cred->{'password'});
-  	}) {
-  		... do more stuff ...
-  	}
-  
-  =cut
-  
-  sub credential {
-  	my ($self, $credential, $op_or_code) = (_maybe_self(@_), 'fill');
-  
-  	if ('CODE' eq ref $op_or_code) {
-  		_credential_run $credential, 'fill';
-  		my $ret = $op_or_code->($credential);
-  		if (defined $ret) {
-  			_credential_run $credential, $ret ? 'approve' : 'reject';
-  		}
-  		return $ret;
-  	} else {
-  		_credential_run $credential, $op_or_code;
-  	}
-  }
-  
-  { # %TEMP_* Lexical Context
-  
-  my (%TEMP_FILEMAP, %TEMP_FILES);
-  
-  =item temp_acquire ( NAME )
-  
-  Attempts to retrieve the temporary file mapped to the string C<NAME>. If an
-  associated temp file has not been created this session or was closed, it is
-  created, cached, and set for autoflush and binmode.
-  
-  Internally locks the file mapped to C<NAME>. This lock must be released with
-  C<temp_release()> when the temp file is no longer needed. Subsequent attempts
-  to retrieve temporary files mapped to the same C<NAME> while still locked will
-  cause an error. This locking mechanism provides a weak guarantee and is not
-  threadsafe. It does provide some error checking to help prevent temp file refs
-  writing over one another.
-  
-  In general, the L<File::Handle> returned should not be closed by consumers as
-  it defeats the purpose of this caching mechanism. If you need to close the temp
-  file handle, then you should use L<File::Temp> or another temp file faculty
-  directly. If a handle is closed and then requested again, then a warning will
-  issue.
-  
-  =cut
-  
-  sub temp_acquire {
-  	my $temp_fd = _temp_cache(@_);
-  
-  	$TEMP_FILES{$temp_fd}{locked} = 1;
-  	$temp_fd;
-  }
-  
-  =item temp_is_locked ( NAME )
-  
-  Returns true if the internal lock created by a previous C<temp_acquire()>
-  call with C<NAME> is still in effect.
-  
-  When temp_acquire is called on a C<NAME>, it internally locks the temporary
-  file mapped to C<NAME>.  That lock will not be released until C<temp_release()>
-  is called with either the original C<NAME> or the L<File::Handle> that was
-  returned from the original call to temp_acquire.
-  
-  Subsequent attempts to call C<temp_acquire()> with the same C<NAME> will fail
-  unless there has been an intervening C<temp_release()> call for that C<NAME>
-  (or its corresponding L<File::Handle> that was returned by the original
-  C<temp_acquire()> call).
-  
-  If true is returned by C<temp_is_locked()> for a C<NAME>, an attempt to
-  C<temp_acquire()> the same C<NAME> will cause an error unless
-  C<temp_release> is first called on that C<NAME> (or its corresponding
-  L<File::Handle> that was returned by the original C<temp_acquire()> call).
-  
-  =cut
-  
-  sub temp_is_locked {
-  	my ($self, $name) = _maybe_self(@_);
-  	my $temp_fd = \$TEMP_FILEMAP{$name};
-  
-  	defined $$temp_fd && $$temp_fd->opened && $TEMP_FILES{$$temp_fd}{locked};
-  }
-  
-  =item temp_release ( NAME )
-  
-  =item temp_release ( FILEHANDLE )
-  
-  Releases a lock acquired through C<temp_acquire()>. Can be called either with
-  the C<NAME> mapping used when acquiring the temp file or with the C<FILEHANDLE>
-  referencing a locked temp file.
-  
-  Warns if an attempt is made to release a file that is not locked.
-  
-  The temp file will be truncated before being released. This can help to reduce
-  disk I/O where the system is smart enough to detect the truncation while data
-  is in the output buffers. Beware that after the temp file is released and
-  truncated, any operations on that file may fail miserably until it is
-  re-acquired. All contents are lost between each release and acquire mapped to
-  the same string.
-  
-  =cut
-  
-  sub temp_release {
-  	my ($self, $temp_fd, $trunc) = _maybe_self(@_);
-  
-  	if (exists $TEMP_FILEMAP{$temp_fd}) {
-  		$temp_fd = $TEMP_FILES{$temp_fd};
-  	}
-  	unless ($TEMP_FILES{$temp_fd}{locked}) {
-  		carp "Attempt to release temp file '",
-  			$temp_fd, "' that has not been locked";
-  	}
-  	temp_reset($temp_fd) if $trunc and $temp_fd->opened;
-  
-  	$TEMP_FILES{$temp_fd}{locked} = 0;
-  	undef;
-  }
-  
-  sub _temp_cache {
-  	my ($self, $name) = _maybe_self(@_);
-  
-  	_verify_require();
-  
-  	my $temp_fd = \$TEMP_FILEMAP{$name};
-  	if (defined $$temp_fd and $$temp_fd->opened) {
-  		if ($TEMP_FILES{$$temp_fd}{locked}) {
-  			throw Error::Simple("Temp file with moniker '" .
-  				$name . "' already in use");
-  		}
-  	} else {
-  		if (defined $$temp_fd) {
-  			# then we're here because of a closed handle.
-  			carp "Temp file '", $name,
-  				"' was closed. Opening replacement.";
-  		}
-  		my $fname;
-  
-  		my $tmpdir;
-  		if (defined $self) {
-  			$tmpdir = $self->repo_path();
-  		}
-  
-  		my $n = $name;
-  		$n =~ s/\W/_/g; # no strange chars
-  
-  		($$temp_fd, $fname) = File::Temp::tempfile(
-  			"Git_${n}_XXXXXX", UNLINK => 1, DIR => $tmpdir,
-  			) or throw Error::Simple("couldn't open new temp file");
-  
-  		$$temp_fd->autoflush;
-  		binmode $$temp_fd;
-  		$TEMP_FILES{$$temp_fd}{fname} = $fname;
-  	}
-  	$$temp_fd;
-  }
-  
-  sub _verify_require {
-  	eval { require File::Temp; require File::Spec; };
-  	$@ and throw Error::Simple($@);
-  }
-  
-  =item temp_reset ( FILEHANDLE )
-  
-  Truncates and resets the position of the C<FILEHANDLE>.
-  
-  =cut
-  
-  sub temp_reset {
-  	my ($self, $temp_fd) = _maybe_self(@_);
-  
-  	truncate $temp_fd, 0
-  		or throw Error::Simple("couldn't truncate file");
-  	sysseek($temp_fd, 0, SEEK_SET) and seek($temp_fd, 0, SEEK_SET)
-  		or throw Error::Simple("couldn't seek to beginning of file");
-  	sysseek($temp_fd, 0, SEEK_CUR) == 0 and tell($temp_fd) == 0
-  		or throw Error::Simple("expected file position to be reset");
-  }
-  
-  =item temp_path ( NAME )
-  
-  =item temp_path ( FILEHANDLE )
-  
-  Returns the filename associated with the given tempfile.
-  
-  =cut
-  
-  sub temp_path {
-  	my ($self, $temp_fd) = _maybe_self(@_);
-  
-  	if (exists $TEMP_FILEMAP{$temp_fd}) {
-  		$temp_fd = $TEMP_FILEMAP{$temp_fd};
-  	}
-  	$TEMP_FILES{$temp_fd}{fname};
-  }
-  
-  sub END {
-  	unlink values %TEMP_FILEMAP if %TEMP_FILEMAP;
-  }
-  
-  } # %TEMP_* Lexical Context
-  
-  =item prefix_lines ( PREFIX, STRING [, STRING... ])
-  
-  Prefixes lines in C<STRING> with C<PREFIX>.
-  
-  =cut
-  
-  sub prefix_lines {
-  	my $prefix = shift;
-  	my $string = join("\n", @_);
-  	$string =~ s/^/$prefix/mg;
-  	return $string;
-  }
-  
-  =item unquote_path ( PATH )
-  
-  Unquote a quoted path containing c-escapes as returned by ls-files etc.
-  when not using -z or when parsing the output of diff -u.
-  
-  =cut
-  
-  {
-  	my %cquote_map = (
-  		"a" => chr(7),
-  		"b" => chr(8),
-  		"t" => chr(9),
-  		"n" => chr(10),
-  		"v" => chr(11),
-  		"f" => chr(12),
-  		"r" => chr(13),
-  		"\\" => "\\",
-  		"\042" => "\042",
-  	);
-  
-  	sub unquote_path {
-  		local ($_) = @_;
-  		my ($retval, $remainder);
-  		if (!/^\042(.*)\042$/) {
-  			return $_;
-  		}
-  		($_, $retval) = ($1, "");
-  		while (/^([^\\]*)\\(.*)$/) {
-  			$remainder = $2;
-  			$retval .= $1;
-  			for ($remainder) {
-  				if (/^([0-3][0-7][0-7])(.*)$/) {
-  					$retval .= chr(oct($1));
-  					$_ = $2;
-  					last;
-  				}
-  				if (/^([\\\042abtnvfr])(.*)$/) {
-  					$retval .= $cquote_map{$1};
-  					$_ = $2;
-  					last;
-  				}
-  				# This is malformed
-  				throw Error::Simple("invalid quoted path $_[0]");
-  			}
-  			$_ = $remainder;
-  		}
-  		$retval .= $_;
-  		return $retval;
-  	}
-  }
-  
-  =item get_comment_line_char ( )
-  
-  Gets the core.commentchar configuration value.
-  The value falls-back to '#' if core.commentchar is set to 'auto'.
-  
-  =cut
-  
-  sub get_comment_line_char {
-  	my $comment_line_char = config("core.commentchar") || '#';
-  	$comment_line_char = '#' if ($comment_line_char eq 'auto');
-  	$comment_line_char = '#' if (length($comment_line_char) != 1);
-  	return $comment_line_char;
-  }
-  
-  =item comment_lines ( STRING [, STRING... ])
-  
-  Comments lines following core.commentchar configuration.
-  
-  =cut
-  
-  sub comment_lines {
-  	my $comment_line_char = get_comment_line_char;
-  	return prefix_lines("$comment_line_char ", @_);
-  }
-  
-  =back
-  
-  =head1 ERROR HANDLING
-  
-  All functions are supposed to throw Perl exceptions in case of errors.
-  See the L<Error> module on how to catch those. Most exceptions are mere
-  L<Error::Simple> instances.
-  
-  However, the C<command()>, C<command_oneline()> and C<command_noisy()>
-  functions suite can throw C<Git::Error::Command> exceptions as well: those are
-  thrown when the external command returns an error code and contain the error
-  code as well as access to the captured command's output. The exception class
-  provides the usual C<stringify> and C<value> (command's exit code) methods and
-  in addition also a C<cmd_output> method that returns either an array or a
-  string with the captured command output (depending on the original function
-  call context; C<command_noisy()> returns C<undef>) and $<cmdline> which
-  returns the command and its arguments (but without proper quoting).
-  
-  Note that the C<command_*_pipe()> functions cannot throw this exception since
-  it has no idea whether the command failed or not. You will only find out
-  at the time you C<close> the pipe; if you want to have that automated,
-  use C<command_close_pipe()>, which can throw the exception.
-  
-  =cut
-  
-  {
-  	package Git::Error::Command;
-  
-  	@Git::Error::Command::ISA = qw(Error);
-  
-  	sub new {
-  		my $self = shift;
-  		my $cmdline = '' . shift;
-  		my $value = 0 + shift;
-  		my $outputref = shift;
-  		my(@args) = ();
-  
-  		local $Error::Depth = $Error::Depth + 1;
-  
-  		push(@args, '-cmdline', $cmdline);
-  		push(@args, '-value', $value);
-  		push(@args, '-outputref', $outputref);
-  
-  		$self->SUPER::new(-text => 'command returned error', @args);
-  	}
-  
-  	sub stringify {
-  		my $self = shift;
-  		my $text = $self->SUPER::stringify;
-  		$self->cmdline() . ': ' . $text . ': ' . $self->value() . "\n";
-  	}
-  
-  	sub cmdline {
-  		my $self = shift;
-  		$self->{'-cmdline'};
-  	}
-  
-  	sub cmd_output {
-  		my $self = shift;
-  		my $ref = $self->{'-outputref'};
-  		defined $ref or undef;
-  		if (ref $ref eq 'ARRAY') {
-  			return @$ref;
-  		} else { # SCALAR
-  			return $$ref;
-  		}
-  	}
-  }
-  
-  =over 4
-  
-  =item git_cmd_try { CODE } ERRMSG
-  
-  This magical statement will automatically catch any C<Git::Error::Command>
-  exceptions thrown by C<CODE> and make your program die with C<ERRMSG>
-  on its lips; the message will have %s substituted for the command line
-  and %d for the exit status. This statement is useful mostly for producing
-  more user-friendly error messages.
-  
-  In case of no exception caught the statement returns C<CODE>'s return value.
-  
-  Note that this is the only auto-exported function.
-  
-  =cut
-  
-  sub git_cmd_try(&$) {
-  	my ($code, $errmsg) = @_;
-  	my @result;
-  	my $err;
-  	my $array = wantarray;
-  	try {
-  		if ($array) {
-  			@result = &$code;
-  		} else {
-  			$result[0] = &$code;
-  		}
-  	} catch Git::Error::Command with {
-  		my $E = shift;
-  		$err = $errmsg;
-  		$err =~ s/\%s/$E->cmdline()/ge;
-  		$err =~ s/\%d/$E->value()/ge;
-  		# We can't croak here since Error.pm would mangle
-  		# that to Error::Simple.
-  	};
-  	$err and croak $err;
-  	return $array ? @result : $result[0];
-  }
-  
-  
-  =back
-  
-  =head1 COPYRIGHT
-  
-  Copyright 2006 by Petr Baudis E<lt>pasky@suse.czE<gt>.
-  
-  This module is free software; it may be used, copied, modified
-  and distributed under the terms of the GNU General Public Licence,
-  either version 2, or (at your option) any later version.
-  
-  =cut
-  
-  
-  # Take raw method argument list and return ($obj, @args) in case
-  # the method was called upon an instance and (undef, @args) if
-  # it was called directly.
-  sub _maybe_self {
-  	UNIVERSAL::isa($_[0], 'Git') ? @_ : (undef, @_);
-  }
-  
-  # Check if the command id is something reasonable.
-  sub _check_valid_cmd {
-  	my ($cmd) = @_;
-  	$cmd =~ /^[a-z0-9A-Z_-]+$/ or throw Error::Simple("bad command: $cmd");
-  }
-  
-  # Common backend for the pipe creators.
-  sub _command_common_pipe {
-  	my $direction = shift;
-  	my ($self, @p) = _maybe_self(@_);
-  	my (%opts, $cmd, @args);
-  	if (ref $p[0]) {
-  		($cmd, @args) = @{shift @p};
-  		%opts = ref $p[0] ? %{$p[0]} : @p;
-  	} else {
-  		($cmd, @args) = @p;
-  	}
-  	_check_valid_cmd($cmd);
-  
-  	my $fh;
-  	if ($^O eq 'MSWin32') {
-  		# ActiveState Perl
-  		#defined $opts{STDERR} and
-  		#	warn 'ignoring STDERR option - running w/ ActiveState';
-  		$direction eq '-|' or
-  			die 'input pipe for ActiveState not implemented';
-  		# the strange construction with *ACPIPE is just to
-  		# explain the tie below that we want to bind to
-  		# a handle class, not scalar. It is not known if
-  		# it is something specific to ActiveState Perl or
-  		# just a Perl quirk.
-  		tie (*ACPIPE, 'Git::activestate_pipe', $cmd, @args);
-  		$fh = *ACPIPE;
-  
-  	} else {
-  		my $pid = open($fh, $direction);
-  		if (not defined $pid) {
-  			throw Error::Simple("open failed: $!");
-  		} elsif ($pid == 0) {
-  			if ($opts{STDERR}) {
-  				open (STDERR, '>&', $opts{STDERR})
-  					or die "dup failed: $!";
-  			} elsif (defined $opts{STDERR}) {
-  				open (STDERR, '>', '/dev/null')
-  					or die "opening /dev/null failed: $!";
-  			}
-  			_cmd_exec($self, $cmd, @args);
-  		}
-  	}
-  	return wantarray ? ($fh, join(' ', $cmd, @args)) : $fh;
-  }
-  
-  # When already in the subprocess, set up the appropriate state
-  # for the given repository and execute the git command.
-  sub _cmd_exec {
-  	my ($self, @args) = @_;
-  	_setup_git_cmd_env($self);
-  	_execv_git_cmd(@args);
-  	die qq[exec "@args" failed: $!];
-  }
-  
-  # set up the appropriate state for git command
-  sub _setup_git_cmd_env {
-  	my $self = shift;
-  	if ($self) {
-  		$self->repo_path() and $ENV{'GIT_DIR'} = $self->repo_path();
-  		$self->repo_path() and $self->wc_path()
-  			and $ENV{'GIT_WORK_TREE'} = $self->wc_path();
-  		$self->wc_path() and chdir($self->wc_path());
-  		$self->wc_subdir() and chdir($self->wc_subdir());
-  	}
-  }
-  
-  # Execute the given Git command ($_[0]) with arguments ($_[1..])
-  # by searching for it at proper places.
-  sub _execv_git_cmd { exec('git', @_); }
-  
-  # Close pipe to a subprocess.
-  sub _cmd_close {
-  	my $ctx = shift @_;
-  	foreach my $fh (@_) {
-  		if (close $fh) {
-  			# nop
-  		} elsif ($!) {
-  			# It's just close, no point in fatalities
-  			carp "error closing pipe: $!";
-  		} elsif ($? >> 8) {
-  			# The caller should pepper this.
-  			throw Git::Error::Command($ctx, $? >> 8);
-  		}
-  		# else we might e.g. closed a live stream; the command
-  		# dying of SIGPIPE would drive us here.
-  	}
-  }
-  
-  
-  sub DESTROY {
-  	my ($self) = @_;
-  	$self->_close_hash_and_insert_object();
-  	$self->_close_cat_blob();
-  }
-  
-  
-  # Pipe implementation for ActiveState Perl.
-  
-  package Git::activestate_pipe;
-  use strict;
-  
-  sub TIEHANDLE {
-  	my ($class, @params) = @_;
-  	# FIXME: This is probably horrible idea and the thing will explode
-  	# at the moment you give it arguments that require some quoting,
-  	# but I have no ActiveState clue... --pasky
-  	# Let's just hope ActiveState Perl does at least the quoting
-  	# correctly.
-  	my @data = qx{git @params};
-  	bless { i => 0, data => \@data }, $class;
-  }
-  
-  sub READLINE {
-  	my $self = shift;
-  	if ($self->{i} >= scalar @{$self->{data}}) {
-  		return undef;
-  	}
-  	my $i = $self->{i};
-  	if (wantarray) {
-  		$self->{i} = $#{$self->{'data'}} + 1;
-  		return splice(@{$self->{'data'}}, $i);
-  	}
-  	$self->{i} = $i + 1;
-  	return $self->{'data'}->[ $i ];
-  }
-  
-  sub CLOSE {
-  	my $self = shift;
-  	delete $self->{data};
-  	delete $self->{i};
-  }
-  
-  sub EOF {
-  	my $self = shift;
-  	return ($self->{i} >= scalar @{$self->{data}});
-  }
-  
-  
-  1; # Famous last words
-GIT
-
-$fatpacked{"Git/I18N.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'GIT_I18N';
-  package Git::I18N;
-  use 5.008;
-  use strict;
-  use warnings;
-  BEGIN {
-  	require Exporter;
-  	if ($] < 5.008003) {
-  		*import = \&Exporter::import;
-  	} else {
-  		# Exporter 5.57 which supports this invocation was
-  		# released with perl 5.8.3
-  		Exporter->import('import');
-  	}
-  }
-  
-  our @EXPORT = qw(__ __n N__);
-  our @EXPORT_OK = @EXPORT;
-  
-  sub __bootstrap_locale_messages {
-  	our $TEXTDOMAIN = 'git';
-  	our $TEXTDOMAINDIR = $ENV{GIT_TEXTDOMAINDIR} || '++LOCALEDIR++';
-  
-  	require POSIX;
-  	POSIX->import(qw(setlocale));
-  	# Non-core prerequisite module
-  	require Locale::Messages;
-  	Locale::Messages->import(qw(:locale_h :libintl_h));
-  
-  	setlocale(LC_MESSAGES(), '');
-  	setlocale(LC_CTYPE(), '');
-  	textdomain($TEXTDOMAIN);
-  	bindtextdomain($TEXTDOMAIN => $TEXTDOMAINDIR);
-  
-  	return;
-  }
-  
-  BEGIN
-  {
-  	# Used by our test script to see if it should test fallbacks or
-  	# not.
-  	our $__HAS_LIBRARY = 1;
-  
-  	local $@;
-  	eval {
-  		__bootstrap_locale_messages();
-  		*__ = \&Locale::Messages::gettext;
-  		*__n = \&Locale::Messages::ngettext;
-  		1;
-  	} or do {
-  		# Tell test.pl that we couldn't load the gettext library.
-  		$Git::I18N::__HAS_LIBRARY = 0;
-  
-  		# Just a fall-through no-op
-  		*__ = sub ($) { $_[0] };
-  		*__n = sub ($$$) { $_[2] == 1 ? $_[0] : $_[1] };
-  	};
-  
-  	sub N__($) { return shift; }
+      my($self, $os) = @_;
+      os_class($os)->dir($self);
   }
   
   1;
@@ -3314,6680 +16859,1911 @@ $fatpacked{"Git/I18N.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'GIT_I1
   
   =head1 NAME
   
-  Git::I18N - Perl interface to Git's Gettext localizations
+  URI::file - URI that maps to local file names
   
   =head1 SYNOPSIS
   
-  	use Git::I18N;
+   use URI::file;
   
-  	print __("Welcome to Git!\n");
+   $u1 = URI->new("file:/foo/bar");
+   $u2 = URI->new("foo/bar", "file");
   
-  	printf __("The following error occurred: %s\n"), $error;
+   $u3 = URI::file->new($path);
+   $u4 = URI::file->new("c:\\windows\\", "win32");
   
-  	printf __n("committed %d file\n", "committed %d files\n", $files), $files;
-  
+   $u1->file;
+   $u1->file("mac");
   
   =head1 DESCRIPTION
   
-  Git's internal Perl interface to gettext via L<Locale::Messages>. If
-  L<Locale::Messages> can't be loaded (it's not a core module) we
-  provide stub passthrough fallbacks.
+  The C<URI::file> class supports C<URI> objects belonging to the I<file>
+  URI scheme.  This scheme allows us to map the conventional file names
+  found on various computer systems to the URI name space.  An old
+  specification of the I<file> URI scheme is found in RFC 1738.  Some
+  older background information is also in RFC 1630. There are no newer
+  specifications as far as I know.
   
-  This is a distilled interface to gettext, see C<info '(gettext)Perl'>
-  for the full interface. This module implements only a small part of
-  it.
+  If you simply want to construct I<file> URI objects from URI strings,
+  use the normal C<URI> constructor.  If you want to construct I<file>
+  URI objects from the actual file names used by various systems, then
+  use one of the following C<URI::file> constructors:
   
-  =head1 FUNCTIONS
+  =over 4
   
-  =head2 __($)
+  =item $u = URI::file->new( $filename, [$os] )
   
-  L<Locale::Messages>'s gettext function if all goes well, otherwise our
-  passthrough fallback function.
+  Maps a file name to the I<file:> URI name space, creates a URI object
+  and returns it.  The $filename is interpreted as belonging to the
+  indicated operating system ($os), which defaults to the value of the
+  $^O variable.  The $filename can be either absolute or relative, and
+  the corresponding type of URI object for $os is returned.
   
-  =head2 __n($$$)
+  =item $u = URI::file->new_abs( $filename, [$os] )
   
-  L<Locale::Messages>'s ngettext function or passthrough fallback function.
+  Same as URI::file->new, but makes sure that the URI returned
+  represents an absolute file name.  If the $filename argument is
+  relative, then the name is resolved relative to the current directory,
+  i.e. this constructor is really the same as:
   
-  =head2 N__($)
+    URI::file->new($filename)->abs(URI::file->cwd);
   
-  No-operation that only returns its argument. Use this if you want xgettext to
-  extract the text to the pot template but do not want to trigger retrival of the
-  translation at run time.
+  =item $u = URI::file->cwd
   
-  =head1 AUTHOR
+  Returns a I<file> URI that represents the current working directory.
+  See L<Cwd>.
   
-  E<AElig>var ArnfjE<ouml>rE<eth> Bjarmason <avarab@gmail.com>
+  =back
   
-  =head1 COPYRIGHT
+  The following methods are supported for I<file> URI (in addition to
+  the common and generic methods described in L<URI>):
   
-  Copyright 2010 E<AElig>var ArnfjE<ouml>rE<eth> Bjarmason <avarab@gmail.com>
+  =over 4
+  
+  =item $u->file( [$os] )
+  
+  Returns a file name.  It maps from the URI name space
+  to the file name space of the indicated operating system.
+  
+  It might return C<undef> if the name can not be represented in the
+  indicated file system.
+  
+  =item $u->dir( [$os] )
+  
+  Some systems use a different form for names of directories than for plain
+  files.  Use this method if you know you want to use the name for
+  a directory.
+  
+  =back
+  
+  The C<URI::file> module can be used to map generic file names to names
+  suitable for the current system.  As such, it can work as a nice
+  replacement for the C<File::Spec> module.  For instance, the following
+  code translates the UNIX-style file name F<Foo/Bar.pm> to a name
+  suitable for the local system:
+  
+    $file = URI::file->new("Foo/Bar.pm", "unix")->file;
+    die "Can't map filename Foo/Bar.pm for $^O" unless defined $file;
+    open(FILE, $file) || die "Can't open '$file': $!";
+    # do something with FILE
+  
+  =head1 MAPPING NOTES
+  
+  Most computer systems today have hierarchically organized file systems.
+  Mapping the names used in these systems to the generic URI syntax
+  allows us to work with relative file URIs that behave as they should
+  when resolved using the generic algorithm for URIs (specified in RFC
+  2396).  Mapping a file name to the generic URI syntax involves mapping
+  the path separator character to "/" and encoding any reserved
+  characters that appear in the path segments of the file name.  If
+  path segments consisting of the strings "." or ".." have a
+  different meaning than what is specified for generic URIs, then these
+  must be encoded as well.
+  
+  If the file system has device, volume or drive specifications as
+  the root of the name space, then it makes sense to map them to the
+  authority field of the generic URI syntax.  This makes sure that
+  relative URIs can not be resolved "above" them, i.e. generally how
+  relative file names work in those systems.
+  
+  Another common use of the authority field is to encode the host on which
+  this file name is valid.  The host name "localhost" is special and
+  generally has the same meaning as a missing or empty authority
+  field.  This use is in conflict with using it as a device
+  specification, but can often be resolved for device specifications
+  having characters not legal in plain host names.
+  
+  File name to URI mapping in normally not one-to-one.  There are
+  usually many URIs that map to any given file name.  For instance, an
+  authority of "localhost" maps the same as a URI with a missing or empty
+  authority.
+  
+  Example 1: The Mac classic (Mac OS 9 and earlier) used ":" as path separator,
+  but not in the same way as a generic URI. ":foo" was a relative name.  "foo:bar"
+  was an absolute name.  Also, path segments could contain the "/" character as well
+  as the literal "." or "..".  So the mapping looks like this:
+  
+    Mac classic           URI
+    ----------            -------------------
+    :foo:bar     <==>     foo/bar
+    :            <==>     ./
+    ::foo:bar    <==>     ../foo/bar
+    :::          <==>     ../../
+    foo:bar      <==>     file:/foo/bar
+    foo:bar:     <==>     file:/foo/bar/
+    ..           <==>     %2E%2E
+    <undef>      <==      /
+    foo/         <==      file:/foo%2F
+    ./foo.txt    <==      file:/.%2Ffoo.txt
+  
+  Note that if you want a relative URL, you *must* begin the path with a :.  Any
+  path that begins with [^:] is treated as absolute.
+  
+  Example 2: The UNIX file system is easy to map, as it uses the same path
+  separator as URIs, has a single root, and segments of "." and ".."
+  have the same meaning.  URIs that have the character "\0" or "/" as
+  part of any path segment can not be turned into valid UNIX file names.
+  
+    UNIX                  URI
+    ----------            ------------------
+    foo/bar      <==>     foo/bar
+    /foo/bar     <==>     file:/foo/bar
+    /foo/bar     <==      file://localhost/foo/bar
+    file:         ==>     ./file:
+    <undef>      <==      file:/fo%00/bar
+    /            <==>     file:/
   
   =cut
-GIT_I18N
-
-$fatpacked{"Git/IndexInfo.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'GIT_INDEXINFO';
-  package Git::IndexInfo;
-  use strict;
-  use warnings;
-  use Git qw/command_input_pipe command_close_pipe/;
   
-  sub new {
-  	my ($class) = @_;
-  	my ($gui, $ctx) = command_input_pipe(qw/update-index -z --index-info/);
-  	bless { gui => $gui, ctx => $ctx, nr => 0}, $class;
-  }
   
-  sub remove {
-  	my ($self, $path) = @_;
-  	if (print { $self->{gui} } '0 ', 0 x 40, "\t", $path, "\0") {
-  		return ++$self->{nr};
-  	}
-  	undef;
-  }
+  RFC 1630
   
-  sub update {
-  	my ($self, $mode, $hash, $path) = @_;
-  	if (print { $self->{gui} } $mode, ' ', $hash, "\t", $path, "\0") {
-  		return ++$self->{nr};
-  	}
-  	undef;
-  }
+     [...]
   
-  sub DESTROY {
-  	my ($self) = @_;
-  	command_close_pipe($self->{gui}, $self->{ctx});
-  }
+     There is clearly a danger of confusion that a link made to a local
+     file should be followed by someone on a different system, with
+     unexpected and possibly harmful results.  Therefore, the convention
+     is that even a "file" URL is provided with a host part.  This allows
+     a client on another system to know that it cannot access the file
+     system, or perhaps to use some other local mechanism to access the
+     file.
   
-  1;
-GIT_INDEXINFO
-
-$fatpacked{"Git/SVN.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'GIT_SVN';
-  package Git::SVN;
-  use strict;
-  use warnings;
-  use Fcntl qw/:DEFAULT :seek/;
-  use constant rev_map_fmt => 'NH40';
-  use vars qw/$_no_metadata
-              $_repack $_repack_flags $_use_svm_props $_head
-              $_use_svnsync_props $no_reuse_existing
-  	    $_use_log_author $_add_author_from $_localtime/;
-  use Carp qw/croak/;
-  use File::Path qw/mkpath/;
-  use IPC::Open3;
-  use Memoize;  # core since 5.8.0, Jul 2002
-  use POSIX qw(:signal_h);
-  use Time::Local;
+     The special value "localhost" is used in the host field to indicate
+     that the filename should really be used on whatever host one is.
+     This for example allows links to be made to files which are
+     distributed on many machines, or to "your unix local password file"
+     subject of course to consistency across the users of the data.
   
-  use Git qw(
-      command
-      command_oneline
-      command_noisy
-      command_output_pipe
-      command_close_pipe
-      get_tz_offset
-  );
-  use Git::SVN::Utils qw(
-  	fatal
-  	can_compress
-  	join_paths
-  	canonicalize_path
-  	canonicalize_url
-  	add_path_to_url
-  );
+     A void host field is equivalent to "localhost".
   
-  my $memo_backend;
-  our $_follow_parent  = 1;
-  our $_minimize_url   = 'unset';
-  our $default_repo_id = 'svn';
-  our $default_ref_id  = $ENV{GIT_SVN_ID} || 'git-svn';
+  =head1 CONFIGURATION VARIABLES
   
-  my ($_gc_nr, $_gc_period);
-  
-  # properties that we do not log:
-  my %SKIP_PROP;
-  BEGIN {
-  	%SKIP_PROP = map { $_ => 1 } qw/svn:wc:ra_dav:version-url
-  	                                svn:special svn:executable
-  	                                svn:entry:committed-rev
-  	                                svn:entry:last-author
-  	                                svn:entry:uuid
-  	                                svn:entry:committed-date/;
-  
-  	# some options are read globally, but can be overridden locally
-  	# per [svn-remote "..."] section.  Command-line options will *NOT*
-  	# override options set in an [svn-remote "..."] section
-  	no strict 'refs';
-  	for my $option (qw/follow_parent no_metadata use_svm_props
-  			   use_svnsync_props/) {
-  		my $key = $option;
-  		$key =~ tr/_//d;
-  		my $prop = "-$option";
-  		*$option = sub {
-  			my ($self) = @_;
-  			return $self->{$prop} if exists $self->{$prop};
-  			my $k = "svn-remote.$self->{repo_id}.$key";
-  			eval { command_oneline(qw/config --get/, $k) };
-  			if ($@) {
-  				$self->{$prop} = ${"Git::SVN::_$option"};
-  			} else {
-  				my $v = command_oneline(qw/config --bool/,$k);
-  				$self->{$prop} = $v eq 'false' ? 0 : 1;
-  			}
-  			return $self->{$prop};
-  		}
-  	}
-  }
-  
-  
-  my (%LOCKFILES, %INDEX_FILES);
-  END {
-  	unlink keys %LOCKFILES if %LOCKFILES;
-  	unlink keys %INDEX_FILES if %INDEX_FILES;
-  }
-  
-  sub resolve_local_globs {
-  	my ($url, $fetch, $glob_spec) = @_;
-  	return unless defined $glob_spec;
-  	my $ref = $glob_spec->{ref};
-  	my $path = $glob_spec->{path};
-  	foreach (command(qw#for-each-ref --format=%(refname) refs/#)) {
-  		next unless m#^$ref->{regex}$#;
-  		my $p = $1;
-  		my $pathname = desanitize_refname($path->full_path($p));
-  		my $refname = desanitize_refname($ref->full_path($p));
-  		if (my $existing = $fetch->{$pathname}) {
-  			if ($existing ne $refname) {
-  				die "Refspec conflict:\n",
-  				    "existing: $existing\n",
-  				    " globbed: $refname\n";
-  			}
-  			my $u = (::cmt_metadata("$refname"))[0];
-  			if (!defined($u)) {
-  				warn
-  "W: $refname: no associated commit metadata from SVN, skipping\n";
-  				next;
-  			}
-  			$u =~ s!^\Q$url\E(/|$)!! or die
-  			  "$refname: '$url' not found in '$u'\n";
-  			if ($pathname ne $u) {
-  				warn "W: Refspec glob conflict ",
-  				     "(ref: $refname):\n",
-  				     "expected path: $pathname\n",
-  				     "    real path: $u\n",
-  				     "Continuing ahead with $u\n";
-  				next;
-  			}
-  		} else {
-  			$fetch->{$pathname} = $refname;
-  		}
-  	}
-  }
-  
-  sub parse_revision_argument {
-  	my ($base, $head) = @_;
-  	if (!defined $::_revision || $::_revision eq 'BASE:HEAD') {
-  		return ($base, $head);
-  	}
-  	return ($1, $2) if ($::_revision =~ /^(\d+):(\d+)$/);
-  	return ($::_revision, $::_revision) if ($::_revision =~ /^\d+$/);
-  	return ($head, $head) if ($::_revision eq 'HEAD');
-  	return ($base, $1) if ($::_revision =~ /^BASE:(\d+)$/);
-  	return ($1, $head) if ($::_revision =~ /^(\d+):HEAD$/);
-  	die "revision argument: $::_revision not understood by git-svn\n";
-  }
-  
-  sub fetch_all {
-  	my ($repo_id, $remotes) = @_;
-  	if (ref $repo_id) {
-  		my $gs = $repo_id;
-  		$repo_id = undef;
-  		$repo_id = $gs->{repo_id};
-  	}
-  	$remotes ||= read_all_remotes();
-  	my $remote = $remotes->{$repo_id} or
-  	             die "[svn-remote \"$repo_id\"] unknown\n";
-  	my $fetch = $remote->{fetch};
-  	my $url = $remote->{url} or die "svn-remote.$repo_id.url not defined\n";
-  	my (@gs, @globs);
-  	my $ra = Git::SVN::Ra->new($url);
-  	my $uuid = $ra->get_uuid;
-  	my $head = $ra->get_latest_revnum;
-  
-  	# ignore errors, $head revision may not even exist anymore
-  	eval { $ra->get_log("", $head, 0, 1, 0, 1, sub { $head = $_[1] }) };
-  	warn "W: $@\n" if $@;
-  
-  	my $base = defined $fetch ? $head : 0;
-  
-  	# read the max revs for wildcard expansion (branches/*, tags/*)
-  	foreach my $t (qw/branches tags/) {
-  		defined $remote->{$t} or next;
-  		push @globs, @{$remote->{$t}};
-  
-  		my $max_rev = eval { tmp_config(qw/--int --get/,
-  		                         "svn-remote.$repo_id.${t}-maxRev") };
-  		if (defined $max_rev && ($max_rev < $base)) {
-  			$base = $max_rev;
-  		} elsif (!defined $max_rev) {
-  			$base = 0;
-  		}
-  	}
-  
-  	if ($fetch) {
-  		foreach my $p (sort keys %$fetch) {
-  			my $gs = Git::SVN->new($fetch->{$p}, $repo_id, $p);
-  			my $lr = $gs->rev_map_max;
-  			if (defined $lr) {
-  				$base = $lr if ($lr < $base);
-  			}
-  			push @gs, $gs;
-  		}
-  	}
-  
-  	($base, $head) = parse_revision_argument($base, $head);
-  	$ra->gs_fetch_loop_common($base, $head, \@gs, \@globs);
-  }
-  
-  sub read_all_remotes {
-  	my $r = {};
-  	my $use_svm_props = eval { command_oneline(qw/config --bool
-  	    svn.useSvmProps/) };
-  	$use_svm_props = $use_svm_props eq 'true' if $use_svm_props;
-  	my $svn_refspec = qr{\s*(.*?)\s*:\s*(.+?)\s*};
-  	foreach (grep { s/^svn-remote\.// } command(qw/config -l/)) {
-  		if (m!^(.+)\.fetch=$svn_refspec$!) {
-  			my ($remote, $local_ref, $remote_ref) = ($1, $2, $3);
-  			die("svn-remote.$remote: remote ref '$remote_ref' "
-  			    . "must start with 'refs/'\n")
-  				unless $remote_ref =~ m{^refs/};
-  			$local_ref = uri_decode($local_ref);
-  			$r->{$remote}->{fetch}->{$local_ref} = $remote_ref;
-  			$r->{$remote}->{svm} = {} if $use_svm_props;
-  		} elsif (m!^(.+)\.usesvmprops=\s*(.*)\s*$!) {
-  			$r->{$1}->{svm} = {};
-  		} elsif (m!^(.+)\.url=\s*(.*)\s*$!) {
-  			$r->{$1}->{url} = canonicalize_url($2);
-  		} elsif (m!^(.+)\.pushurl=\s*(.*)\s*$!) {
-  			$r->{$1}->{pushurl} = canonicalize_url($2);
-  		} elsif (m!^(.+)\.ignore-refs=\s*(.*)\s*$!) {
-  			$r->{$1}->{ignore_refs_regex} = $2;
-  		} elsif (m!^(.+)\.(branches|tags)=$svn_refspec$!) {
-  			my ($remote, $t, $local_ref, $remote_ref) =
-  			                                     ($1, $2, $3, $4);
-  			die("svn-remote.$remote: remote ref '$remote_ref' ($t) "
-  			    . "must start with 'refs/'\n")
-  				unless $remote_ref =~ m{^refs/};
-  			$local_ref = uri_decode($local_ref);
-  
-  			require Git::SVN::GlobSpec;
-  			my $rs = {
-  			    t => $t,
-  			    remote => $remote,
-  			    path => Git::SVN::GlobSpec->new($local_ref, 1),
-  			    ref => Git::SVN::GlobSpec->new($remote_ref, 0) };
-  			if (length($rs->{ref}->{right}) != 0) {
-  				die "The '*' glob character must be the last ",
-  				    "character of '$remote_ref'\n";
-  			}
-  			push @{ $r->{$remote}->{$t} }, $rs;
-  		}
-  	}
-  
-  	map {
-  		if (defined $r->{$_}->{svm}) {
-  			my $svm;
-  			eval {
-  				my $section = "svn-remote.$_";
-  				$svm = {
-  					source => tmp_config('--get',
-  					    "$section.svm-source"),
-  					replace => tmp_config('--get',
-  					    "$section.svm-replace"),
-  				}
-  			};
-  			$r->{$_}->{svm} = $svm;
-  		}
-  	} keys %$r;
-  
-  	foreach my $remote (keys %$r) {
-  		foreach ( grep { defined $_ }
-  			  map { $r->{$remote}->{$_} } qw(branches tags) ) {
-  			foreach my $rs ( @$_ ) {
-  				$rs->{ignore_refs_regex} =
-  				    $r->{$remote}->{ignore_refs_regex};
-  			}
-  		}
-  	}
-  
-  	$r;
-  }
-  
-  sub init_vars {
-  	$_gc_nr = $_gc_period = 1000;
-  	if (defined $_repack || defined $_repack_flags) {
-  	       warn "Repack options are obsolete; they have no effect.\n";
-  	}
-  }
-  
-  sub verify_remotes_sanity {
-  	return unless -d $ENV{GIT_DIR};
-  	my %seen;
-  	foreach (command(qw/config -l/)) {
-  		if (m!^svn-remote\.(?:.+)\.fetch=.*:refs/remotes/(\S+)\s*$!) {
-  			if ($seen{$1}) {
-  				die "Remote ref refs/remote/$1 is tracked by",
-  				    "\n  \"$_\"\nand\n  \"$seen{$1}\"\n",
-  				    "Please resolve this ambiguity in ",
-  				    "your git configuration file before ",
-  				    "continuing\n";
-  			}
-  			$seen{$1} = $_;
-  		}
-  	}
-  }
-  
-  sub find_existing_remote {
-  	my ($url, $remotes) = @_;
-  	return undef if $no_reuse_existing;
-  	my $existing;
-  	foreach my $repo_id (keys %$remotes) {
-  		my $u = $remotes->{$repo_id}->{url} or next;
-  		next if $u ne $url;
-  		$existing = $repo_id;
-  		last;
-  	}
-  	$existing;
-  }
-  
-  sub init_remote_config {
-  	my ($self, $url, $no_write) = @_;
-  	$url = canonicalize_url($url);
-  	my $r = read_all_remotes();
-  	my $existing = find_existing_remote($url, $r);
-  	if ($existing) {
-  		unless ($no_write) {
-  			print STDERR "Using existing ",
-  				     "[svn-remote \"$existing\"]\n";
-  		}
-  		$self->{repo_id} = $existing;
-  	} elsif ($_minimize_url) {
-  		my $min_url = Git::SVN::Ra->new($url)->minimize_url;
-  		$existing = find_existing_remote($min_url, $r);
-  		if ($existing) {
-  			unless ($no_write) {
-  				print STDERR "Using existing ",
-  					     "[svn-remote \"$existing\"]\n";
-  			}
-  			$self->{repo_id} = $existing;
-  		}
-  		if ($min_url ne $url) {
-  			unless ($no_write) {
-  				print STDERR "Using higher level of URL: ",
-  					     "$url => $min_url\n";
-  			}
-  			my $old_path = $self->path;
-  			$url =~ s!^\Q$min_url\E(/|$)!!;
-  			$url = join_paths($url, $old_path);
-  			$self->path($url);
-  			$url = $min_url;
-  		}
-  	}
-  	my $orig_url;
-  	if (!$existing) {
-  		# verify that we aren't overwriting anything:
-  		$orig_url = eval {
-  			command_oneline('config', '--get',
-  					"svn-remote.$self->{repo_id}.url")
-  		};
-  		if ($orig_url && ($orig_url ne $url)) {
-  			die "svn-remote.$self->{repo_id}.url already set: ",
-  			    "$orig_url\nwanted to set to: $url\n";
-  		}
-  	}
-  	my ($xrepo_id, $xpath) = find_ref($self->refname);
-  	if (!$no_write && defined $xpath) {
-  		die "svn-remote.$xrepo_id.fetch already set to track ",
-  		    "$xpath:", $self->refname, "\n";
-  	}
-  	unless ($no_write) {
-  		command_noisy('config',
-  			      "svn-remote.$self->{repo_id}.url", $url);
-  		my $path = $self->path;
-  		$path =~ s{^/}{};
-  		$path =~ s{%([0-9A-F]{2})}{chr hex($1)}ieg;
-  		$self->path($path);
-  		command_noisy('config', '--add',
-  			      "svn-remote.$self->{repo_id}.fetch",
-  			      $self->path.":".$self->refname);
-  	}
-  	$self->url($url);
-  }
-  
-  sub find_by_url { # repos_root and, path are optional
-  	my ($class, $full_url, $repos_root, $path) = @_;
-  
-  	$full_url = canonicalize_url($full_url);
-  
-  	return undef unless defined $full_url;
-  	remove_username($full_url);
-  	remove_username($repos_root) if defined $repos_root;
-  	my $remotes = read_all_remotes();
-  	if (defined $full_url && defined $repos_root && !defined $path) {
-  		$path = $full_url;
-  		$path =~ s#^\Q$repos_root\E(?:/|$)##;
-  	}
-  	foreach my $repo_id (keys %$remotes) {
-  		my $u = $remotes->{$repo_id}->{url} or next;
-  		remove_username($u);
-  		next if defined $repos_root && $repos_root ne $u;
-  
-  		my $fetch = $remotes->{$repo_id}->{fetch} || {};
-  		foreach my $t (qw/branches tags/) {
-  			foreach my $globspec (@{$remotes->{$repo_id}->{$t}}) {
-  				resolve_local_globs($u, $fetch, $globspec);
-  			}
-  		}
-  		my $p = $path;
-  		my $rwr = rewrite_root({repo_id => $repo_id});
-  		my $svm = $remotes->{$repo_id}->{svm}
-  			if defined $remotes->{$repo_id}->{svm};
-  		unless (defined $p) {
-  			$p = $full_url;
-  			my $z = $u;
-  			my $prefix = '';
-  			if ($rwr) {
-  				$z = $rwr;
-  				remove_username($z);
-  			} elsif (defined $svm) {
-  				$z = $svm->{source};
-  				$prefix = $svm->{replace};
-  				$prefix =~ s#^\Q$u\E(?:/|$)##;
-  				$prefix =~ s#/$##;
-  			}
-  			$p =~ s#^\Q$z\E(?:/|$)#$prefix# or next;
-  		}
-  
-  		# remote fetch paths are not URI escaped.  Decode ours
-  		# so they match
-  		$p = uri_decode($p);
-  
-  		foreach my $f (keys %$fetch) {
-  			next if $f ne $p;
-  			return Git::SVN->new($fetch->{$f}, $repo_id, $f);
-  		}
-  	}
-  	undef;
-  }
-  
-  sub init {
-  	my ($class, $url, $path, $repo_id, $ref_id, $no_write) = @_;
-  	my $self = _new($class, $repo_id, $ref_id, $path);
-  	if (defined $url) {
-  		$self->init_remote_config($url, $no_write);
-  	}
-  	$self;
-  }
-  
-  sub find_ref {
-  	my ($ref_id) = @_;
-  	foreach (command(qw/config -l/)) {
-  		next unless m!^svn-remote\.(.+)\.fetch=
-  		              \s*(.*?)\s*:\s*(.+?)\s*$!x;
-  		my ($repo_id, $path, $ref) = ($1, $2, $3);
-  		if ($ref eq $ref_id) {
-  			$path = '' if ($path =~ m#^\./?#);
-  			return ($repo_id, $path);
-  		}
-  	}
-  	(undef, undef, undef);
-  }
-  
-  sub new {
-  	my ($class, $ref_id, $repo_id, $path) = @_;
-  	if (defined $ref_id && !defined $repo_id && !defined $path) {
-  		($repo_id, $path) = find_ref($ref_id);
-  		if (!defined $repo_id) {
-  			die "Could not find a \"svn-remote.*.fetch\" key ",
-  			    "in the repository configuration matching: ",
-  			    "$ref_id\n";
-  		}
-  	}
-  	my $self = _new($class, $repo_id, $ref_id, $path);
-  	if (!defined $self->path || !length $self->path) {
-  		my $fetch = command_oneline('config', '--get',
-  		                            "svn-remote.$repo_id.fetch",
-  		                            ":$ref_id\$") or
-  		     die "Failed to read \"svn-remote.$repo_id.fetch\" ",
-  		         "\":$ref_id\$\" in config\n";
-  		my($path) = split(/\s*:\s*/, $fetch);
-  		$self->path($path);
-  	}
-  	{
-  		my $path = $self->path;
-  		$path =~ s{\A/}{};
-  		$path =~ s{/\z}{};
-  		$self->path($path);
-  	}
-  	my $url = command_oneline('config', '--get',
-  	                          "svn-remote.$repo_id.url") or
-                    die "Failed to read \"svn-remote.$repo_id.url\" in config\n";
-  	$self->url($url);
-  	$self->{pushurl} = eval { command_oneline('config', '--get',
-  	                          "svn-remote.$repo_id.pushurl") };
-  	$self->rebuild;
-  	$self;
-  }
-  
-  sub refname {
-  	my ($refname) = $_[0]->{ref_id} ;
-  
-  	# It cannot end with a slash /, we'll throw up on this because
-  	# SVN can't have directories with a slash in their name, either:
-  	if ($refname =~ m{/$}) {
-  		die "ref: '$refname' ends with a trailing slash; this is ",
-  		    "not permitted by git or Subversion\n";
-  	}
-  
-  	# It cannot have ASCII control character space, tilde ~, caret ^,
-  	# colon :, question-mark ?, asterisk *, space, or open bracket [
-  	# anywhere.
-  	#
-  	# Additionally, % must be escaped because it is used for escaping
-  	# and we want our escaped refname to be reversible
-  	$refname =~ s{([ \%~\^:\?\*\[\t\\])}{sprintf('%%%02X',ord($1))}eg;
-  
-  	# no slash-separated component can begin with a dot .
-  	# /.* becomes /%2E*
-  	$refname =~ s{/\.}{/%2E}g;
-  
-  	# It cannot have two consecutive dots .. anywhere
-  	# .. becomes %2E%2E
-  	$refname =~ s{\.\.}{%2E%2E}g;
-  
-  	# trailing dots and .lock are not allowed
-  	# .$ becomes %2E and .lock becomes %2Elock
-  	$refname =~ s{\.(?=$|lock$)}{%2E};
-  
-  	# the sequence @{ is used to access the reflog
-  	# @{ becomes %40{
-  	$refname =~ s{\@\{}{%40\{}g;
-  
-  	return $refname;
-  }
-  
-  sub desanitize_refname {
-  	my ($refname) = @_;
-  	$refname =~ s{%(?:([0-9A-F]{2}))}{chr hex($1)}eg;
-  	return $refname;
-  }
-  
-  sub svm_uuid {
-  	my ($self) = @_;
-  	return $self->{svm}->{uuid} if $self->svm;
-  	$self->ra;
-  	unless ($self->{svm}) {
-  		die "SVM UUID not cached, and reading remotely failed\n";
-  	}
-  	$self->{svm}->{uuid};
-  }
-  
-  sub svm {
-  	my ($self) = @_;
-  	return $self->{svm} if $self->{svm};
-  	my $svm;
-  	# see if we have it in our config, first:
-  	eval {
-  		my $section = "svn-remote.$self->{repo_id}";
-  		$svm = {
-  		  source => tmp_config('--get', "$section.svm-source"),
-  		  uuid => tmp_config('--get', "$section.svm-uuid"),
-  		  replace => tmp_config('--get', "$section.svm-replace"),
-  		}
-  	};
-  	if ($svm && $svm->{source} && $svm->{uuid} && $svm->{replace}) {
-  		$self->{svm} = $svm;
-  	}
-  	$self->{svm};
-  }
-  
-  sub _set_svm_vars {
-  	my ($self, $ra) = @_;
-  	return $ra if $self->svm;
-  
-  	my @err = ( "useSvmProps set, but failed to read SVM properties\n",
-  		    "(svm:source, svm:uuid) ",
-  		    "from the following URLs:\n" );
-  	sub read_svm_props {
-  		my ($self, $ra, $path, $r) = @_;
-  		my $props = ($ra->get_dir($path, $r))[2];
-  		my $src = $props->{'svm:source'};
-  		my $uuid = $props->{'svm:uuid'};
-  		return undef if (!$src || !$uuid);
-  
-  		chomp($src, $uuid);
-  
-  		$uuid =~ m{^[0-9a-f\-]{30,}$}i
-  		    or die "doesn't look right - svm:uuid is '$uuid'\n";
-  
-  		# the '!' is used to mark the repos_root!/relative/path
-  		$src =~ s{/?!/?}{/};
-  		$src =~ s{/+$}{}; # no trailing slashes please
-  		# username is of no interest
-  		$src =~ s{(^[a-z\+]*://)[^/@]*@}{$1};
-  
-  		my $replace = add_path_to_url($ra->url, $path);
-  
-  		my $section = "svn-remote.$self->{repo_id}";
-  		tmp_config("$section.svm-source", $src);
-  		tmp_config("$section.svm-replace", $replace);
-  		tmp_config("$section.svm-uuid", $uuid);
-  		$self->{svm} = {
-  			source => $src,
-  			uuid => $uuid,
-  			replace => $replace
-  		};
-  	}
-  
-  	my $r = $ra->get_latest_revnum;
-  	my $path = $self->path;
-  	my %tried;
-  	while (length $path) {
-  		my $try = add_path_to_url($self->url, $path);
-  		unless ($tried{$try}) {
-  			return $ra if $self->read_svm_props($ra, $path, $r);
-  			$tried{$try} = 1;
-  		}
-  		$path =~ s#/?[^/]+$##;
-  	}
-  	die "Path: '$path' should be ''\n" if $path ne '';
-  	return $ra if $self->read_svm_props($ra, $path, $r);
-  	$tried{ add_path_to_url($self->url, $path) } = 1;
-  
-  	if ($ra->{repos_root} eq $self->url) {
-  		die @err, (map { "  $_\n" } keys %tried), "\n";
-  	}
-  
-  	# nope, make sure we're connected to the repository root:
-  	my $ok;
-  	my @tried_b;
-  	$path = $ra->{svn_path};
-  	$ra = Git::SVN::Ra->new($ra->{repos_root});
-  	while (length $path) {
-  		my $try = add_path_to_url($ra->url, $path);
-  		unless ($tried{$try}) {
-  			$ok = $self->read_svm_props($ra, $path, $r);
-  			last if $ok;
-  			$tried{$try} = 1;
-  		}
-  		$path =~ s#/?[^/]+$##;
-  	}
-  	die "Path: '$path' should be ''\n" if $path ne '';
-  	$ok ||= $self->read_svm_props($ra, $path, $r);
-  	$tried{ add_path_to_url($ra->url, $path) } = 1;
-  	if (!$ok) {
-  		die @err, (map { "  $_\n" } keys %tried), "\n";
-  	}
-  	Git::SVN::Ra->new($self->url);
-  }
-  
-  sub svnsync {
-  	my ($self) = @_;
-  	return $self->{svnsync} if $self->{svnsync};
-  
-  	if ($self->no_metadata) {
-  		die "Can't have both 'noMetadata' and ",
-  		    "'useSvnsyncProps' options set!\n";
-  	}
-  	if ($self->rewrite_root) {
-  		die "Can't have both 'useSvnsyncProps' and 'rewriteRoot' ",
-  		    "options set!\n";
-  	}
-  	if ($self->rewrite_uuid) {
-  		die "Can't have both 'useSvnsyncProps' and 'rewriteUUID' ",
-  		    "options set!\n";
-  	}
-  
-  	my $svnsync;
-  	# see if we have it in our config, first:
-  	eval {
-  		my $section = "svn-remote.$self->{repo_id}";
-  
-  		my $url = tmp_config('--get', "$section.svnsync-url");
-  		($url) = ($url =~ m{^([a-z\+]+://\S+)$}) or
-  		   die "doesn't look right - svn:sync-from-url is '$url'\n";
-  
-  		my $uuid = tmp_config('--get', "$section.svnsync-uuid");
-  		($uuid) = ($uuid =~ m{^([0-9a-f\-]{30,})$}i) or
-  		   die "doesn't look right - svn:sync-from-uuid is '$uuid'\n";
-  
-  		$svnsync = { url => $url, uuid => $uuid }
-  	};
-  	if ($svnsync && $svnsync->{url} && $svnsync->{uuid}) {
-  		return $self->{svnsync} = $svnsync;
-  	}
-  
-  	my $err = "useSvnsyncProps set, but failed to read " .
-  	          "svnsync property: svn:sync-from-";
-  	my $rp = $self->ra->rev_proplist(0);
-  
-  	my $url = $rp->{'svn:sync-from-url'} or die $err . "url\n";
-  	($url) = ($url =~ m{^([a-z\+]+://\S+)$}) or
-  	           die "doesn't look right - svn:sync-from-url is '$url'\n";
-  
-  	my $uuid = $rp->{'svn:sync-from-uuid'} or die $err . "uuid\n";
-  	($uuid) = ($uuid =~ m{^([0-9a-f\-]{30,})$}i) or
-  	           die "doesn't look right - svn:sync-from-uuid is '$uuid'\n";
-  
-  	my $section = "svn-remote.$self->{repo_id}";
-  	tmp_config('--add', "$section.svnsync-uuid", $uuid);
-  	tmp_config('--add', "$section.svnsync-url", $url);
-  	return $self->{svnsync} = { url => $url, uuid => $uuid };
-  }
-  
-  # this allows us to memoize our SVN::Ra UUID locally and avoid a
-  # remote lookup (useful for 'git svn log').
-  sub ra_uuid {
-  	my ($self) = @_;
-  	unless ($self->{ra_uuid}) {
-  		my $key = "svn-remote.$self->{repo_id}.uuid";
-  		my $uuid = eval { tmp_config('--get', $key) };
-  		if (!$@ && $uuid && $uuid =~ /^([a-f\d\-]{30,})$/i) {
-  			$self->{ra_uuid} = $uuid;
-  		} else {
-  			die "ra_uuid called without URL\n" unless $self->url;
-  			$self->{ra_uuid} = $self->ra->get_uuid;
-  			tmp_config('--add', $key, $self->{ra_uuid});
-  		}
-  	}
-  	$self->{ra_uuid};
-  }
-  
-  sub _set_repos_root {
-  	my ($self, $repos_root) = @_;
-  	my $k = "svn-remote.$self->{repo_id}.reposRoot";
-  	$repos_root ||= $self->ra->{repos_root};
-  	tmp_config($k, $repos_root);
-  	$repos_root;
-  }
-  
-  sub repos_root {
-  	my ($self) = @_;
-  	my $k = "svn-remote.$self->{repo_id}.reposRoot";
-  	eval { tmp_config('--get', $k) } || $self->_set_repos_root;
-  }
-  
-  sub ra {
-  	my ($self) = shift;
-  	my $ra = Git::SVN::Ra->new($self->url);
-  	$self->_set_repos_root($ra->{repos_root});
-  	if ($self->use_svm_props && !$self->{svm}) {
-  		if ($self->no_metadata) {
-  			die "Can't have both 'noMetadata' and ",
-  			    "'useSvmProps' options set!\n";
-  		} elsif ($self->use_svnsync_props) {
-  			die "Can't have both 'useSvnsyncProps' and ",
-  			    "'useSvmProps' options set!\n";
-  		}
-  		$ra = $self->_set_svm_vars($ra);
-  		$self->{-want_revprops} = 1;
-  	}
-  	$ra;
-  }
-  
-  # prop_walk(PATH, REV, SUB)
-  # -------------------------
-  # Recursively traverse PATH at revision REV and invoke SUB for each
-  # directory that contains a SVN property.  SUB will be invoked as
-  # follows:  &SUB(gs, path, props);  where `gs' is this instance of
-  # Git::SVN, `path' the path to the directory where the properties
-  # `props' were found.  The `path' will be relative to point of checkout,
-  # that is, if url://repo/trunk is the current Git branch, and that
-  # directory contains a sub-directory `d', SUB will be invoked with `/d/'
-  # as `path' (note the trailing `/').
-  sub prop_walk {
-  	my ($self, $path, $rev, $sub) = @_;
-  
-  	$path =~ s#^/##;
-  	my ($dirent, undef, $props) = $self->ra->get_dir($path, $rev);
-  	$path =~ s#^/*#/#g;
-  	my $p = $path;
-  	# Strip the irrelevant part of the path.
-  	$p =~ s#^/+\Q@{[$self->path]}\E(/|$)#/#;
-  	# Ensure the path is terminated by a `/'.
-  	$p =~ s#/*$#/#;
-  
-  	# The properties contain all the internal SVN stuff nobody
-  	# (usually) cares about.
-  	my $interesting_props = 0;
-  	foreach (keys %{$props}) {
-  		# If it doesn't start with `svn:', it must be a
-  		# user-defined property.
-  		++$interesting_props and next if $_ !~ /^svn:/;
-  		# FIXME: Fragile, if SVN adds new public properties,
-  		# this needs to be updated.
-  		++$interesting_props if /^svn:(?:ignore|keywords|executable
-  		                                 |eol-style|mime-type
-  						 |externals|needs-lock)$/x;
-  	}
-  	&$sub($self, $p, $props) if $interesting_props;
-  
-  	foreach (sort keys %$dirent) {
-  		next if $dirent->{$_}->{kind} != $SVN::Node::dir;
-  		$self->prop_walk($self->path . $p . $_, $rev, $sub);
-  	}
-  }
-  
-  sub last_rev { ($_[0]->last_rev_commit)[0] }
-  sub last_commit { ($_[0]->last_rev_commit)[1] }
-  
-  # returns the newest SVN revision number and newest commit SHA1
-  sub last_rev_commit {
-  	my ($self) = @_;
-  	if (defined $self->{last_rev} && defined $self->{last_commit}) {
-  		return ($self->{last_rev}, $self->{last_commit});
-  	}
-  	my $c = ::verify_ref($self->refname.'^0');
-  	if ($c && !$self->use_svm_props && !$self->no_metadata) {
-  		my $rev = (::cmt_metadata($c))[1];
-  		if (defined $rev) {
-  			($self->{last_rev}, $self->{last_commit}) = ($rev, $c);
-  			return ($rev, $c);
-  		}
-  	}
-  	my $map_path = $self->map_path;
-  	unless (-e $map_path) {
-  		($self->{last_rev}, $self->{last_commit}) = (undef, undef);
-  		return (undef, undef);
-  	}
-  	my ($rev, $commit) = $self->rev_map_max(1);
-  	($self->{last_rev}, $self->{last_commit}) = ($rev, $commit);
-  	return ($rev, $commit);
-  }
-  
-  sub get_fetch_range {
-  	my ($self, $min, $max) = @_;
-  	$max ||= $self->ra->get_latest_revnum;
-  	$min ||= $self->rev_map_max;
-  	(++$min, $max);
-  }
-  
-  sub svn_dir {
-  	command_oneline(qw(rev-parse --git-path svn));
-  }
-  
-  sub tmp_config {
-  	my (@args) = @_;
-  	my $svn_dir = svn_dir();
-  	my $old_def_config = "$svn_dir/config";
-  	my $config = "$svn_dir/.metadata";
-  	if (! -f $config && -f $old_def_config) {
-  		rename $old_def_config, $config or
-  		       die "Failed rename $old_def_config => $config: $!\n";
-  	}
-  	my $old_config = $ENV{GIT_CONFIG};
-  	$ENV{GIT_CONFIG} = $config;
-  	$@ = undef;
-  	my @ret = eval {
-  		unless (-f $config) {
-  			mkfile($config);
-  			open my $fh, '>', $config or
-  			    die "Can't open $config: $!\n";
-  			print $fh "; This file is used internally by ",
-  			          "git-svn\n" or die
-  				  "Couldn't write to $config: $!\n";
-  			print $fh "; You should not have to edit it\n" or
-  			      die "Couldn't write to $config: $!\n";
-  			close $fh or die "Couldn't close $config: $!\n";
-  		}
-  		command('config', @args);
-  	};
-  	my $err = $@;
-  	if (defined $old_config) {
-  		$ENV{GIT_CONFIG} = $old_config;
-  	} else {
-  		delete $ENV{GIT_CONFIG};
-  	}
-  	die $err if $err;
-  	wantarray ? @ret : $ret[0];
-  }
-  
-  sub tmp_index_do {
-  	my ($self, $sub) = @_;
-  	my $old_index = $ENV{GIT_INDEX_FILE};
-  	$ENV{GIT_INDEX_FILE} = $self->{index};
-  	$@ = undef;
-  	my @ret = eval {
-  		my ($dir, $base) = ($self->{index} =~ m#^(.*?)/?([^/]+)$#);
-  		mkpath([$dir]) unless -d $dir;
-  		&$sub;
-  	};
-  	my $err = $@;
-  	if (defined $old_index) {
-  		$ENV{GIT_INDEX_FILE} = $old_index;
-  	} else {
-  		delete $ENV{GIT_INDEX_FILE};
-  	}
-  	die $err if $err;
-  	wantarray ? @ret : $ret[0];
-  }
-  
-  sub assert_index_clean {
-  	my ($self, $treeish) = @_;
-  
-  	$self->tmp_index_do(sub {
-  		command_noisy('read-tree', $treeish) unless -e $self->{index};
-  		my $x = command_oneline('write-tree');
-  		my ($y) = (command(qw/cat-file commit/, $treeish) =~
-  		           /^tree ($::sha1)/mo);
-  		return if $y eq $x;
-  
-  		warn "Index mismatch: $y != $x\nrereading $treeish\n";
-  		unlink $self->{index} or die "unlink $self->{index}: $!\n";
-  		command_noisy('read-tree', $treeish);
-  		$x = command_oneline('write-tree');
-  		if ($y ne $x) {
-  			fatal "trees ($treeish) $y != $x\n",
-  			      "Something is seriously wrong...";
-  		}
-  	});
-  }
-  
-  sub get_commit_parents {
-  	my ($self, $log_entry) = @_;
-  	my (%seen, @ret, @tmp);
-  	# legacy support for 'set-tree'; this is only used by set_tree_cb:
-  	if (my $ip = $self->{inject_parents}) {
-  		if (my $commit = delete $ip->{$log_entry->{revision}}) {
-  			push @tmp, $commit;
-  		}
-  	}
-  	if (my $cur = ::verify_ref($self->refname.'^0')) {
-  		push @tmp, $cur;
-  	}
-  	if (my $ipd = $self->{inject_parents_dcommit}) {
-  		if (my $commit = delete $ipd->{$log_entry->{revision}}) {
-  			push @tmp, @$commit;
-  		}
-  	}
-  	push @tmp, $_ foreach (@{$log_entry->{parents}}, @tmp);
-  	while (my $p = shift @tmp) {
-  		next if $seen{$p};
-  		$seen{$p} = 1;
-  		push @ret, $p;
-  	}
-  	@ret;
-  }
-  
-  sub rewrite_root {
-  	my ($self) = @_;
-  	return $self->{-rewrite_root} if exists $self->{-rewrite_root};
-  	my $k = "svn-remote.$self->{repo_id}.rewriteRoot";
-  	my $rwr = eval { command_oneline(qw/config --get/, $k) };
-  	if ($rwr) {
-  		$rwr =~ s#/+$##;
-  		if ($rwr !~ m#^[a-z\+]+://#) {
-  			die "$rwr is not a valid URL (key: $k)\n";
-  		}
-  	}
-  	$self->{-rewrite_root} = $rwr;
-  }
-  
-  sub rewrite_uuid {
-  	my ($self) = @_;
-  	return $self->{-rewrite_uuid} if exists $self->{-rewrite_uuid};
-  	my $k = "svn-remote.$self->{repo_id}.rewriteUUID";
-  	my $rwid = eval { command_oneline(qw/config --get/, $k) };
-  	if ($rwid) {
-  		$rwid =~ s#/+$##;
-  		if ($rwid !~ m#^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$#) {
-  			die "$rwid is not a valid UUID (key: $k)\n";
-  		}
-  	}
-  	$self->{-rewrite_uuid} = $rwid;
-  }
-  
-  sub metadata_url {
-  	my ($self) = @_;
-  	my $url = $self->rewrite_root || $self->url;
-  	return canonicalize_url( add_path_to_url( $url, $self->path ) );
-  }
-  
-  sub full_url {
-  	my ($self) = @_;
-  	return canonicalize_url( add_path_to_url( $self->url, $self->path ) );
-  }
-  
-  sub full_pushurl {
-  	my ($self) = @_;
-  	if ($self->{pushurl}) {
-  		return canonicalize_url( add_path_to_url( $self->{pushurl}, $self->path ) );
-  	} else {
-  		return $self->full_url;
-  	}
-  }
-  
-  sub set_commit_header_env {
-  	my ($log_entry) = @_;
-  	my %env;
-  	foreach my $ned (qw/NAME EMAIL DATE/) {
-  		foreach my $ac (qw/AUTHOR COMMITTER/) {
-  			$env{"GIT_${ac}_${ned}"} = $ENV{"GIT_${ac}_${ned}"};
-  		}
-  	}
-  
-  	$ENV{GIT_AUTHOR_NAME} = $log_entry->{name};
-  	$ENV{GIT_AUTHOR_EMAIL} = $log_entry->{email};
-  	$ENV{GIT_AUTHOR_DATE} = $ENV{GIT_COMMITTER_DATE} = $log_entry->{date};
-  
-  	$ENV{GIT_COMMITTER_NAME} = (defined $log_entry->{commit_name})
-  						? $log_entry->{commit_name}
-  						: $log_entry->{name};
-  	$ENV{GIT_COMMITTER_EMAIL} = (defined $log_entry->{commit_email})
-  						? $log_entry->{commit_email}
-  						: $log_entry->{email};
-  	\%env;
-  }
-  
-  sub restore_commit_header_env {
-  	my ($env) = @_;
-  	foreach my $ned (qw/NAME EMAIL DATE/) {
-  		foreach my $ac (qw/AUTHOR COMMITTER/) {
-  			my $k = "GIT_${ac}_${ned}";
-  			if (defined $env->{$k}) {
-  				$ENV{$k} = $env->{$k};
-  			} else {
-  				delete $ENV{$k};
-  			}
-  		}
-  	}
-  }
-  
-  sub gc {
-  	command_noisy('gc', '--auto');
-  };
-  
-  sub do_git_commit {
-  	my ($self, $log_entry) = @_;
-  	my $lr = $self->last_rev;
-  	if (defined $lr && $lr >= $log_entry->{revision}) {
-  		die "Last fetched revision of ", $self->refname,
-  		    " was r$lr, but we are about to fetch: ",
-  		    "r$log_entry->{revision}!\n";
-  	}
-  	if (my $c = $self->rev_map_get($log_entry->{revision})) {
-  		croak "$log_entry->{revision} = $c already exists! ",
-  		      "Why are we refetching it?\n";
-  	}
-  	my $old_env = set_commit_header_env($log_entry);
-  	my $tree = $log_entry->{tree};
-  	if (!defined $tree) {
-  		$tree = $self->tmp_index_do(sub {
-  		                            command_oneline('write-tree') });
-  	}
-  	die "Tree is not a valid sha1: $tree\n" if $tree !~ /^$::sha1$/o;
-  
-  	my @exec = ('git', 'commit-tree', $tree);
-  	foreach ($self->get_commit_parents($log_entry)) {
-  		push @exec, '-p', $_;
-  	}
-  	defined(my $pid = open3(my $msg_fh, my $out_fh, '>&STDERR', @exec))
-  	                                                           or croak $!;
-  	binmode $msg_fh;
-  
-  	# we always get UTF-8 from SVN, but we may want our commits in
-  	# a different encoding.
-  	if (my $enc = Git::config('i18n.commitencoding')) {
-  		require Encode;
-  		Encode::from_to($log_entry->{log}, 'UTF-8', $enc);
-  	}
-  	print $msg_fh $log_entry->{log} or croak $!;
-  	restore_commit_header_env($old_env);
-  	unless ($self->no_metadata) {
-  		print $msg_fh "\ngit-svn-id: $log_entry->{metadata}\n"
-  		              or croak $!;
-  	}
-  	$msg_fh->flush == 0 or croak $!;
-  	close $msg_fh or croak $!;
-  	chomp(my $commit = do { local $/; <$out_fh> });
-  	close $out_fh or croak $!;
-  	waitpid $pid, 0;
-  	croak $? if $?;
-  	if ($commit !~ /^$::sha1$/o) {
-  		die "Failed to commit, invalid sha1: $commit\n";
-  	}
-  
-  	$self->rev_map_set($log_entry->{revision}, $commit, 1);
-  
-  	$self->{last_rev} = $log_entry->{revision};
-  	$self->{last_commit} = $commit;
-  	print "r$log_entry->{revision}" unless $::_q > 1;
-  	if (defined $log_entry->{svm_revision}) {
-  		 print " (\@$log_entry->{svm_revision})" unless $::_q > 1;
-  		 $self->rev_map_set($log_entry->{svm_revision}, $commit,
-  		                   0, $self->svm_uuid);
-  	}
-  	print " = $commit ($self->{ref_id})\n" unless $::_q > 1;
-  	if (--$_gc_nr == 0) {
-  		$_gc_nr = $_gc_period;
-  		gc();
-  	}
-  	return $commit;
-  }
-  
-  sub match_paths {
-  	my ($self, $paths, $r) = @_;
-  	return 1 if $self->path eq '';
-  	if (my $path = $paths->{"/".$self->path}) {
-  		return ($path->{action} eq 'D') ? 0 : 1;
-  	}
-  	$self->{path_regex} ||= qr{^/\Q@{[$self->path]}\E/};
-  	if (grep /$self->{path_regex}/, keys %$paths) {
-  		return 1;
-  	}
-  	my $c = '';
-  	foreach (split m#/#, $self->path) {
-  		$c .= "/$_";
-  		next unless ($paths->{$c} &&
-  		             ($paths->{$c}->{action} =~ /^[AR]$/));
-  		if ($self->ra->check_path($self->path, $r) ==
-  		    $SVN::Node::dir) {
-  			return 1;
-  		}
-  	}
-  	return 0;
-  }
-  
-  sub find_parent_branch {
-  	my ($self, $paths, $rev) = @_;
-  	return undef unless $self->follow_parent;
-  	unless (defined $paths) {
-  		my $err_handler = $SVN::Error::handler;
-  		$SVN::Error::handler = \&Git::SVN::Ra::skip_unknown_revs;
-  		$self->ra->get_log([$self->path], $rev, $rev, 0, 1, 1,
-  				   sub { $paths = $_[0] });
-  		$SVN::Error::handler = $err_handler;
-  	}
-  	return undef unless defined $paths;
-  
-  	# look for a parent from another branch:
-  	my @b_path_components = split m#/#, $self->path;
-  	my @a_path_components;
-  	my $i;
-  	while (@b_path_components) {
-  		$i = $paths->{'/'.join('/', @b_path_components)};
-  		last if $i && defined $i->{copyfrom_path};
-  		unshift(@a_path_components, pop(@b_path_components));
-  	}
-  	return undef unless defined $i && defined $i->{copyfrom_path};
-  	my $branch_from = $i->{copyfrom_path};
-  	if (@a_path_components) {
-  		print STDERR "branch_from: $branch_from => ";
-  		$branch_from .= '/'.join('/', @a_path_components);
-  		print STDERR $branch_from, "\n";
-  	}
-  	my $r = $i->{copyfrom_rev};
-  	my $repos_root = $self->ra->{repos_root};
-  	my $url = $self->ra->url;
-  	my $new_url = canonicalize_url( add_path_to_url( $url, $branch_from ) );
-  	print STDERR  "Found possible branch point: ",
-  	              "$new_url => ", $self->full_url, ", $r\n"
-  	              unless $::_q > 1;
-  	$branch_from =~ s#^/##;
-  	my $gs = $self->other_gs($new_url, $url,
-  		                 $branch_from, $r, $self->{ref_id});
-  	my ($r0, $parent) = $gs->find_rev_before($r, 1);
-  	{
-  		my ($base, $head);
-  		if (!defined $r0 || !defined $parent) {
-  			($base, $head) = parse_revision_argument(0, $r);
-  		} else {
-  			if ($r0 < $r) {
-  				$gs->ra->get_log([$gs->path], $r0 + 1, $r, 1,
-  					0, 1, sub { $base = $_[1] - 1 });
-  			}
-  		}
-  		if (defined $base && $base <= $r) {
-  			$gs->fetch($base, $r);
-  		}
-  		($r0, $parent) = $gs->find_rev_before($r, 1);
-  	}
-  	if (defined $r0 && defined $parent) {
-  		print STDERR "Found branch parent: ($self->{ref_id}) $parent\n"
-  		             unless $::_q > 1;
-  		my $ed;
-  		if ($self->ra->can_do_switch) {
-  			$self->assert_index_clean($parent);
-  			print STDERR "Following parent with do_switch\n"
-  			             unless $::_q > 1;
-  			# do_switch works with svn/trunk >= r22312, but that
-  			# is not included with SVN 1.4.3 (the latest version
-  			# at the moment), so we can't rely on it
-  			$self->{last_rev} = $r0;
-  			$self->{last_commit} = $parent;
-  			$ed = Git::SVN::Fetcher->new($self, $gs->path);
-  			$gs->ra->gs_do_switch($r0, $rev, $gs,
-  					      $self->full_url, $ed)
-  			  or die "SVN connection failed somewhere...\n";
-  		} elsif ($self->ra->trees_match($new_url, $r0,
-  			                        $self->full_url, $rev)) {
-  			print STDERR "Trees match:\n",
-  			             "  $new_url\@$r0\n",
-  			             "  ${\$self->full_url}\@$rev\n",
-  			             "Following parent with no changes\n"
-  			             unless $::_q > 1;
-  			$self->tmp_index_do(sub {
-  			    command_noisy('read-tree', $parent);
-  			});
-  			$self->{last_commit} = $parent;
-  		} else {
-  			print STDERR "Following parent with do_update\n"
-  			             unless $::_q > 1;
-  			$ed = Git::SVN::Fetcher->new($self);
-  			$self->ra->gs_do_update($rev, $rev, $self, $ed)
-  			  or die "SVN connection failed somewhere...\n";
-  		}
-  		print STDERR "Successfully followed parent\n" unless $::_q > 1;
-  		return $self->make_log_entry($rev, [$parent], $ed, $r0, $branch_from);
-  	}
-  	return undef;
-  }
-  
-  sub do_fetch {
-  	my ($self, $paths, $rev) = @_;
-  	my $ed;
-  	my ($last_rev, @parents);
-  	if (my $lc = $self->last_commit) {
-  		# we can have a branch that was deleted, then re-added
-  		# under the same name but copied from another path, in
-  		# which case we'll have multiple parents (we don't
-  		# want to break the original ref or lose copypath info):
-  		if (my $log_entry = $self->find_parent_branch($paths, $rev)) {
-  			push @{$log_entry->{parents}}, $lc;
-  			return $log_entry;
-  		}
-  		$ed = Git::SVN::Fetcher->new($self);
-  		$last_rev = $self->{last_rev};
-  		$ed->{c} = $lc;
-  		@parents = ($lc);
-  	} else {
-  		$last_rev = $rev;
-  		if (my $log_entry = $self->find_parent_branch($paths, $rev)) {
-  			return $log_entry;
-  		}
-  		$ed = Git::SVN::Fetcher->new($self);
-  	}
-  	unless ($self->ra->gs_do_update($last_rev, $rev, $self, $ed)) {
-  		die "SVN connection failed somewhere...\n";
-  	}
-  	$self->make_log_entry($rev, \@parents, $ed, $last_rev, $self->path);
-  }
-  
-  sub mkemptydirs {
-  	my ($self, $r) = @_;
-  
-  	# add/remove/collect a paths table
-  	#
-  	# Paths are split into a tree of nodes, stored as a hash of hashes.
-  	#
-  	# Each node contains a 'path' entry for the path (if any) associated
-  	# with that node and a 'children' entry for any nodes under that
-  	# location.
-  	#
-  	# Removing a path requires a hash lookup for each component then
-  	# dropping that node (and anything under it), which is substantially
-  	# faster than a grep slice into a single hash of paths for large
-  	# numbers of paths.
-  	#
-  	# For a large (200K) number of empty_dir directives this reduces
-  	# scanning time to 3 seconds vs 10 minutes for grep+delete on a single
-  	# hash of paths.
-  	sub add_path {
-  		my ($paths_table, $path) = @_;
-  		my $node_ref;
-  
-  		foreach my $x (split('/', $path)) {
-  			if (!exists($paths_table->{$x})) {
-  				$paths_table->{$x} = { children => {} };
-  			}
-  
-  			$node_ref = $paths_table->{$x};
-  			$paths_table = $paths_table->{$x}->{children};
-  		}
-  
-  		$node_ref->{path} = $path;
-  	}
-  
-  	sub remove_path {
-  		my ($paths_table, $path) = @_;
-  		my $nodes_ref;
-  		my $node_name;
-  
-  		foreach my $x (split('/', $path)) {
-  			if (!exists($paths_table->{$x})) {
-  				return;
-  			}
-  
-  			$nodes_ref = $paths_table;
-  			$node_name = $x;
-  
-  			$paths_table = $paths_table->{$x}->{children};
-  		}
-  
-  		delete($nodes_ref->{$node_name});
-  	}
-  
-  	sub collect_paths {
-  		my ($paths_table, $paths_ref) = @_;
-  
-  		foreach my $v (values %$paths_table) {
-  			my $p = $v->{path};
-  			my $c = $v->{children};
-  
-  			collect_paths($c, $paths_ref);
-  
-  			if (defined($p)) {
-  				push(@$paths_ref, $p);
-  			}
-  		}
-  	}
-  
-  	sub scan {
-  		my ($r, $paths_table, $line) = @_;
-  		if (defined $r && $line =~ /^r(\d+)$/) {
-  			return 0 if $1 > $r;
-  		} elsif ($line =~ /^  \+empty_dir: (.+)$/) {
-  			add_path($paths_table, $1);
-  		} elsif ($line =~ /^  \-empty_dir: (.+)$/) {
-  			remove_path($paths_table, $1);
-  		}
-  		1; # continue
-  	};
-  
-  	my @empty_dirs;
-  	my %paths_table;
-  
-  	my $gz_file = "$self->{dir}/unhandled.log.gz";
-  	if (-f $gz_file) {
-  		if (!can_compress()) {
-  			warn "Compress::Zlib could not be found; ",
-  			     "empty directories in $gz_file will not be read\n";
-  		} else {
-  			my $gz = Compress::Zlib::gzopen($gz_file, "rb") or
-  				die "Unable to open $gz_file: $!\n";
-  			my $line;
-  			while ($gz->gzreadline($line) > 0) {
-  				scan($r, \%paths_table, $line) or last;
-  			}
-  			$gz->gzclose;
-  		}
-  	}
-  
-  	if (open my $fh, '<', "$self->{dir}/unhandled.log") {
-  		binmode $fh or croak "binmode: $!";
-  		while (<$fh>) {
-  			scan($r, \%paths_table, $_) or last;
-  		}
-  		close $fh;
-  	}
-  
-  	collect_paths(\%paths_table, \@empty_dirs);
-  	my $strip = qr/\A\Q@{[$self->path]}\E(?:\/|$)/;
-  	foreach my $d (sort @empty_dirs) {
-  		$d = uri_decode($d);
-  		$d =~ s/$strip//;
-  		next unless length($d);
-  		next if -d $d;
-  		if (-e $d) {
-  			warn "$d exists but is not a directory\n";
-  		} else {
-  			print "creating empty directory: $d\n";
-  			mkpath([$d]);
-  		}
-  	}
-  }
-  
-  sub get_untracked {
-  	my ($self, $ed) = @_;
-  	my @out;
-  	my $h = $ed->{empty};
-  	foreach (sort keys %$h) {
-  		my $act = $h->{$_} ? '+empty_dir' : '-empty_dir';
-  		push @out, "  $act: " . uri_encode($_);
-  		warn "W: $act: $_\n";
-  	}
-  	foreach my $t (qw/dir_prop file_prop/) {
-  		$h = $ed->{$t} or next;
-  		foreach my $path (sort keys %$h) {
-  			my $ppath = $path eq '' ? '.' : $path;
-  			foreach my $prop (sort keys %{$h->{$path}}) {
-  				next if $SKIP_PROP{$prop};
-  				my $v = $h->{$path}->{$prop};
-  				my $t_ppath_prop = "$t: " .
-  				                    uri_encode($ppath) . ' ' .
-  				                    uri_encode($prop);
-  				if (defined $v) {
-  					push @out, "  +$t_ppath_prop " .
-  					           uri_encode($v);
-  				} else {
-  					push @out, "  -$t_ppath_prop";
-  				}
-  			}
-  		}
-  	}
-  	foreach my $t (qw/absent_file absent_directory/) {
-  		$h = $ed->{$t} or next;
-  		foreach my $parent (sort keys %$h) {
-  			foreach my $path (sort @{$h->{$parent}}) {
-  				push @out, "  $t: " .
-  				           uri_encode("$parent/$path");
-  				warn "W: $t: $parent/$path ",
-  				     "Insufficient permissions?\n";
-  			}
-  		}
-  	}
-  	\@out;
-  }
-  
-  # parse_svn_date(DATE)
-  # --------------------
-  # Given a date (in UTC) from Subversion, return a string in the format
-  # "<TZ Offset> <local date/time>" that Git will use.
-  #
-  # By default the parsed date will be in UTC; if $Git::SVN::_localtime
-  # is true we'll convert it to the local timezone instead.
-  sub parse_svn_date {
-  	my $date = shift || return '+0000 1970-01-01 00:00:00';
-  	my ($Y,$m,$d,$H,$M,$S) = ($date =~ /^(\d{4})\-(\d\d)\-(\d\d)T
-  	                                    (\d\d?)\:(\d\d)\:(\d\d)\.\d*Z$/x) or
-  	                                 croak "Unable to parse date: $date\n";
-  	my $parsed_date;    # Set next.
-  
-  	if ($Git::SVN::_localtime) {
-  		# Translate the Subversion datetime to an epoch time.
-  		# Begin by switching ourselves to $date's timezone, UTC.
-  		my $old_env_TZ = $ENV{TZ};
-  		$ENV{TZ} = 'UTC';
-  
-  		my $epoch_in_UTC =
-  		    Time::Local::timelocal($S, $M, $H, $d, $m - 1, $Y - 1900);
-  
-  		# Determine our local timezone (including DST) at the
-  		# time of $epoch_in_UTC.  $Git::SVN::Log::TZ stored the
-  		# value of TZ, if any, at the time we were run.
-  		if (defined $Git::SVN::Log::TZ) {
-  			$ENV{TZ} = $Git::SVN::Log::TZ;
-  		} else {
-  			delete $ENV{TZ};
-  		}
-  
-  		my $our_TZ = get_tz_offset($epoch_in_UTC);
-  
-  		# This converts $epoch_in_UTC into our local timezone.
-  		my ($sec, $min, $hour, $mday, $mon, $year,
-  		    $wday, $yday, $isdst) = localtime($epoch_in_UTC);
-  
-  		$parsed_date = sprintf('%s %04d-%02d-%02d %02d:%02d:%02d',
-  				       $our_TZ, $year + 1900, $mon + 1,
-  				       $mday, $hour, $min, $sec);
-  
-  		# Reset us to the timezone in effect when we entered
-  		# this routine.
-  		if (defined $old_env_TZ) {
-  			$ENV{TZ} = $old_env_TZ;
-  		} else {
-  			delete $ENV{TZ};
-  		}
-  	} else {
-  		$parsed_date = "+0000 $Y-$m-$d $H:$M:$S";
-  	}
-  
-  	return $parsed_date;
-  }
-  
-  sub other_gs {
-  	my ($self, $new_url, $url,
-  	    $branch_from, $r, $old_ref_id) = @_;
-  	my $gs = Git::SVN->find_by_url($new_url, $url, $branch_from);
-  	unless ($gs) {
-  		my $ref_id = $old_ref_id;
-  		$ref_id =~ s/\@\d+-*$//;
-  		$ref_id .= "\@$r";
-  		# just grow a tail if we're not unique enough :x
-  		$ref_id .= '-' while find_ref($ref_id);
-  		my ($u, $p, $repo_id) = ($new_url, '', $ref_id);
-  		if ($u =~ s#^\Q$url\E(/|$)##) {
-  			$p = $u;
-  			$u = $url;
-  			$repo_id = $self->{repo_id};
-  		}
-  		while (1) {
-  			# It is possible to tag two different subdirectories at
-  			# the same revision.  If the url for an existing ref
-  			# does not match, we must either find a ref with a
-  			# matching url or create a new ref by growing a tail.
-  			$gs = Git::SVN->init($u, $p, $repo_id, $ref_id, 1);
-  			my (undef, $max_commit) = $gs->rev_map_max(1);
-  			last if (!$max_commit);
-  			my ($url) = ::cmt_metadata($max_commit);
-  			last if ($url eq $gs->metadata_url);
-  			$ref_id .= '-';
-  		}
-  		print STDERR "Initializing parent: $ref_id\n" unless $::_q > 1;
-  	}
-  	$gs
-  }
-  
-  sub call_authors_prog {
-  	my ($orig_author) = @_;
-  	$orig_author = command_oneline('rev-parse', '--sq-quote', $orig_author);
-  	my $author = `$::_authors_prog $orig_author`;
-  	if ($? != 0) {
-  		die "$::_authors_prog failed with exit code $?\n"
-  	}
-  	if ($author =~ /^\s*(.+?)\s*<(.*)>\s*$/) {
-  		my ($name, $email) = ($1, $2);
-  		$email = undef if length $2 == 0;
-  		return [$name, $email];
-  	} else {
-  		die "Author: $orig_author: $::_authors_prog returned "
-  			. "invalid author format: $author\n";
-  	}
-  }
-  
-  sub check_author {
-  	my ($author) = @_;
-  	if (!defined $author || length $author == 0) {
-  		$author = '(no author)';
-  	}
-  	if (!defined $::users{$author}) {
-  		if (defined $::_authors_prog) {
-  			$::users{$author} = call_authors_prog($author);
-  		} elsif (defined $::_authors) {
-  			die "Author: $author not defined in $::_authors file\n";
-  		}
-  	}
-  	$author;
-  }
-  
-  sub find_extra_svk_parents {
-  	my ($self, $tickets, $parents) = @_;
-  	# aha!  svk:merge property changed...
-  	my @tickets = split "\n", $tickets;
-  	my @known_parents;
-  	for my $ticket ( @tickets ) {
-  		my ($uuid, $path, $rev) = split /:/, $ticket;
-  		if ( $uuid eq $self->ra_uuid ) {
-  			my $repos_root = $self->url;
-  			my $branch_from = $path;
-  			$branch_from =~ s{^/}{};
-  			my $gs = $self->other_gs(add_path_to_url( $repos_root, $branch_from ),
-  			                         $repos_root,
-  			                         $branch_from,
-  			                         $rev,
-  			                         $self->{ref_id});
-  			if ( my $commit = $gs->rev_map_get($rev, $uuid) ) {
-  				# wahey!  we found it, but it might be
-  				# an old one (!)
-  				push @known_parents, [ $rev, $commit ];
-  			}
-  		}
-  	}
-  	# Ordering matters; highest-numbered commit merge tickets
-  	# first, as they may account for later merge ticket additions
-  	# or changes.
-  	@known_parents = map {$_->[1]} sort {$b->[0] <=> $a->[0]} @known_parents;
-  	for my $parent ( @known_parents ) {
-  		my @cmd = ('rev-list', $parent, map { "^$_" } @$parents );
-  		my ($msg_fh, $ctx) = command_output_pipe(@cmd);
-  		my $new;
-  		while ( <$msg_fh> ) {
-  			$new=1;last;
-  		}
-  		command_close_pipe($msg_fh, $ctx);
-  		if ( $new ) {
-  			print STDERR
-  			    "Found merge parent (svk:merge ticket): $parent\n";
-  			push @$parents, $parent;
-  		}
-  	}
-  }
-  
-  sub lookup_svn_merge {
-  	my $uuid = shift;
-  	my $url = shift;
-  	my $source = shift;
-  	my $revs = shift;
-  
-  	my $path = $source;
-  	$path =~ s{^/}{};
-  	my $gs = Git::SVN->find_by_url($url.$source, $url, $path);
-  	if ( !$gs ) {
-  		warn "Couldn't find revmap for $url$source\n";
-  		return;
-  	}
-  	my @ranges = split ",", $revs;
-  	my ($tip, $tip_commit);
-  	my @merged_commit_ranges;
-  	# find the tip
-  	for my $range ( @ranges ) {
-  		if ($range =~ /[*]$/) {
-  			warn "W: Ignoring partial merge in svn:mergeinfo "
-  				."dirprop: $source:$range\n";
-  			next;
-  		}
-  		my ($bottom, $top) = split "-", $range;
-  		$top ||= $bottom;
-  		my $bottom_commit = $gs->find_rev_after( $bottom, 1, $top );
-  		my $top_commit = $gs->find_rev_before( $top, 1, $bottom );
-  
-  		unless ($top_commit and $bottom_commit) {
-  			warn "W: unknown path/rev in svn:mergeinfo "
-  				."dirprop: $source:$range\n";
-  			next;
-  		}
-  
-  		if (scalar(command('rev-parse', "$bottom_commit^@"))) {
-  			push @merged_commit_ranges,
-  			     "$bottom_commit^..$top_commit";
-  		} else {
-  			push @merged_commit_ranges, "$top_commit";
-  		}
-  
-  		if ( !defined $tip or $top > $tip ) {
-  			$tip = $top;
-  			$tip_commit = $top_commit;
-  		}
-  	}
-  	return ($tip_commit, @merged_commit_ranges);
-  }
-  
-  sub _rev_list {
-  	my ($msg_fh, $ctx) = command_output_pipe(
-  		"rev-list", @_,
-  	       );
-  	my @rv;
-  	while ( <$msg_fh> ) {
-  		chomp;
-  		push @rv, $_;
-  	}
-  	command_close_pipe($msg_fh, $ctx);
-  	@rv;
-  }
-  
-  sub check_cherry_pick2 {
-  	my $base = shift;
-  	my $tip = shift;
-  	my $parents = shift;
-  	my @ranges = @_;
-  	my %commits = map { $_ => 1 }
-  		_rev_list("--no-merges", $tip, "--not", $base, @$parents, "--");
-  	for my $range ( @ranges ) {
-  		delete @commits{_rev_list($range, "--")};
-  	}
-  	for my $commit (keys %commits) {
-  		if (has_no_changes($commit)) {
-  			delete $commits{$commit};
-  		}
-  	}
-  	my @k = (keys %commits);
-  	return (scalar @k, $k[0]);
-  }
-  
-  sub has_no_changes {
-  	my $commit = shift;
-  
-  	my @revs = split / /, command_oneline(
-  		qw(rev-list --parents -1 -m), $commit);
-  
-  	# Commits with no parents, e.g. the start of a partial branch,
-  	# have changes by definition.
-  	return 1 if (@revs < 2);
-  
-  	# Commits with multiple parents, e.g a merge, have no changes
-  	# by definition.
-  	return 0 if (@revs > 2);
-  
-  	return (command_oneline("rev-parse", "$commit^{tree}") eq
-  		command_oneline("rev-parse", "$commit~1^{tree}"));
-  }
-  
-  sub tie_for_persistent_memoization {
-  	my $hash = shift;
-  	my $path = shift;
-  
-  	unless ($memo_backend) {
-  		if (eval { require Git::SVN::Memoize::YAML; 1}) {
-  			$memo_backend = 1;
-  		} else {
-  			require Memoize::Storable;
-  			$memo_backend = -1;
-  		}
-  	}
-  
-  	if ($memo_backend > 0) {
-  		tie %$hash => 'Git::SVN::Memoize::YAML', "$path.yaml";
-  	} else {
-  		# first verify that any existing file can actually be loaded
-  		# (it may have been saved by an incompatible version)
-  		my $db = "$path.db";
-  		if (-e $db) {
-  			use Storable qw(retrieve);
-  
-  			if (!eval { retrieve($db); 1 }) {
-  				unlink $db or die "unlink $db failed: $!";
-  			}
-  		}
-  		tie %$hash => 'Memoize::Storable', $db, 'nstore';
-  	}
-  }
-  
-  # The GIT_DIR environment variable is not always set until after the command
-  # line arguments are processed, so we can't memoize in a BEGIN block.
-  {
-  	my $memoized = 0;
-  
-  	sub memoize_svn_mergeinfo_functions {
-  		return if $memoized;
-  		$memoized = 1;
-  
-  		my $cache_path = svn_dir() . '/.caches/';
-  		mkpath([$cache_path]) unless -d $cache_path;
-  
-  		my %lookup_svn_merge_cache;
-  		my %check_cherry_pick2_cache;
-  		my %has_no_changes_cache;
-  
-  		tie_for_persistent_memoization(\%lookup_svn_merge_cache,
-  		    "$cache_path/lookup_svn_merge");
-  		memoize 'lookup_svn_merge',
-  			SCALAR_CACHE => 'FAULT',
-  			LIST_CACHE => ['HASH' => \%lookup_svn_merge_cache],
-  		;
-  
-  		tie_for_persistent_memoization(\%check_cherry_pick2_cache,
-  		    "$cache_path/check_cherry_pick2");
-  		memoize 'check_cherry_pick2',
-  			SCALAR_CACHE => 'FAULT',
-  			LIST_CACHE => ['HASH' => \%check_cherry_pick2_cache],
-  		;
-  
-  		tie_for_persistent_memoization(\%has_no_changes_cache,
-  		    "$cache_path/has_no_changes");
-  		memoize 'has_no_changes',
-  			SCALAR_CACHE => ['HASH' => \%has_no_changes_cache],
-  			LIST_CACHE => 'FAULT',
-  		;
-  	}
-  
-  	sub unmemoize_svn_mergeinfo_functions {
-  		return if not $memoized;
-  		$memoized = 0;
-  
-  		Memoize::unmemoize 'lookup_svn_merge';
-  		Memoize::unmemoize 'check_cherry_pick2';
-  		Memoize::unmemoize 'has_no_changes';
-  	}
-  
-  	sub clear_memoized_mergeinfo_caches {
-  		die "Only call this method in non-memoized context" if ($memoized);
-  
-  		my $cache_path = svn_dir() . '/.caches/';
-  		return unless -d $cache_path;
-  
-  		for my $cache_file (("$cache_path/lookup_svn_merge",
-  				     "$cache_path/check_cherry_pick", # old
-  				     "$cache_path/check_cherry_pick2",
-  				     "$cache_path/has_no_changes")) {
-  			for my $suffix (qw(yaml db)) {
-  				my $file = "$cache_file.$suffix";
-  				next unless -e $file;
-  				unlink($file) or die "unlink($file) failed: $!\n";
-  			}
-  		}
-  	}
-  
-  
-  	Memoize::memoize 'Git::SVN::repos_root';
-  }
-  
-  END {
-  	# Force cache writeout explicitly instead of waiting for
-  	# global destruction to avoid segfault in Storable:
-  	# http://rt.cpan.org/Public/Bug/Display.html?id=36087
-  	unmemoize_svn_mergeinfo_functions();
-  }
-  
-  sub parents_exclude {
-  	my $parents = shift;
-  	my @commits = @_;
-  	return unless @commits;
-  
-  	my @excluded;
-  	my $excluded;
-  	do {
-  		my @cmd = ('rev-list', "-1", @commits, "--not", @$parents );
-  		$excluded = command_oneline(@cmd);
-  		if ( $excluded ) {
-  			my @new;
-  			my $found;
-  			for my $commit ( @commits ) {
-  				if ( $commit eq $excluded ) {
-  					push @excluded, $commit;
-  					$found++;
-  				}
-  				else {
-  					push @new, $commit;
-  				}
-  			}
-  			die "saw commit '$excluded' in rev-list output, "
-  				."but we didn't ask for that commit (wanted: @commits --not @$parents)"
-  					unless $found;
-  			@commits = @new;
-  		}
-  	}
-  		while ($excluded and @commits);
-  
-  	return @excluded;
-  }
-  
-  # Compute what's new in svn:mergeinfo.
-  sub mergeinfo_changes {
-  	my ($self, $old_path, $old_rev, $path, $rev, $mergeinfo_prop) = @_;
-  	my %minfo = map {split ":", $_ } split "\n", $mergeinfo_prop;
-  	my $old_minfo = {};
-  
-  	my $ra = $self->ra;
-  	# Give up if $old_path isn't in the repo.
-  	# This is probably a merge on a subtree.
-  	if ($ra->check_path($old_path, $old_rev) != $SVN::Node::dir) {
-  		warn "W: ignoring svn:mergeinfo on $old_path, ",
-  			"directory didn't exist in r$old_rev\n";
-  		return {};
-  	}
-  	my (undef, undef, $props) = $ra->get_dir($old_path, $old_rev);
-  	if (defined $props->{"svn:mergeinfo"}) {
-  		my %omi = map {split ":", $_ } split "\n",
-  			$props->{"svn:mergeinfo"};
-  		$old_minfo = \%omi;
-  	}
-  
-  	my %changes = ();
-  	foreach my $p (keys %minfo) {
-  		my $a = $old_minfo->{$p} || "";
-  		my $b = $minfo{$p};
-  		# Omit merged branches whose ranges lists are unchanged.
-  		next if $a eq $b;
-  		# Remove any common range list prefix.
-  		($a ^ $b) =~ /^[\0]*/;
-  		my $common_prefix = rindex $b, ",", $+[0] - 1;
-  		$changes{$p} = substr $b, $common_prefix + 1;
-  	}
-  	print STDERR "Checking svn:mergeinfo changes since r$old_rev: ",
-  		scalar(keys %minfo), " sources, ",
-  		scalar(keys %changes), " changed\n";
-  
-  	return \%changes;
-  }
-  
-  # note: this function should only be called if the various dirprops
-  # have actually changed
-  sub find_extra_svn_parents {
-  	my ($self, $mergeinfo, $parents) = @_;
-  	# aha!  svk:merge property changed...
-  
-  	memoize_svn_mergeinfo_functions();
-  
-  	# We first search for merged tips which are not in our
-  	# history.  Then, we figure out which git revisions are in
-  	# that tip, but not this revision.  If all of those revisions
-  	# are now marked as merge, we can add the tip as a parent.
-  	my @merges = sort keys %$mergeinfo;
-  	my @merge_tips;
-  	my $url = $self->url;
-  	my $uuid = $self->ra_uuid;
-  	my @all_ranges;
-  	for my $merge ( @merges ) {
-  		my ($tip_commit, @ranges) =
-  			lookup_svn_merge( $uuid, $url,
-  					  $merge, $mergeinfo->{$merge} );
-  		unless (!$tip_commit or
-  				grep { $_ eq $tip_commit } @$parents ) {
-  			push @merge_tips, $tip_commit;
-  			push @all_ranges, @ranges;
-  		} else {
-  			push @merge_tips, undef;
-  		}
-  	}
-  
-  	my %excluded = map { $_ => 1 }
-  		parents_exclude($parents, grep { defined } @merge_tips);
-  
-  	# check merge tips for new parents
-  	my @new_parents;
-  	for my $merge_tip ( @merge_tips ) {
-  		my $merge = shift @merges;
-  		next unless $merge_tip and $excluded{$merge_tip};
-  		my $spec = "$merge:$mergeinfo->{$merge}";
-  
-  		# check out 'new' tips
-  		my $merge_base;
-  		eval {
-  			$merge_base = command_oneline(
-  				"merge-base",
-  				@$parents, $merge_tip,
-  			);
-  		};
-  		if ($@) {
-  			die "An error occurred during merge-base"
-  				unless $@->isa("Git::Error::Command");
-  
-  			warn "W: Cannot find common ancestor between ".
-  			     "@$parents and $merge_tip. Ignoring merge info.\n";
-  			next;
-  		}
-  
-  		# double check that there are no missing non-merge commits
-  		my ($ninc, $ifirst) = check_cherry_pick2(
-  			$merge_base, $merge_tip,
-  			$parents,
-  			@all_ranges,
-  		       );
-  
-  		if ($ninc) {
-  			warn "W: svn cherry-pick ignored ($spec) - missing " .
-  				"$ninc commit(s) (eg $ifirst)\n";
-  		} else {
-  			warn "Found merge parent ($spec): ", $merge_tip, "\n";
-  			push @new_parents, $merge_tip;
-  		}
-  	}
-  
-  	# cater for merges which merge commits from multiple branches
-  	if ( @new_parents > 1 ) {
-  		for ( my $i = 0; $i <= $#new_parents; $i++ ) {
-  			for ( my $j = 0; $j <= $#new_parents; $j++ ) {
-  				next if $i == $j;
-  				next unless $new_parents[$i];
-  				next unless $new_parents[$j];
-  				my $revs = command_oneline(
-  					"rev-list", "-1",
-  					"$new_parents[$i]..$new_parents[$j]",
-  				       );
-  				if ( !$revs ) {
-  					undef($new_parents[$j]);
-  				}
-  			}
-  		}
-  	}
-  	push @$parents, grep { defined } @new_parents;
-  }
-  
-  sub make_log_entry {
-  	my ($self, $rev, $parents, $ed, $parent_rev, $parent_path) = @_;
-  	my $untracked = $self->get_untracked($ed);
-  
-  	my @parents = @$parents;
-  	my $props = $ed->{dir_prop}{$self->path};
-  	if ($self->follow_parent) {
-  		my $tickets = $props->{"svk:merge"};
-  		if ($tickets) {
-  			$self->find_extra_svk_parents($tickets, \@parents);
-  		}
-  
-  		my $mergeinfo_prop = $props->{"svn:mergeinfo"};
-  		if ($mergeinfo_prop) {
-  			my $mi_changes = $self->mergeinfo_changes(
-  						$parent_path,
-  						$parent_rev,
-  						$self->path,
-  						$rev,
-  						$mergeinfo_prop);
-  			$self->find_extra_svn_parents($mi_changes, \@parents);
-  		}
-  	}
-  
-  	open my $un, '>>', "$self->{dir}/unhandled.log" or croak $!;
-  	print $un "r$rev\n" or croak $!;
-  	print $un $_, "\n" foreach @$untracked;
-  	my %log_entry = ( parents => \@parents, revision => $rev,
-  	                  log => '');
-  
-  	my $headrev;
-  	my $logged = delete $self->{logged_rev_props};
-  	if (!$logged || $self->{-want_revprops}) {
-  		my $rp = $self->ra->rev_proplist($rev);
-  		foreach (sort keys %$rp) {
-  			my $v = $rp->{$_};
-  			if (/^svn:(author|date|log)$/) {
-  				$log_entry{$1} = $v;
-  			} elsif ($_ eq 'svm:headrev') {
-  				$headrev = $v;
-  			} else {
-  				print $un "  rev_prop: ", uri_encode($_), ' ',
-  					  uri_encode($v), "\n";
-  			}
-  		}
-  	} else {
-  		map { $log_entry{$_} = $logged->{$_} } keys %$logged;
-  	}
-  	close $un or croak $!;
-  
-  	$log_entry{date} = parse_svn_date($log_entry{date});
-  	$log_entry{log} .= "\n";
-  	my $author = $log_entry{author} = check_author($log_entry{author});
-  	my ($name, $email) = defined $::users{$author} ? @{$::users{$author}}
-  						       : ($author, undef);
-  
-  	my ($commit_name, $commit_email) = ($name, $email);
-  	if ($_use_log_author) {
-  		my $name_field;
-  		if ($log_entry{log} =~ /From:\s+(.*\S)\s*\n/i) {
-  			$name_field = $1;
-  		} elsif ($log_entry{log} =~ /Signed-off-by:\s+(.*\S)\s*\n/i) {
-  			$name_field = $1;
-  		}
-  		if (!defined $name_field) {
-  			if (!defined $email) {
-  				$email = $name;
-  			}
-  		} elsif ($name_field =~ /(.*?)\s+<(.*)>/) {
-  			($name, $email) = ($1, $2);
-  		} elsif ($name_field =~ /(.*)@/) {
-  			($name, $email) = ($1, $name_field);
-  		} else {
-  			($name, $email) = ($name_field, $name_field);
-  		}
-  	}
-  	if (defined $headrev && $self->use_svm_props) {
-  		if ($self->rewrite_root) {
-  			die "Can't have both 'useSvmProps' and 'rewriteRoot' ",
-  			    "options set!\n";
-  		}
-  		if ($self->rewrite_uuid) {
-  			die "Can't have both 'useSvmProps' and 'rewriteUUID' ",
-  			    "options set!\n";
-  		}
-  		my ($uuid, $r) = $headrev =~ m{^([a-f\d\-]{30,}):(\d+)$}i;
-  		# we don't want "SVM: initializing mirror for junk" ...
-  		return undef if $r == 0;
-  		my $svm = $self->svm;
-  		if ($uuid ne $svm->{uuid}) {
-  			die "UUID mismatch on SVM path:\n",
-  			    "expected: $svm->{uuid}\n",
-  			    "     got: $uuid\n";
-  		}
-  		my $full_url = $self->full_url;
-  		$full_url =~ s#^\Q$svm->{replace}\E(/|$)#$svm->{source}$1# or
-  		             die "Failed to replace '$svm->{replace}' with ",
-  		                 "'$svm->{source}' in $full_url\n";
-  		# throw away username for storing in records
-  		remove_username($full_url);
-  		$log_entry{metadata} = "$full_url\@$r $uuid";
-  		$log_entry{svm_revision} = $r;
-  		$email ||= "$author\@$uuid";
-  		$commit_email ||= "$author\@$uuid";
-  	} elsif ($self->use_svnsync_props) {
-  		my $full_url = canonicalize_url(
-  			add_path_to_url( $self->svnsync->{url}, $self->path )
-  		);
-  		remove_username($full_url);
-  		my $uuid = $self->svnsync->{uuid};
-  		$log_entry{metadata} = "$full_url\@$rev $uuid";
-  		$email ||= "$author\@$uuid";
-  		$commit_email ||= "$author\@$uuid";
-  	} else {
-  		my $url = $self->metadata_url;
-  		remove_username($url);
-  		my $uuid = $self->rewrite_uuid || $self->ra->get_uuid;
-  		$log_entry{metadata} = "$url\@$rev " . $uuid;
-  		$email ||= "$author\@" . $uuid;
-  		$commit_email ||= "$author\@" . $uuid;
-  	}
-  	$log_entry{name} = $name;
-  	$log_entry{email} = $email;
-  	$log_entry{commit_name} = $commit_name;
-  	$log_entry{commit_email} = $commit_email;
-  	\%log_entry;
-  }
-  
-  sub fetch {
-  	my ($self, $min_rev, $max_rev, @parents) = @_;
-  	my ($last_rev, $last_commit) = $self->last_rev_commit;
-  	my ($base, $head) = $self->get_fetch_range($min_rev, $max_rev);
-  	$self->ra->gs_fetch_loop_common($base, $head, [$self]);
-  }
-  
-  sub set_tree_cb {
-  	my ($self, $log_entry, $tree, $rev, $date, $author) = @_;
-  	$self->{inject_parents} = { $rev => $tree };
-  	$self->fetch(undef, undef);
-  }
-  
-  sub set_tree {
-  	my ($self, $tree) = (shift, shift);
-  	my $log_entry = ::get_commit_entry($tree);
-  	unless ($self->{last_rev}) {
-  		fatal("Must have an existing revision to commit");
-  	}
-  	my %ed_opts = ( r => $self->{last_rev},
-  	                log => $log_entry->{log},
-  	                ra => $self->ra,
-  	                tree_a => $self->{last_commit},
-  	                tree_b => $tree,
-  	                editor_cb => sub {
-  			       $self->set_tree_cb($log_entry, $tree, @_) },
-  	                svn_path => $self->path );
-  	if (!Git::SVN::Editor->new(\%ed_opts)->apply_diff) {
-  		print "No changes\nr$self->{last_rev} = $tree\n";
-  	}
-  }
-  
-  sub rebuild_from_rev_db {
-  	my ($self, $path) = @_;
-  	my $r = -1;
-  	open my $fh, '<', $path or croak "open: $!";
-  	binmode $fh or croak "binmode: $!";
-  	while (<$fh>) {
-  		length($_) == 41 or croak "inconsistent size in ($_) != 41";
-  		chomp($_);
-  		++$r;
-  		next if $_ eq ('0' x 40);
-  		$self->rev_map_set($r, $_);
-  		print "r$r = $_\n";
-  	}
-  	close $fh or croak "close: $!";
-  	unlink $path or croak "unlink: $!";
-  }
-  
-  #define a global associate map to record rebuild status
-  my %rebuild_status;
-  #define a global associate map to record rebuild verify status
-  my %rebuild_verify_status;
-  
-  sub rebuild {
-  	my ($self) = @_;
-  	my $map_path = $self->map_path;
-  	my $partial = (-e $map_path && ! -z $map_path);
-  	my $verify_key = $self->refname.'^0';
-  	if (!$rebuild_verify_status{$verify_key}) {
-  		my $verify_result = ::verify_ref($verify_key);
-  		if ($verify_result) {
-  			$rebuild_verify_status{$verify_key} = 1;
-  		}
-  	}
-  	if (!$rebuild_verify_status{$verify_key}) {
-  		return;
-  	}
-  	if (!$partial && ($self->use_svm_props || $self->no_metadata)) {
-  		my $rev_db = $self->rev_db_path;
-  		$self->rebuild_from_rev_db($rev_db);
-  		if ($self->use_svm_props) {
-  			my $svm_rev_db = $self->rev_db_path($self->svm_uuid);
-  			$self->rebuild_from_rev_db($svm_rev_db);
-  		}
-  		$self->unlink_rev_db_symlink;
-  		return;
-  	}
-  	print "Rebuilding $map_path ...\n" if (!$partial);
-  	my ($base_rev, $head) = ($partial ? $self->rev_map_max_norebuild(1) :
-  		(undef, undef));
-  	my $key_value = ($head ? "$head.." : "") . $self->refname;
-  	if (exists $rebuild_status{$key_value}) {
-  		print "Done rebuilding $map_path\n" if (!$partial || !$head);
-  		my $rev_db_path = $self->rev_db_path;
-  		if (-f $self->rev_db_path) {
-  			unlink $self->rev_db_path or croak "unlink: $!";
-  		}
-  		$self->unlink_rev_db_symlink;
-  		return;
-  	}
-  	my ($log, $ctx) =
-  		command_output_pipe(qw/rev-list --pretty=raw --reverse/,
-  				$key_value,
-  				'--');
-  	$rebuild_status{$key_value} = 1;
-  	my $metadata_url = $self->metadata_url;
-  	remove_username($metadata_url);
-  	my $svn_uuid = $self->rewrite_uuid || $self->ra_uuid;
-  	my $c;
-  	while (<$log>) {
-  		if ( m{^commit ($::sha1)$} ) {
-  			$c = $1;
-  			next;
-  		}
-  		next unless s{^\s*(git-svn-id:)}{$1};
-  		my ($url, $rev, $uuid) = ::extract_metadata($_);
-  		remove_username($url);
-  
-  		# ignore merges (from set-tree)
-  		next if (!defined $rev || !$uuid);
-  
-  		# if we merged or otherwise started elsewhere, this is
-  		# how we break out of it
-  		if (($uuid ne $svn_uuid) ||
-  		    ($metadata_url && $url && ($url ne $metadata_url))) {
-  			next;
-  		}
-  		if ($partial && $head) {
-  			print "Partial-rebuilding $map_path ...\n";
-  			print "Currently at $base_rev = $head\n";
-  			$head = undef;
-  		}
-  
-  		$self->rev_map_set($rev, $c);
-  		print "r$rev = $c\n";
-  	}
-  	command_close_pipe($log, $ctx);
-  	print "Done rebuilding $map_path\n" if (!$partial || !$head);
-  	my $rev_db_path = $self->rev_db_path;
-  	if (-f $self->rev_db_path) {
-  		unlink $self->rev_db_path or croak "unlink: $!";
-  	}
-  	$self->unlink_rev_db_symlink;
-  }
-  
-  # rev_map:
-  # Tie::File seems to be prone to offset errors if revisions get sparse,
-  # it's not that fast, either.  Tie::File is also not in Perl 5.6.  So
-  # one of my favorite modules is out :<  Next up would be one of the DBM
-  # modules, but I'm not sure which is most portable...
-  #
-  # This is the replacement for the rev_db format, which was too big
-  # and inefficient for large repositories with a lot of sparse history
-  # (mainly tags)
-  #
-  # The format is this:
-  #   - 24 bytes for every record,
-  #     * 4 bytes for the integer representing an SVN revision number
-  #     * 20 bytes representing the sha1 of a git commit
-  #   - No empty padding records like the old format
-  #     (except the last record, which can be overwritten)
-  #   - new records are written append-only since SVN revision numbers
-  #     increase monotonically
-  #   - lookups on SVN revision number are done via a binary search
-  #   - Piping the file to xxd -c24 is a good way of dumping it for
-  #     viewing or editing (piped back through xxd -r), should the need
-  #     ever arise.
-  #   - The last record can be padding revision with an all-zero sha1
-  #     This is used to optimize fetch performance when using multiple
-  #     "fetch" directives in .git/config
-  #
-  # These files are disposable unless noMetadata or useSvmProps is set
-  
-  sub _rev_map_set {
-  	my ($fh, $rev, $commit) = @_;
-  
-  	binmode $fh or croak "binmode: $!";
-  	my $size = (stat($fh))[7];
-  	($size % 24) == 0 or croak "inconsistent size: $size";
-  
-  	my $wr_offset = 0;
-  	if ($size > 0) {
-  		sysseek($fh, -24, SEEK_END) or croak "seek: $!";
-  		my $read = sysread($fh, my $buf, 24) or croak "read: $!";
-  		$read == 24 or croak "read only $read bytes (!= 24)";
-  		my ($last_rev, $last_commit) = unpack(rev_map_fmt, $buf);
-  		if ($last_commit eq ('0' x40)) {
-  			if ($size >= 48) {
-  				sysseek($fh, -48, SEEK_END) or croak "seek: $!";
-  				$read = sysread($fh, $buf, 24) or
-  				    croak "read: $!";
-  				$read == 24 or
-  				    croak "read only $read bytes (!= 24)";
-  				($last_rev, $last_commit) =
-  				    unpack(rev_map_fmt, $buf);
-  				if ($last_commit eq ('0' x40)) {
-  					croak "inconsistent .rev_map\n";
-  				}
-  			}
-  			if ($last_rev >= $rev) {
-  				croak "last_rev is higher!: $last_rev >= $rev";
-  			}
-  			$wr_offset = -24;
-  		}
-  	}
-  	sysseek($fh, $wr_offset, SEEK_END) or croak "seek: $!";
-  	syswrite($fh, pack(rev_map_fmt, $rev, $commit), 24) == 24 or
-  	  croak "write: $!";
-  }
-  
-  sub _rev_map_reset {
-  	my ($fh, $rev, $commit) = @_;
-  	my $c = _rev_map_get($fh, $rev);
-  	$c eq $commit or die "_rev_map_reset(@_) commit $c does not match!\n";
-  	my $offset = sysseek($fh, 0, SEEK_CUR) or croak "seek: $!";
-  	truncate $fh, $offset or croak "truncate: $!";
-  }
-  
-  sub mkfile {
-  	my ($path) = @_;
-  	unless (-e $path) {
-  		my ($dir, $base) = ($path =~ m#^(.*?)/?([^/]+)$#);
-  		mkpath([$dir]) unless -d $dir;
-  		open my $fh, '>>', $path or die "Couldn't create $path: $!\n";
-  		close $fh or die "Couldn't close (create) $path: $!\n";
-  	}
-  }
-  
-  sub rev_map_set {
-  	my ($self, $rev, $commit, $update_ref, $uuid) = @_;
-  	defined $commit or die "missing arg3\n";
-  	length $commit == 40 or die "arg3 must be a full SHA1 hexsum\n";
-  	my $db = $self->map_path($uuid);
-  	my $db_lock = "$db.lock";
-  	my $sigmask;
-  	$update_ref ||= 0;
-  	if ($update_ref) {
-  		$sigmask = POSIX::SigSet->new();
-  		my $signew = POSIX::SigSet->new(SIGINT, SIGHUP, SIGTERM,
-  			SIGALRM, SIGUSR1, SIGUSR2);
-  		sigprocmask(SIG_BLOCK, $signew, $sigmask) or
-  			croak "Can't block signals: $!";
-  	}
-  	mkfile($db);
-  
-  	$LOCKFILES{$db_lock} = 1;
-  	my $sync;
-  	# both of these options make our .rev_db file very, very important
-  	# and we can't afford to lose it because rebuild() won't work
-  	if ($self->use_svm_props || $self->no_metadata) {
-  		require File::Copy;
-  		$sync = 1;
-  		File::Copy::copy($db, $db_lock) or die "rev_map_set(@_): ",
-  					   "Failed to copy: ",
-  					   "$db => $db_lock ($!)\n";
-  	} else {
-  		rename $db, $db_lock or die "rev_map_set(@_): ",
-  					    "Failed to rename: ",
-  					    "$db => $db_lock ($!)\n";
-  	}
-  
-  	sysopen(my $fh, $db_lock, O_RDWR | O_CREAT)
-  	     or croak "Couldn't open $db_lock: $!\n";
-  	if ($update_ref eq 'reset') {
-  		clear_memoized_mergeinfo_caches();
-  		_rev_map_reset($fh, $rev, $commit);
-  	} else {
-  		_rev_map_set($fh, $rev, $commit);
-  	}
-  
-  	if ($sync) {
-  		$fh->flush or die "Couldn't flush $db_lock: $!\n";
-  		$fh->sync or die "Couldn't sync $db_lock: $!\n";
-  	}
-  	close $fh or croak $!;
-  	if ($update_ref) {
-  		$_head = $self;
-  		my $note = "";
-  		$note = " ($update_ref)" if ($update_ref !~ /^\d*$/);
-  		command_noisy('update-ref', '-m', "r$rev$note",
-  		              $self->refname, $commit);
-  	}
-  	rename $db_lock, $db or die "rev_map_set(@_): ", "Failed to rename: ",
-  	                            "$db_lock => $db ($!)\n";
-  	delete $LOCKFILES{$db_lock};
-  	if ($update_ref) {
-  		sigprocmask(SIG_SETMASK, $sigmask) or
-  			croak "Can't restore signal mask: $!";
-  	}
-  }
-  
-  # If want_commit, this will return an array of (rev, commit) where
-  # commit _must_ be a valid commit in the archive.
-  # Otherwise, it'll return the max revision (whether or not the
-  # commit is valid or just a 0x40 placeholder).
-  sub rev_map_max {
-  	my ($self, $want_commit) = @_;
-  	$self->rebuild;
-  	my ($r, $c) = $self->rev_map_max_norebuild($want_commit);
-  	$want_commit ? ($r, $c) : $r;
-  }
-  
-  sub rev_map_max_norebuild {
-  	my ($self, $want_commit) = @_;
-  	my $map_path = $self->map_path;
-  	stat $map_path or return $want_commit ? (0, undef) : 0;
-  	sysopen(my $fh, $map_path, O_RDONLY) or croak "open: $!";
-  	binmode $fh or croak "binmode: $!";
-  	my $size = (stat($fh))[7];
-  	($size % 24) == 0 or croak "inconsistent size: $size";
-  
-  	if ($size == 0) {
-  		close $fh or croak "close: $!";
-  		return $want_commit ? (0, undef) : 0;
-  	}
-  
-  	sysseek($fh, -24, SEEK_END) or croak "seek: $!";
-  	sysread($fh, my $buf, 24) == 24 or croak "read: $!";
-  	my ($r, $c) = unpack(rev_map_fmt, $buf);
-  	if ($want_commit && $c eq ('0' x40)) {
-  		if ($size < 48) {
-  			return $want_commit ? (0, undef) : 0;
-  		}
-  		sysseek($fh, -48, SEEK_END) or croak "seek: $!";
-  		sysread($fh, $buf, 24) == 24 or croak "read: $!";
-  		($r, $c) = unpack(rev_map_fmt, $buf);
-  		if ($c eq ('0'x40)) {
-  			croak "Penultimate record is all-zeroes in $map_path";
-  		}
-  	}
-  	close $fh or croak "close: $!";
-  	$want_commit ? ($r, $c) : $r;
-  }
-  
-  sub rev_map_get {
-  	my ($self, $rev, $uuid) = @_;
-  	my $map_path = $self->map_path($uuid);
-  	return undef unless -e $map_path;
-  
-  	sysopen(my $fh, $map_path, O_RDONLY) or croak "open: $!";
-  	my $c = _rev_map_get($fh, $rev);
-  	close($fh) or croak "close: $!";
-  	$c
-  }
-  
-  sub _rev_map_get {
-  	my ($fh, $rev) = @_;
-  
-  	binmode $fh or croak "binmode: $!";
-  	my $size = (stat($fh))[7];
-  	($size % 24) == 0 or croak "inconsistent size: $size";
-  
-  	if ($size == 0) {
-  		return undef;
-  	}
-  
-  	my ($l, $u) = (0, $size - 24);
-  	my ($r, $c, $buf);
-  
-  	while ($l <= $u) {
-  		my $i = int(($l/24 + $u/24) / 2) * 24;
-  		sysseek($fh, $i, SEEK_SET) or croak "seek: $!";
-  		sysread($fh, my $buf, 24) == 24 or croak "read: $!";
-  		my ($r, $c) = unpack(rev_map_fmt, $buf);
-  
-  		if ($r < $rev) {
-  			$l = $i + 24;
-  		} elsif ($r > $rev) {
-  			$u = $i - 24;
-  		} else { # $r == $rev
-  			return $c eq ('0' x 40) ? undef : $c;
-  		}
-  	}
-  	undef;
-  }
-  
-  # Finds the first svn revision that exists on (if $eq_ok is true) or
-  # before $rev for the current branch.  It will not search any lower
-  # than $min_rev.  Returns the git commit hash and svn revision number
-  # if found, else (undef, undef).
-  sub find_rev_before {
-  	my ($self, $rev, $eq_ok, $min_rev) = @_;
-  	--$rev unless $eq_ok;
-  	$min_rev ||= 1;
-  	my $max_rev = $self->rev_map_max;
-  	$rev = $max_rev if ($rev > $max_rev);
-  	while ($rev >= $min_rev) {
-  		if (my $c = $self->rev_map_get($rev)) {
-  			return ($rev, $c);
-  		}
-  		--$rev;
-  	}
-  	return (undef, undef);
-  }
-  
-  # Finds the first svn revision that exists on (if $eq_ok is true) or
-  # after $rev for the current branch.  It will not search any higher
-  # than $max_rev.  Returns the git commit hash and svn revision number
-  # if found, else (undef, undef).
-  sub find_rev_after {
-  	my ($self, $rev, $eq_ok, $max_rev) = @_;
-  	++$rev unless $eq_ok;
-  	$max_rev ||= $self->rev_map_max;
-  	while ($rev <= $max_rev) {
-  		if (my $c = $self->rev_map_get($rev)) {
-  			return ($rev, $c);
-  		}
-  		++$rev;
-  	}
-  	return (undef, undef);
-  }
-  
-  sub _new {
-  	my ($class, $repo_id, $ref_id, $path) = @_;
-  	unless (defined $repo_id && length $repo_id) {
-  		$repo_id = $default_repo_id;
-  	}
-  	unless (defined $ref_id && length $ref_id) {
-  		# Access the prefix option from the git-svn main program if it's loaded.
-  		my $prefix = defined &::opt_prefix ? ::opt_prefix() : "";
-  		$_[2] = $ref_id =
-  		             "refs/remotes/$prefix$default_ref_id";
-  	}
-  	$_[1] = $repo_id;
-  	my $svn_dir = svn_dir();
-  	my $dir = "$svn_dir/$ref_id";
-  
-  	# Older repos imported by us used $svn_dir/foo instead of
-  	# $svn_dir/refs/remotes/foo when tracking refs/remotes/foo
-  	if ($ref_id =~ m{^refs/remotes/(.+)}) {
-  		my $old_dir = "$svn_dir/$1";
-  		if (-d $old_dir && ! -d $dir) {
-  			$dir = $old_dir;
-  		}
-  	}
-  
-  	$_[3] = $path = '' unless (defined $path);
-  	mkpath([$dir]);
-  	my $obj = bless {
-  		ref_id => $ref_id, dir => $dir, index => "$dir/index",
-  	        config => "$svn_dir/config",
-  	        map_root => "$dir/.rev_map", repo_id => $repo_id }, $class;
-  
-  	# Ensure it gets canonicalized
-  	$obj->path($path);
-  
-  	return $obj;
-  }
-  
-  sub path {
-  	my $self = shift;
-  
-  	if (@_) {
-  		my $path = shift;
-  		$self->{_path} = canonicalize_path($path);
-  		return;
-  	}
-  
-  	return $self->{_path};
-  }
-  
-  sub url {
-  	my $self = shift;
-  
-  	if (@_) {
-  		my $url = shift;
-  		$self->{url} = canonicalize_url($url);
-  		return;
-  	}
-  
-  	return $self->{url};
-  }
-  
-  # for read-only access of old .rev_db formats
-  sub unlink_rev_db_symlink {
-  	my ($self) = @_;
-  	my $link = $self->rev_db_path;
-  	$link =~ s/\.[\w-]+$// or croak "missing UUID at the end of $link";
-  	if (-l $link) {
-  		unlink $link or croak "unlink: $link failed!";
-  	}
-  }
-  
-  sub rev_db_path {
-  	my ($self, $uuid) = @_;
-  	my $db_path = $self->map_path($uuid);
-  	$db_path =~ s{/\.rev_map\.}{/\.rev_db\.}
-  	    or croak "map_path: $db_path does not contain '/.rev_map.' !";
-  	$db_path;
-  }
-  
-  # the new replacement for .rev_db
-  sub map_path {
-  	my ($self, $uuid) = @_;
-  	$uuid ||= $self->ra_uuid;
-  	"$self->{map_root}.$uuid";
-  }
-  
-  sub uri_encode {
-  	my ($f) = @_;
-  	$f =~ s#([^a-zA-Z0-9\*!\:_\./\-])#sprintf("%%%02X",ord($1))#eg;
-  	$f
-  }
-  
-  sub uri_decode {
-  	my ($f) = @_;
-  	$f =~ s#%([0-9a-fA-F]{2})#chr(hex($1))#eg;
-  	$f
-  }
-  
-  sub remove_username {
-  	$_[0] =~ s{^([^:]*://)[^@]+@}{$1};
-  }
-  
-  1;
-GIT_SVN
-
-$fatpacked{"Git/SVN/Editor.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'GIT_SVN_EDITOR';
-  package Git::SVN::Editor;
-  use vars qw/@ISA $_rmdir $_cp_similarity $_find_copies_harder $_rename_limit/;
-  use strict;
-  use warnings;
-  use SVN::Core;
-  use SVN::Delta;
-  use Carp qw/croak/;
-  use Git qw/command command_oneline command_noisy command_output_pipe
-             command_input_pipe command_close_pipe
-             command_bidi_pipe command_close_bidi_pipe
-             get_record/;
-  
-  BEGIN {
-  	@ISA = qw(SVN::Delta::Editor);
-  }
-  
-  sub new {
-  	my ($class, $opts) = @_;
-  	foreach (qw/svn_path r ra tree_a tree_b log editor_cb/) {
-  		die "$_ required!\n" unless (defined $opts->{$_});
-  	}
-  
-  	my $pool = SVN::Pool->new;
-  	my $mods = generate_diff($opts->{tree_a}, $opts->{tree_b});
-  	my $types = check_diff_paths($opts->{ra}, $opts->{svn_path},
-  	                             $opts->{r}, $mods);
-  
-  	# $opts->{ra} functions should not be used after this:
-  	my @ce  = $opts->{ra}->get_commit_editor($opts->{log},
-  	                                        $opts->{editor_cb}, $pool);
-  	my $self = SVN::Delta::Editor->new(@ce, $pool);
-  	bless $self, $class;
-  	foreach (qw/svn_path r tree_a tree_b/) {
-  		$self->{$_} = $opts->{$_};
-  	}
-  	$self->{url} = $opts->{ra}->{url};
-  	$self->{mods} = $mods;
-  	$self->{types} = $types;
-  	$self->{pool} = $pool;
-  	$self->{bat} = { '' => $self->open_root($self->{r}, $self->{pool}) };
-  	$self->{rm} = { };
-  	$self->{path_prefix} = length $self->{svn_path} ?
-  	                       "$self->{svn_path}/" : '';
-  	$self->{config} = $opts->{config};
-  	$self->{mergeinfo} = $opts->{mergeinfo};
-  	$self->{pathnameencoding} = Git::config('svn.pathnameencoding');
-  	return $self;
-  }
-  
-  sub generate_diff {
-  	my ($tree_a, $tree_b) = @_;
-  	my @diff_tree = qw(diff-tree -z -r);
-  	if ($_cp_similarity) {
-  		push @diff_tree, "-C$_cp_similarity";
-  	} else {
-  		push @diff_tree, '-C';
-  	}
-  	push @diff_tree, '--find-copies-harder' if $_find_copies_harder;
-  	push @diff_tree, "-l$_rename_limit" if defined $_rename_limit;
-  	push @diff_tree, $tree_a, $tree_b;
-  	my ($diff_fh, $ctx) = command_output_pipe(@diff_tree);
-  	my $state = 'meta';
-  	my @mods;
-  	while (defined($_ = get_record($diff_fh, "\0"))) {
-  		if ($state eq 'meta' && /^:(\d{6})\s(\d{6})\s
-  					($::sha1)\s($::sha1)\s
-  					([MTCRAD])\d*$/xo) {
-  			push @mods, {	mode_a => $1, mode_b => $2,
-  					sha1_a => $3, sha1_b => $4,
-  					chg => $5 };
-  			if ($5 =~ /^(?:C|R)$/) {
-  				$state = 'file_a';
-  			} else {
-  				$state = 'file_b';
-  			}
-  		} elsif ($state eq 'file_a') {
-  			my $x = $mods[$#mods] or croak "Empty array\n";
-  			if ($x->{chg} !~ /^(?:C|R)$/) {
-  				croak "Error parsing $_, $x->{chg}\n";
-  			}
-  			$x->{file_a} = $_;
-  			$state = 'file_b';
-  		} elsif ($state eq 'file_b') {
-  			my $x = $mods[$#mods] or croak "Empty array\n";
-  			if (exists $x->{file_a} && $x->{chg} !~ /^(?:C|R)$/) {
-  				croak "Error parsing $_, $x->{chg}\n";
-  			}
-  			if (!exists $x->{file_a} && $x->{chg} =~ /^(?:C|R)$/) {
-  				croak "Error parsing $_, $x->{chg}\n";
-  			}
-  			$x->{file_b} = $_;
-  			$state = 'meta';
-  		} else {
-  			croak "Error parsing $_\n";
-  		}
-  	}
-  	command_close_pipe($diff_fh, $ctx);
-  	\@mods;
-  }
-  
-  sub check_diff_paths {
-  	my ($ra, $pfx, $rev, $mods) = @_;
-  	my %types;
-  	$pfx .= '/' if length $pfx;
-  
-  	sub type_diff_paths {
-  		my ($ra, $types, $path, $rev) = @_;
-  		my @p = split m#/+#, $path;
-  		my $c = shift @p;
-  		unless (defined $types->{$c}) {
-  			$types->{$c} = $ra->check_path($c, $rev);
-  		}
-  		while (@p) {
-  			$c .= '/' . shift @p;
-  			next if defined $types->{$c};
-  			$types->{$c} = $ra->check_path($c, $rev);
-  		}
-  	}
-  
-  	foreach my $m (@$mods) {
-  		foreach my $f (qw/file_a file_b/) {
-  			next unless defined $m->{$f};
-  			my ($dir) = ($m->{$f} =~ m#^(.*?)/?(?:[^/]+)$#);
-  			if (length $pfx.$dir && ! defined $types{$dir}) {
-  				type_diff_paths($ra, \%types, $pfx.$dir, $rev);
-  			}
-  		}
-  	}
-  	\%types;
-  }
-  
-  sub split_path {
-  	return ($_[0] =~ m#^(.*?)/?([^/]+)$#);
-  }
-  
-  sub repo_path {
-  	my ($self, $path) = @_;
-  	if (my $enc = $self->{pathnameencoding}) {
-  		require Encode;
-  		Encode::from_to($path, $enc, 'UTF-8');
-  	}
-  	$self->{path_prefix}.(defined $path ? $path : '');
-  }
-  
-  sub url_path {
-  	my ($self, $path) = @_;
-  	$path = $self->repo_path($path);
-  	if ($self->{url} =~ m#^https?://#) {
-  		# characters are taken from subversion/libsvn_subr/path.c
-  		$path =~ s#([^~a-zA-Z0-9_./!$&'()*+,-])#sprintf("%%%02X",ord($1))#eg;
-  	}
-  	$self->{url} . '/' . $path;
-  }
-  
-  sub rmdirs {
-  	my ($self) = @_;
-  	my $rm = $self->{rm};
-  	delete $rm->{''}; # we never delete the url we're tracking
-  	return unless %$rm;
-  
-  	foreach (keys %$rm) {
-  		my @d = split m#/#, $_;
-  		my $c = shift @d;
-  		$rm->{$c} = 1;
-  		while (@d) {
-  			$c .= '/' . shift @d;
-  			$rm->{$c} = 1;
-  		}
-  	}
-  	delete $rm->{$self->{svn_path}};
-  	delete $rm->{''}; # we never delete the url we're tracking
-  	return unless %$rm;
-  
-  	my ($fh, $ctx) = command_output_pipe(qw/ls-tree --name-only -r -z/,
-  	                                     $self->{tree_b});
-  	while (defined($_ = get_record($fh, "\0"))) {
-  		my @dn = split m#/#, $_;
-  		while (pop @dn) {
-  			delete $rm->{join '/', @dn};
-  		}
-  		unless (%$rm) {
-  			close $fh;
-  			return;
-  		}
-  	}
-  	command_close_pipe($fh, $ctx);
-  
-  	my ($r, $p, $bat) = ($self->{r}, $self->{pool}, $self->{bat});
-  	foreach my $d (sort { $b =~ tr#/#/# <=> $a =~ tr#/#/# } keys %$rm) {
-  		$self->close_directory($bat->{$d}, $p);
-  		my ($dn) = ($d =~ m#^(.*?)/?(?:[^/]+)$#);
-  		print "\tD+\t$d/\n" unless $::_q;
-  		$self->SUPER::delete_entry($d, $r, $bat->{$dn}, $p);
-  		delete $bat->{$d};
-  	}
-  }
-  
-  sub open_or_add_dir {
-  	my ($self, $full_path, $baton, $deletions) = @_;
-  	my $t = $self->{types}->{$full_path};
-  	if (!defined $t) {
-  		die "$full_path not known in r$self->{r} or we have a bug!\n";
-  	}
-  	{
-  		no warnings 'once';
-  		# SVN::Node::none and SVN::Node::file are used only once,
-  		# so we're shutting up Perl's warnings about them.
-  		if ($t == $SVN::Node::none || defined($deletions->{$full_path})) {
-  			return $self->add_directory($full_path, $baton,
-  			    undef, -1, $self->{pool});
-  		} elsif ($t == $SVN::Node::dir) {
-  			return $self->open_directory($full_path, $baton,
-  			    $self->{r}, $self->{pool});
-  		} # no warnings 'once'
-  		print STDERR "$full_path already exists in repository at ",
-  		    "r$self->{r} and it is not a directory (",
-  		    ($t == $SVN::Node::file ? 'file' : 'unknown'),"/$t)\n";
-  	} # no warnings 'once'
-  	exit 1;
-  }
-  
-  sub ensure_path {
-  	my ($self, $path, $deletions) = @_;
-  	my $bat = $self->{bat};
-  	my $repo_path = $self->repo_path($path);
-  	return $bat->{''} unless (length $repo_path);
-  
-  	my @p = split m#/+#, $repo_path;
-  	my $c = shift @p;
-  	$bat->{$c} ||= $self->open_or_add_dir($c, $bat->{''}, $deletions);
-  	while (@p) {
-  		my $c0 = $c;
-  		$c .= '/' . shift @p;
-  		$bat->{$c} ||= $self->open_or_add_dir($c, $bat->{$c0}, $deletions);
-  	}
-  	return $bat->{$c};
-  }
-  
-  # Subroutine to convert a globbing pattern to a regular expression.
-  # From perl cookbook.
-  sub glob2pat {
-  	my $globstr = shift;
-  	my %patmap = ('*' => '.*', '?' => '.', '[' => '[', ']' => ']');
-  	$globstr =~ s{(.)} { $patmap{$1} || "\Q$1" }ge;
-  	return '^' . $globstr . '$';
-  }
-  
-  sub check_autoprop {
-  	my ($self, $pattern, $properties, $file, $fbat) = @_;
-  	# Convert the globbing pattern to a regular expression.
-  	my $regex = glob2pat($pattern);
-  	# Check if the pattern matches the file name.
-  	if($file =~ m/($regex)/) {
-  		# Parse the list of properties to set.
-  		my @props = split(/;/, $properties);
-  		foreach my $prop (@props) {
-  			# Parse 'name=value' syntax and set the property.
-  			if ($prop =~ /([^=]+)=(.*)/) {
-  				my ($n,$v) = ($1,$2);
-  				for ($n, $v) {
-  					s/^\s+//; s/\s+$//;
-  				}
-  				$self->change_file_prop($fbat, $n, $v);
-  			}
-  		}
-  	}
-  }
-  
-  sub apply_autoprops {
-  	my ($self, $file, $fbat) = @_;
-  	my $conf_t = ${$self->{config}}{'config'};
-  	no warnings 'once';
-  	# Check [miscellany]/enable-auto-props in svn configuration.
-  	if (SVN::_Core::svn_config_get_bool(
-  		$conf_t,
-  		$SVN::_Core::SVN_CONFIG_SECTION_MISCELLANY,
-  		$SVN::_Core::SVN_CONFIG_OPTION_ENABLE_AUTO_PROPS,
-  		0)) {
-  		# Auto-props are enabled.  Enumerate them to look for matches.
-  		my $callback = sub {
-  			$self->check_autoprop($_[0], $_[1], $file, $fbat);
-  		};
-  		SVN::_Core::svn_config_enumerate(
-  			$conf_t,
-  			$SVN::_Core::SVN_CONFIG_SECTION_AUTO_PROPS,
-  			$callback);
-  	}
-  }
-  
-  sub check_attr {
-  	my ($attr,$path) = @_;
-  	my $val = command_oneline("check-attr", $attr, "--", $path);
-  	if ($val) { $val =~ s/^[^:]*:\s*[^:]*:\s*(.*)\s*$/$1/; }
-  	return $val;
-  }
-  
-  sub apply_manualprops {
-  	my ($self, $file, $fbat) = @_;
-  	my $pending_properties = check_attr( "svn-properties", $file );
-  	if ($pending_properties eq "") { return; }
-  	# Parse the list of properties to set.
-  	my @props = split(/;/, $pending_properties);
-  	# TODO: get existing properties to compare to
-  	# - this fails for add so currently not done
-  	# my $existing_props = ::get_svnprops($file);
-  	my $existing_props = {};
-  	# TODO: caching svn properties or storing them in .gitattributes
-  	# would make that faster
-  	foreach my $prop (@props) {
-  		# Parse 'name=value' syntax and set the property.
-  		if ($prop =~ /([^=]+)=(.*)/) {
-  			my ($n,$v) = ($1,$2);
-  			for ($n, $v) {
-  				s/^\s+//; s/\s+$//;
-  			}
-  			my $existing = $existing_props->{$n};
-  			if (!defined($existing) || $existing ne $v) {
-  			    $self->change_file_prop($fbat, $n, $v);
-  			}
-  		}
-  	}
-  }
-  
-  sub A {
-  	my ($self, $m, $deletions) = @_;
-  	my ($dir, $file) = split_path($m->{file_b});
-  	my $pbat = $self->ensure_path($dir, $deletions);
-  	my $fbat = $self->add_file($self->repo_path($m->{file_b}), $pbat,
-  					undef, -1);
-  	print "\tA\t$m->{file_b}\n" unless $::_q;
-  	$self->apply_autoprops($file, $fbat);
-  	$self->apply_manualprops($m->{file_b}, $fbat);
-  	$self->chg_file($fbat, $m);
-  	$self->close_file($fbat,undef,$self->{pool});
-  }
-  
-  sub C {
-  	my ($self, $m, $deletions) = @_;
-  	my ($dir, $file) = split_path($m->{file_b});
-  	my $pbat = $self->ensure_path($dir, $deletions);
-  	# workaround for a bug in svn serf backend (v1.8.5 and below):
-  	# store third argument to ->add_file() in a local variable, to make it
-  	# have the same lifetime as $fbat
-  	my $upa = $self->url_path($m->{file_a});
-  	my $fbat = $self->add_file($self->repo_path($m->{file_b}), $pbat,
-  				$upa, $self->{r});
-  	print "\tC\t$m->{file_a} => $m->{file_b}\n" unless $::_q;
-  	$self->apply_manualprops($m->{file_b}, $fbat);
-  	$self->chg_file($fbat, $m);
-  	$self->close_file($fbat,undef,$self->{pool});
-  }
-  
-  sub delete_entry {
-  	my ($self, $path, $pbat) = @_;
-  	my $rpath = $self->repo_path($path);
-  	my ($dir, $file) = split_path($rpath);
-  	$self->{rm}->{$dir} = 1;
-  	$self->SUPER::delete_entry($rpath, $self->{r}, $pbat, $self->{pool});
-  }
-  
-  sub R {
-  	my ($self, $m, $deletions) = @_;
-  	my ($dir, $file) = split_path($m->{file_b});
-  	my $pbat = $self->ensure_path($dir, $deletions);
-  	# workaround for a bug in svn serf backend, see comment in C() above
-  	my $upa = $self->url_path($m->{file_a});
-  	my $fbat = $self->add_file($self->repo_path($m->{file_b}), $pbat,
-  				$upa, $self->{r});
-  	print "\tR\t$m->{file_a} => $m->{file_b}\n" unless $::_q;
-  	$self->apply_autoprops($file, $fbat);
-  	$self->apply_manualprops($m->{file_b}, $fbat);
-  	$self->chg_file($fbat, $m);
-  	$self->close_file($fbat,undef,$self->{pool});
-  
-  	($dir, $file) = split_path($m->{file_a});
-  	$pbat = $self->ensure_path($dir, $deletions);
-  	$self->delete_entry($m->{file_a}, $pbat);
-  }
-  
-  sub M {
-  	my ($self, $m, $deletions) = @_;
-  	my ($dir, $file) = split_path($m->{file_b});
-  	my $pbat = $self->ensure_path($dir, $deletions);
-  	my $fbat = $self->open_file($self->repo_path($m->{file_b}),
-  				$pbat,$self->{r},$self->{pool});
-  	print "\t$m->{chg}\t$m->{file_b}\n" unless $::_q;
-  	$self->apply_manualprops($m->{file_b}, $fbat);
-  	$self->chg_file($fbat, $m);
-  	$self->close_file($fbat,undef,$self->{pool});
-  }
-  
-  sub T {
-  	my ($self, $m, $deletions) = @_;
-  
-  	# Work around subversion issue 4091: toggling the "is a
-  	# symlink" property requires removing and re-adding a
-  	# file or else "svn up" on affected clients trips an
-  	# assertion and aborts.
-  	if (($m->{mode_b} =~ /^120/ && $m->{mode_a} !~ /^120/) ||
-  	    ($m->{mode_b} !~ /^120/ && $m->{mode_a} =~ /^120/)) {
-  		$self->D({
-  			mode_a => $m->{mode_a}, mode_b => '000000',
-  			sha1_a => $m->{sha1_a}, sha1_b => '0' x 40,
-  			chg => 'D', file_b => $m->{file_b}
-  		}, $deletions);
-  		$self->A({
-  			mode_a => '000000', mode_b => $m->{mode_b},
-  			sha1_a => '0' x 40, sha1_b => $m->{sha1_b},
-  			chg => 'A', file_b => $m->{file_b}
-  		}, $deletions);
-  		return;
-  	}
-  
-  	$self->M($m, $deletions);
-  }
-  
-  sub change_file_prop {
-  	my ($self, $fbat, $pname, $pval) = @_;
-  	$self->SUPER::change_file_prop($fbat, $pname, $pval, $self->{pool});
-  }
-  
-  sub change_dir_prop {
-  	my ($self, $pbat, $pname, $pval) = @_;
-  	$self->SUPER::change_dir_prop($pbat, $pname, $pval, $self->{pool});
-  }
-  
-  sub _chg_file_get_blob ($$$$) {
-  	my ($self, $fbat, $m, $which) = @_;
-  	my $fh = $::_repository->temp_acquire("git_blob_$which");
-  	if ($m->{"mode_$which"} =~ /^120/) {
-  		print $fh 'link ' or croak $!;
-  		$self->change_file_prop($fbat,'svn:special','*');
-  	} elsif ($m->{mode_a} =~ /^120/ && $m->{"mode_$which"} !~ /^120/) {
-  		$self->change_file_prop($fbat,'svn:special',undef);
-  	}
-  	my $blob = $m->{"sha1_$which"};
-  	return ($fh,) if ($blob =~ /^0{40}$/);
-  	my $size = $::_repository->cat_blob($blob, $fh);
-  	croak "Failed to read object $blob" if ($size < 0);
-  	$fh->flush == 0 or croak $!;
-  	seek $fh, 0, 0 or croak $!;
-  
-  	my $exp = ::md5sum($fh);
-  	seek $fh, 0, 0 or croak $!;
-  	return ($fh, $exp);
-  }
-  
-  sub chg_file {
-  	my ($self, $fbat, $m) = @_;
-  	if ($m->{mode_b} =~ /755$/ && $m->{mode_a} !~ /755$/) {
-  		$self->change_file_prop($fbat,'svn:executable','*');
-  	} elsif ($m->{mode_b} !~ /755$/ && $m->{mode_a} =~ /755$/) {
-  		$self->change_file_prop($fbat,'svn:executable',undef);
-  	}
-  	my ($fh_a, $exp_a) = _chg_file_get_blob $self, $fbat, $m, 'a';
-  	my ($fh_b, $exp_b) = _chg_file_get_blob $self, $fbat, $m, 'b';
-  	my $pool = SVN::Pool->new;
-  	my $atd = $self->apply_textdelta($fbat, $exp_a, $pool);
-  	if (-s $fh_a) {
-  		my $txstream = SVN::TxDelta::new ($fh_a, $fh_b, $pool);
-  		my $res = SVN::TxDelta::send_txstream($txstream, @$atd, $pool);
-  		if (defined $res) {
-  			die "Unexpected result from send_txstream: $res\n",
-  			    "(SVN::Core::VERSION: $SVN::Core::VERSION)\n";
-  		}
-  	} else {
-  		my $got = SVN::TxDelta::send_stream($fh_b, @$atd, $pool);
-  		die "Checksum mismatch\nexpected: $exp_b\ngot: $got\n"
-  		    if ($got ne $exp_b);
-  	}
-  	Git::temp_release($fh_b, 1);
-  	Git::temp_release($fh_a, 1);
-  	$pool->clear;
-  }
-  
-  sub D {
-  	my ($self, $m, $deletions) = @_;
-  	my ($dir, $file) = split_path($m->{file_b});
-  	my $pbat = $self->ensure_path($dir, $deletions);
-  	print "\tD\t$m->{file_b}\n" unless $::_q;
-  	$self->delete_entry($m->{file_b}, $pbat);
-  }
-  
-  sub close_edit {
-  	my ($self) = @_;
-  	my ($p,$bat) = ($self->{pool}, $self->{bat});
-  	foreach (sort { $b =~ tr#/#/# <=> $a =~ tr#/#/# } keys %$bat) {
-  		next if $_ eq '';
-  		$self->close_directory($bat->{$_}, $p);
-  	}
-  	$self->close_directory($bat->{''}, $p);
-  	$self->SUPER::close_edit($p);
-  	$p->clear;
-  }
-  
-  sub abort_edit {
-  	my ($self) = @_;
-  	$self->SUPER::abort_edit($self->{pool});
-  }
-  
-  sub DESTROY {
-  	my $self = shift;
-  	$self->SUPER::DESTROY(@_);
-  	$self->{pool}->clear;
-  }
-  
-  # this drives the editor
-  sub apply_diff {
-  	my ($self) = @_;
-  	my $mods = $self->{mods};
-  	my %o = ( D => 0, C => 1, R => 2, A => 3, M => 4, T => 5 );
-  	my %deletions;
-  
-  	foreach my $m (@$mods) {
-  		if ($m->{chg} eq "D") {
-  			$deletions{$m->{file_b}} = 1;
-  		}
-  	}
-  
-  	foreach my $m (sort { $o{$a->{chg}} <=> $o{$b->{chg}} } @$mods) {
-  		my $f = $m->{chg};
-  		if (defined $o{$f}) {
-  			$self->$f($m, \%deletions);
-  		} else {
-  			fatal("Invalid change type: $f");
-  		}
-  	}
-  
-  	if (defined($self->{mergeinfo})) {
-  		$self->change_dir_prop($self->{bat}{''}, "svn:mergeinfo",
-  			               $self->{mergeinfo});
-  	}
-  	$self->rmdirs if $_rmdir;
-  	if (@$mods == 0 && !defined($self->{mergeinfo})) {
-  		$self->abort_edit;
-  	} else {
-  		$self->close_edit;
-  	}
-  	return scalar @$mods;
-  }
-  
-  1;
-  __END__
-  
-  =head1 NAME
-  
-  Git::SVN::Editor - commit driver for "git svn set-tree" and dcommit
-  
-  =head1 SYNOPSIS
-  
-  	use Git::SVN::Editor;
-  	use Git::SVN::Ra;
-  
-  	my $ra = Git::SVN::Ra->new($url);
-  	my %opts = (
-  		r => 19,
-  		log => "log message",
-  		ra => $ra,
-  		config => SVN::Core::config_get_config($svn_config_dir),
-  		tree_a => "$commit^",
-  		tree_b => "$commit",
-  		editor_cb => sub { print "Committed r$_[0]\n"; },
-  		mergeinfo => "/branches/foo:1-10",
-  		svn_path => "trunk"
-  	);
-  	Git::SVN::Editor->new(\%opts)->apply_diff or print "No changes\n";
-  
-  	my $re = Git::SVN::Editor::glob2pat("trunk/*");
-  	if ($branchname =~ /$re/) {
-  		print "matched!\n";
-  	}
-  
-  =head1 DESCRIPTION
-  
-  This module is an implementation detail of the "git svn" command.
-  Do not use it unless you are developing git-svn.
-  
-  This module adapts the C<SVN::Delta::Editor> object returned by
-  C<SVN::Delta::get_commit_editor> and drives it to convey the
-  difference between two git tree objects to a remote Subversion
-  repository.
-  
-  The interface will change as git-svn evolves.
-  
-  =head1 DEPENDENCIES
-  
-  Subversion perl bindings,
-  the core L<Carp> module,
-  and git's L<Git> helper module.
-  
-  C<Git::SVN::Editor> has not been tested using callers other than
-  B<git-svn> itself.
-  
-  =head1 SEE ALSO
-  
-  L<SVN::Delta>,
-  L<Git::SVN::Fetcher>.
-  
-  =head1 INCOMPATIBILITIES
-  
-  None reported.
-  
-  =head1 BUGS
-  
-  None.
-GIT_SVN_EDITOR
-
-$fatpacked{"Git/SVN/Fetcher.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'GIT_SVN_FETCHER';
-  package Git::SVN::Fetcher;
-  use vars qw/@ISA $_ignore_regex $_include_regex $_preserve_empty_dirs
-              $_placeholder_filename @deleted_gpath %added_placeholder
-              $repo_id/;
-  use strict;
-  use warnings;
-  use SVN::Delta;
-  use Carp qw/croak/;
-  use File::Basename qw/dirname/;
-  use Git qw/command command_oneline command_noisy command_output_pipe
-             command_input_pipe command_close_pipe
-             command_bidi_pipe command_close_bidi_pipe
-             get_record/;
-  BEGIN {
-  	@ISA = qw(SVN::Delta::Editor);
-  }
-  
-  # file baton members: path, mode_a, mode_b, pool, fh, blob, base
-  sub new {
-  	my ($class, $git_svn, $switch_path) = @_;
-  	my $self = SVN::Delta::Editor->new;
-  	bless $self, $class;
-  	if (exists $git_svn->{last_commit}) {
-  		$self->{c} = $git_svn->{last_commit};
-  		$self->{empty_symlinks} =
-  		                  _mark_empty_symlinks($git_svn, $switch_path);
-  	}
-  
-  	# some options are read globally, but can be overridden locally
-  	# per [svn-remote "..."] section.  Command-line options will *NOT*
-  	# override options set in an [svn-remote "..."] section
-  	$repo_id = $git_svn->{repo_id};
-  	my $k = "svn-remote.$repo_id.ignore-paths";
-  	my $v = eval { command_oneline('config', '--get', $k) };
-  	$self->{ignore_regex} = $v;
-  
-  	$k = "svn-remote.$repo_id.include-paths";
-  	$v = eval { command_oneline('config', '--get', $k) };
-  	$self->{include_regex} = $v;
-  
-  	$k = "svn-remote.$repo_id.preserve-empty-dirs";
-  	$v = eval { command_oneline('config', '--get', '--bool', $k) };
-  	if ($v && $v eq 'true') {
-  		$_preserve_empty_dirs = 1;
-  		$k = "svn-remote.$repo_id.placeholder-filename";
-  		$v = eval { command_oneline('config', '--get', $k) };
-  		$_placeholder_filename = $v;
-  	}
-  
-  	# Load the list of placeholder files added during previous invocations.
-  	$k = "svn-remote.$repo_id.added-placeholder";
-  	$v = eval { command_oneline('config', '--get-all', $k) };
-  	if ($_preserve_empty_dirs && $v) {
-  		# command() prints errors to stderr, so we only call it if
-  		# command_oneline() succeeded.
-  		my @v = command('config', '--get-all', $k);
-  		$added_placeholder{ dirname($_) } = $_ foreach @v;
-  	}
-  
-  	$self->{empty} = {};
-  	$self->{dir_prop} = {};
-  	$self->{file_prop} = {};
-  	$self->{absent_dir} = {};
-  	$self->{absent_file} = {};
-  	require Git::IndexInfo;
-  	$self->{gii} = $git_svn->tmp_index_do(sub { Git::IndexInfo->new });
-  	$self->{pathnameencoding} = Git::config('svn.pathnameencoding');
-  	$self;
-  }
-  
-  # this uses the Ra object, so it must be called before do_{switch,update},
-  # not inside them (when the Git::SVN::Fetcher object is passed) to
-  # do_{switch,update}
-  sub _mark_empty_symlinks {
-  	my ($git_svn, $switch_path) = @_;
-  	my $bool = Git::config_bool('svn.brokenSymlinkWorkaround');
-  	return {} if (!defined($bool)) || (defined($bool) && ! $bool);
-  
-  	my %ret;
-  	my ($rev, $cmt) = $git_svn->last_rev_commit;
-  	return {} unless ($rev && $cmt);
-  
-  	# allow the warning to be printed for each revision we fetch to
-  	# ensure the user sees it.  The user can also disable the workaround
-  	# on the repository even while git svn is running and the next
-  	# revision fetched will skip this expensive function.
-  	my $printed_warning;
-  	chomp(my $empty_blob = `git hash-object -t blob --stdin < /dev/null`);
-  	my ($ls, $ctx) = command_output_pipe(qw/ls-tree -r -z/, $cmt);
-  	my $pfx = defined($switch_path) ? $switch_path : $git_svn->path;
-  	$pfx .= '/' if length($pfx);
-  	while (defined($_ = get_record($ls, "\0"))) {
-  		s/\A100644 blob $empty_blob\t//o or next;
-  		unless ($printed_warning) {
-  			print STDERR "Scanning for empty symlinks, ",
-  			             "this may take a while if you have ",
-  				     "many empty files\n",
-  				     "You may disable this with `",
-  				     "git config svn.brokenSymlinkWorkaround ",
-  				     "false'.\n",
-  				     "This may be done in a different ",
-  				     "terminal without restarting ",
-  				     "git svn\n";
-  			$printed_warning = 1;
-  		}
-  		my $path = $_;
-  		my (undef, $props) =
-  		               $git_svn->ra->get_file($pfx.$path, $rev, undef);
-  		if ($props->{'svn:special'}) {
-  			$ret{$path} = 1;
-  		}
-  	}
-  	command_close_pipe($ls, $ctx);
-  	\%ret;
-  }
-  
-  # returns true if a given path is inside a ".git" directory
-  sub in_dot_git {
-  	$_[0] =~ m{(?:^|/)\.git(?:/|$)};
-  }
-  
-  # return value: 0 -- don't ignore, 1 -- ignore
-  # This will also check whether the path is explicitly included
-  sub is_path_ignored {
-  	my ($self, $path) = @_;
-  	return 1 if in_dot_git($path);
-  	return 1 if defined($self->{ignore_regex}) &&
-  	            $path =~ m!$self->{ignore_regex}!;
-  	return 0 if defined($self->{include_regex}) &&
-  	            $path =~ m!$self->{include_regex}!;
-  	return 0 if defined($_include_regex) &&
-  	            $path =~ m!$_include_regex!;
-  	return 1 if defined($self->{include_regex});
-  	return 1 if defined($_include_regex);
-  	return 0 unless defined($_ignore_regex);
-  	return 1 if $path =~ m!$_ignore_regex!o;
-  	return 0;
-  }
-  
-  sub set_path_strip {
-  	my ($self, $path) = @_;
-  	$self->{path_strip} = qr/^\Q$path\E(\/|$)/ if length $path;
-  }
-  
-  sub open_root {
-  	{ path => '' };
-  }
-  
-  sub open_directory {
-  	my ($self, $path, $pb, $rev) = @_;
-  	{ path => $path };
-  }
-  
-  sub git_path {
-  	my ($self, $path) = @_;
-  	if (my $enc = $self->{pathnameencoding}) {
-  		require Encode;
-  		Encode::from_to($path, 'UTF-8', $enc);
-  	}
-  	if ($self->{path_strip}) {
-  		$path =~ s!$self->{path_strip}!! or
-  		  die "Failed to strip path '$path' ($self->{path_strip})\n";
-  	}
-  	$path;
-  }
-  
-  sub delete_entry {
-  	my ($self, $path, $rev, $pb) = @_;
-  	return undef if $self->is_path_ignored($path);
-  
-  	my $gpath = $self->git_path($path);
-  	return undef if ($gpath eq '');
-  
-  	# remove entire directories.
-  	my ($tree) = (command('ls-tree', '-z', $self->{c}, "./$gpath")
-  	                 =~ /\A040000 tree ([a-f\d]{40})\t\Q$gpath\E\0/);
-  	if ($tree) {
-  		my ($ls, $ctx) = command_output_pipe(qw/ls-tree
-  		                                     -r --name-only -z/,
-  				                     $tree);
-  		while (defined($_ = get_record($ls, "\0"))) {
-  			my $rmpath = "$gpath/$_";
-  			$self->{gii}->remove($rmpath);
-  			print "\tD\t$rmpath\n" unless $::_q;
-  		}
-  		print "\tD\t$gpath/\n" unless $::_q;
-  		command_close_pipe($ls, $ctx);
-  	} else {
-  		$self->{gii}->remove($gpath);
-  		print "\tD\t$gpath\n" unless $::_q;
-  	}
-  	# Don't add to @deleted_gpath if we're deleting a placeholder file.
-  	push @deleted_gpath, $gpath unless $added_placeholder{dirname($path)};
-  	$self->{empty}->{$path} = 0;
-  	undef;
-  }
-  
-  sub open_file {
-  	my ($self, $path, $pb, $rev) = @_;
-  	my ($mode, $blob);
-  
-  	goto out if $self->is_path_ignored($path);
-  
-  	my $gpath = $self->git_path($path);
-  	($mode, $blob) = (command('ls-tree', '-z', $self->{c}, "./$gpath")
-  	                     =~ /\A(\d{6}) blob ([a-f\d]{40})\t\Q$gpath\E\0/);
-  	unless (defined $mode && defined $blob) {
-  		die "$path was not found in commit $self->{c} (r$rev)\n";
-  	}
-  	if ($mode eq '100644' && $self->{empty_symlinks}->{$path}) {
-  		$mode = '120000';
-  	}
-  out:
-  	{ path => $path, mode_a => $mode, mode_b => $mode, blob => $blob,
-  	  pool => SVN::Pool->new, action => 'M' };
-  }
-  
-  sub add_file {
-  	my ($self, $path, $pb, $cp_path, $cp_rev) = @_;
-  	my $mode;
-  
-  	if (!$self->is_path_ignored($path)) {
-  		my ($dir, $file) = ($path =~ m#^(.*?)/?([^/]+)$#);
-  		delete $self->{empty}->{$dir};
-  		$mode = '100644';
-  
-  		if ($added_placeholder{$dir}) {
-  			# Remove our placeholder file, if we created one.
-  			delete_entry($self, $added_placeholder{$dir})
-  				unless $path eq $added_placeholder{$dir};
-  			delete $added_placeholder{$dir}
-  		}
-  	}
-  
-  	{ path => $path, mode_a => $mode, mode_b => $mode,
-  	  pool => SVN::Pool->new, action => 'A' };
-  }
-  
-  sub add_directory {
-  	my ($self, $path, $cp_path, $cp_rev) = @_;
-  	goto out if $self->is_path_ignored($path);
-  	my $gpath = $self->git_path($path);
-  	if ($gpath eq '') {
-  		my ($ls, $ctx) = command_output_pipe(qw/ls-tree
-  		                                     -r --name-only -z/,
-  				                     $self->{c});
-  		while (defined($_ = get_record($ls, "\0"))) {
-  			$self->{gii}->remove($_);
-  			print "\tD\t$_\n" unless $::_q;
-  			push @deleted_gpath, $gpath;
-  		}
-  		command_close_pipe($ls, $ctx);
-  		$self->{empty}->{$path} = 0;
-  	}
-  	my ($dir, $file) = ($path =~ m#^(.*?)/?([^/]+)$#);
-  	delete $self->{empty}->{$dir};
-  	$self->{empty}->{$path} = 1;
-  
-  	if ($added_placeholder{$dir}) {
-  		# Remove our placeholder file, if we created one.
-  		delete_entry($self, $added_placeholder{$dir});
-  		delete $added_placeholder{$dir}
-  	}
-  
-  out:
-  	{ path => $path };
-  }
-  
-  sub change_dir_prop {
-  	my ($self, $db, $prop, $value) = @_;
-  	return undef if $self->is_path_ignored($db->{path});
-  	$self->{dir_prop}->{$db->{path}} ||= {};
-  	$self->{dir_prop}->{$db->{path}}->{$prop} = $value;
-  	undef;
-  }
-  
-  sub absent_directory {
-  	my ($self, $path, $pb) = @_;
-  	return undef if $self->is_path_ignored($path);
-  	$self->{absent_dir}->{$pb->{path}} ||= [];
-  	push @{$self->{absent_dir}->{$pb->{path}}}, $path;
-  	undef;
-  }
-  
-  sub absent_file {
-  	my ($self, $path, $pb) = @_;
-  	return undef if $self->is_path_ignored($path);
-  	$self->{absent_file}->{$pb->{path}} ||= [];
-  	push @{$self->{absent_file}->{$pb->{path}}}, $path;
-  	undef;
-  }
-  
-  sub change_file_prop {
-  	my ($self, $fb, $prop, $value) = @_;
-  	return undef if $self->is_path_ignored($fb->{path});
-  	if ($prop eq 'svn:executable') {
-  		if ($fb->{mode_b} != 120000) {
-  			$fb->{mode_b} = defined $value ? 100755 : 100644;
-  		}
-  	} elsif ($prop eq 'svn:special') {
-  		$fb->{mode_b} = defined $value ? 120000 : 100644;
-  	} else {
-  		$self->{file_prop}->{$fb->{path}} ||= {};
-  		$self->{file_prop}->{$fb->{path}}->{$prop} = $value;
-  	}
-  	undef;
-  }
-  
-  sub apply_textdelta {
-  	my ($self, $fb, $exp) = @_;
-  	return undef if $self->is_path_ignored($fb->{path});
-  	my $suffix = 0;
-  	++$suffix while $::_repository->temp_is_locked("svn_delta_${$}_$suffix");
-  	my $fh = $::_repository->temp_acquire("svn_delta_${$}_$suffix");
-  	# $fh gets auto-closed() by SVN::TxDelta::apply(),
-  	# (but $base does not,) so dup() it for reading in close_file
-  	open my $dup, '<&', $fh or croak $!;
-  	my $base = $::_repository->temp_acquire("git_blob_${$}_$suffix");
-  	# close_file may call temp_acquire on 'svn_hash', but because of the
-  	# call chain, if the temp_acquire call from close_file ends up being the
-  	# call that first creates the 'svn_hash' temp file, then the FileHandle
-  	# that's created as a result will end up in an SVN::Pool that we clear
-  	# in SVN::Ra::gs_fetch_loop_common.  Avoid that by making sure the
-  	# 'svn_hash' FileHandle is already created before close_file is called.
-  	my $tmp_fh = $::_repository->temp_acquire('svn_hash');
-  	$::_repository->temp_release($tmp_fh, 1);
-  
-  	if ($fb->{blob}) {
-  		my ($base_is_link, $size);
-  
-  		if ($fb->{mode_a} eq '120000' &&
-  		    ! $self->{empty_symlinks}->{$fb->{path}}) {
-  			print $base 'link ' or die "print $!\n";
-  			$base_is_link = 1;
-  		}
-  	retry:
-  		$size = $::_repository->cat_blob($fb->{blob}, $base);
-  		die "Failed to read object $fb->{blob}" if ($size < 0);
-  
-  		if (defined $exp) {
-  			seek $base, 0, 0 or croak $!;
-  			my $got = ::md5sum($base);
-  			if ($got ne $exp) {
-  				my $err = "Checksum mismatch: ".
-  				       "$fb->{path} $fb->{blob}\n" .
-  				       "expected: $exp\n" .
-  				       "     got: $got\n";
-  				if ($base_is_link) {
-  					warn $err,
-  					     "Retrying... (possibly ",
-  					     "a bad symlink from SVN)\n";
-  					$::_repository->temp_reset($base);
-  					$base_is_link = 0;
-  					goto retry;
-  				}
-  				die $err;
-  			}
-  		}
-  	}
-  	seek $base, 0, 0 or croak $!;
-  	$fb->{fh} = $fh;
-  	$fb->{base} = $base;
-  	[ SVN::TxDelta::apply($base, $dup, undef, $fb->{path}, $fb->{pool}) ];
-  }
-  
-  sub close_file {
-  	my ($self, $fb, $exp) = @_;
-  	return undef if $self->is_path_ignored($fb->{path});
-  
-  	my $hash;
-  	my $path = $self->git_path($fb->{path});
-  	if (my $fh = $fb->{fh}) {
-  		if (defined $exp) {
-  			seek($fh, 0, 0) or croak $!;
-  			my $got = ::md5sum($fh);
-  			if ($got ne $exp) {
-  				die "Checksum mismatch: $path\n",
-  				    "expected: $exp\n    got: $got\n";
-  			}
-  		}
-  		if ($fb->{mode_b} == 120000) {
-  			sysseek($fh, 0, 0) or croak $!;
-  			my $rd = sysread($fh, my $buf, 5);
-  
-  			if (!defined $rd) {
-  				croak "sysread: $!\n";
-  			} elsif ($rd == 0) {
-  				warn "$path has mode 120000",
-  				     " but it points to nothing\n",
-  				     "converting to an empty file with mode",
-  				     " 100644\n";
-  				$fb->{mode_b} = '100644';
-  			} elsif ($buf ne 'link ') {
-  				warn "$path has mode 120000",
-  				     " but is not a link\n";
-  			} else {
-  				my $tmp_fh = $::_repository->temp_acquire(
-  					'svn_hash');
-  				my $res;
-  				while ($res = sysread($fh, my $str, 1024)) {
-  					my $out = syswrite($tmp_fh, $str, $res);
-  					defined($out) && $out == $res
-  						or croak("write ",
-  							Git::temp_path($tmp_fh),
-  							": $!\n");
-  				}
-  				defined $res or croak $!;
-  
-  				($fh, $tmp_fh) = ($tmp_fh, $fh);
-  				Git::temp_release($tmp_fh, 1);
-  			}
-  		}
-  
-  		$hash = $::_repository->hash_and_insert_object(
-  				Git::temp_path($fh));
-  		$hash =~ /^[a-f\d]{40}$/ or die "not a sha1: $hash\n";
-  
-  		Git::temp_release($fb->{base}, 1);
-  		Git::temp_release($fh, 1);
-  	} else {
-  		$hash = $fb->{blob} or die "no blob information\n";
-  	}
-  	$fb->{pool}->clear;
-  	$self->{gii}->update($fb->{mode_b}, $hash, $path) or croak $!;
-  	print "\t$fb->{action}\t$path\n" if $fb->{action} && ! $::_q;
-  	undef;
-  }
-  
-  sub abort_edit {
-  	my $self = shift;
-  	$self->{nr} = $self->{gii}->{nr};
-  	delete $self->{gii};
-  	$self->SUPER::abort_edit(@_);
-  }
-  
-  sub close_edit {
-  	my $self = shift;
-  
-  	if ($_preserve_empty_dirs) {
-  		my @empty_dirs;
-  
-  		# Any entry flagged as empty that also has an associated
-  		# dir_prop represents a newly created empty directory.
-  		foreach my $i (keys %{$self->{empty}}) {
-  			push @empty_dirs, $i if exists $self->{dir_prop}->{$i};
-  		}
-  
-  		# Search for directories that have become empty due subsequent
-  		# file deletes.
-  		push @empty_dirs, $self->find_empty_directories();
-  
-  		# Finally, add a placeholder file to each empty directory.
-  		$self->add_placeholder_file($_) foreach (@empty_dirs);
-  
-  		$self->stash_placeholder_list();
-  	}
-  
-  	$self->{git_commit_ok} = 1;
-  	$self->{nr} = $self->{gii}->{nr};
-  	delete $self->{gii};
-  	$self->SUPER::close_edit(@_);
-  }
-  
-  sub find_empty_directories {
-  	my ($self) = @_;
-  	my @empty_dirs;
-  	my %dirs = map { dirname($_) => 1 } @deleted_gpath;
-  
-  	foreach my $dir (sort keys %dirs) {
-  		next if $dir eq ".";
-  
-  		# If there have been any additions to this directory, there is
-  		# no reason to check if it is empty.
-  		my $skip_added = 0;
-  		foreach my $t (qw/dir_prop file_prop/) {
-  			foreach my $path (keys %{ $self->{$t} }) {
-  				if (exists $self->{$t}->{dirname($path)}) {
-  					$skip_added = 1;
-  					last;
-  				}
-  			}
-  			last if $skip_added;
-  		}
-  		next if $skip_added;
-  
-  		# Use `git ls-tree` to get the filenames of this directory
-  		# that existed prior to this particular commit.
-  		my $ls = command('ls-tree', '-z', '--name-only',
-  				 $self->{c}, "$dir/");
-  		my %files = map { $_ => 1 } split(/\0/, $ls);
-  
-  		# Remove the filenames that were deleted during this commit.
-  		delete $files{$_} foreach (@deleted_gpath);
-  
-  		# Report the directory if there are no filenames left.
-  		push @empty_dirs, $dir unless (scalar %files);
-  	}
-  	@empty_dirs;
-  }
-  
-  sub add_placeholder_file {
-  	my ($self, $dir) = @_;
-  	my $path = "$dir/$_placeholder_filename";
-  	my $gpath = $self->git_path($path);
-  
-  	my $fh = $::_repository->temp_acquire($gpath);
-  	my $hash = $::_repository->hash_and_insert_object(Git::temp_path($fh));
-  	Git::temp_release($fh, 1);
-  	$self->{gii}->update('100644', $hash, $gpath) or croak $!;
-  
-  	# The directory should no longer be considered empty.
-  	delete $self->{empty}->{$dir} if exists $self->{empty}->{$dir};
-  
-  	# Keep track of any placeholder files we create.
-  	$added_placeholder{$dir} = $path;
-  }
-  
-  sub stash_placeholder_list {
-  	my ($self) = @_;
-  	my $k = "svn-remote.$repo_id.added-placeholder";
-  	my $v = eval { command_oneline('config', '--get-all', $k) };
-  	command_noisy('config', '--unset-all', $k) if $v;
-  	foreach (values %added_placeholder) {
-  		command_noisy('config', '--add', $k, $_);
-  	}
-  }
-  
-  1;
-  __END__
-  
-  =head1 NAME
-  
-  Git::SVN::Fetcher - tree delta consumer for "git svn fetch"
-  
-  =head1 SYNOPSIS
-  
-      use SVN::Core;
-      use SVN::Ra;
-      use Git::SVN;
-      use Git::SVN::Fetcher;
-      use Git;
-  
-      my $gs = Git::SVN->find_by_url($url);
-      my $ra = SVN::Ra->new(url => $url);
-      my $editor = Git::SVN::Fetcher->new($gs);
-      my $reporter = $ra->do_update($SVN::Core::INVALID_REVNUM, '',
-                                    1, $editor);
-      $reporter->set_path('', $old_rev, 0);
-      $reporter->finish_report;
-      my $tree = $gs->tmp_index_do(sub { command_oneline('write-tree') });
-  
-      foreach my $path (keys %{$editor->{dir_prop}) {
-          my $props = $editor->{dir_prop}{$path};
-          foreach my $prop (keys %$props) {
-              print "property $prop at $path changed to $props->{$prop}\n";
-          }
-      }
-      foreach my $path (keys %{$editor->{empty}) {
-          my $action = $editor->{empty}{$path} ? 'added' : 'removed';
-          print "empty directory $path $action\n";
-      }
-      foreach my $path (keys %{$editor->{file_prop}) { ... }
-      foreach my $parent (keys %{$editor->{absent_dir}}) {
-          my @children = @{$editor->{abstent_dir}{$parent}};
-          print "cannot fetch directory $parent/$_: not authorized?\n"
-              foreach @children;
-      }
-      foreach my $parent (keys %{$editor->{absent_file}) { ... }
-  
-  =head1 DESCRIPTION
-  
-  This is a subclass of C<SVN::Delta::Editor>, which means it implements
-  callbacks to act as a consumer of Subversion tree deltas.  This
-  particular implementation of those callbacks is meant to store
-  information about the resulting content which B<git svn fetch> could
-  use to populate new commits and new entries for F<unhandled.log>.
-  More specifically:
+  The following configuration variables influence how the class and its
+  methods behave:
   
   =over
   
-  =item * Additions, removals, and modifications of files are propagated
-  to git-svn's index file F<$GIT_DIR/svn/$refname/index> using
-  B<git update-index>.
+  =item %URI::file::OS_CLASS
   
-  =item * Changes in Subversion path properties are recorded in the
-  C<dir_prop> and C<file_prop> fields (which are hashes).
+  This hash maps OS identifiers to implementation classes.  You might
+  want to add or modify this if you want to plug in your own file
+  handler class.  Normally the keys should match the $^O values in use.
   
-  =item * Addition and removal of empty directories are indicated by
-  entries with value 1 and 0 respectively in the C<empty> hash.
+  If there is no mapping then the "Unix" implementation is used.
   
-  =item * Paths that are present but cannot be conveyed (presumably due
-  to permissions) are recorded in the C<absent_file> and
-  C<absent_dirs> hashes.  For each key, the corresponding value is
-  a list of paths under that directory that were present but
-  could not be conveyed.
+  =item $URI::file::DEFAULT_AUTHORITY
+  
+  This determines what "authority" string to include in absolute file
+  URIs.  It defaults to "".  If you prefer verbose URIs you might set it
+  to be "localhost".
+  
+  Setting this value to C<undef> forces behaviour compatible to URI v1.31
+  and earlier.  In this mode host names in UNC paths and drive letters
+  are mapped to the authority component on Windows, while we produce
+  authority-less URIs on Unix.
   
   =back
   
-  The interface is unstable.  Do not use this module unless you are
-  developing git-svn.
-  
-  =head1 DEPENDENCIES
-  
-  L<SVN::Delta> from the Subversion perl bindings,
-  the core L<Carp> and L<File::Basename> modules,
-  and git's L<Git> helper module.
-  
-  C<Git::SVN::Fetcher> has not been tested using callers other than
-  B<git-svn> itself.
   
   =head1 SEE ALSO
   
-  L<SVN::Delta>,
-  L<Git::SVN::Editor>.
+  L<URI>, L<File::Spec>, L<perlport>
   
-  =head1 INCOMPATIBILITIES
+  =head1 COPYRIGHT
   
-  None reported.
+  Copyright 1995-1998,2004 Gisle Aas.
   
-  =head1 BUGS
-  
-  None.
-GIT_SVN_FETCHER
-
-$fatpacked{"Git/SVN/GlobSpec.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'GIT_SVN_GLOBSPEC';
-  package Git::SVN::GlobSpec;
-  use strict;
-  use warnings;
-  
-  sub new {
-  	my ($class, $glob, $pattern_ok) = @_;
-  	my $re = $glob;
-  	$re =~ s!/+$!!g; # no need for trailing slashes
-  	my (@left, @right, @patterns);
-  	my $state = "left";
-  	my $die_msg = "Only one set of wildcards " .
-  				"(e.g. '*' or '*/*/*') is supported: $glob\n";
-  	for my $part (split(m|/|, $glob)) {
-  		if ($pattern_ok && $part =~ /[{}]/ &&
-  			 $part !~ /^\{[^{}]+\}/) {
-  			die "Invalid pattern in '$glob': $part\n";
-  		}
-  		my $nstars = $part =~ tr/*//;
-  		if ($nstars > 1) {
-  			die "Only one '*' is allowed in a pattern: '$part'\n";
-  		}
-  		if ($part =~ /(.*)\*(.*)/) {
-  			die $die_msg if $state eq "right";
-  			my ($l, $r) = ($1, $2);
-  			$state = "pattern";
-  			my $pat = quotemeta($l) . '[^/]*' . quotemeta($r);
-  			push(@patterns, $pat);
-  		} elsif ($pattern_ok && $part =~ /^\{(.*)\}$/) {
-  			die $die_msg if $state eq "right";
-  			$state = "pattern";
-  			my $p = quotemeta($1);
-  			$p =~ s/\\,/|/g;
-  			push(@patterns, "(?:$p)");
-  		} else {
-  			if ($state eq "left") {
-  				push(@left, $part);
-  			} else {
-  				push(@right, $part);
-  				$state = "right";
-  			}
-  		}
-  	}
-  	my $depth = @patterns;
-  	if ($depth == 0) {
-  		die "One '*' is needed in glob: '$glob'\n";
-  	}
-  	my $left = join('/', @left);
-  	my $right = join('/', @right);
-  	$re = join('/', @patterns);
-  	$re = join('\/',
-  		   grep(length, quotemeta($left),
-                                  "($re)(?=/|\$)",
-                                  quotemeta($right)));
-  	my $left_re = qr/^\/\Q$left\E(\/|$)/;
-  	bless { left => $left, right => $right, left_regex => $left_re,
-  	        regex => qr/$re/, glob => $glob, depth => $depth }, $class;
-  }
-  
-  sub full_path {
-  	my ($self, $path) = @_;
-  	return (length $self->{left} ? "$self->{left}/" : '') .
-  	       $path . (length $self->{right} ? "/$self->{right}" : '');
-  }
-  
-  1;
-GIT_SVN_GLOBSPEC
-
-$fatpacked{"Git/SVN/Log.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'GIT_SVN_LOG';
-  package Git::SVN::Log;
-  use strict;
-  use warnings;
-  use Git::SVN::Utils qw(fatal);
-  use Git qw(command
-             command_oneline
-             command_output_pipe
-             command_close_pipe
-             get_tz_offset);
-  use POSIX qw/strftime/;
-  use constant commit_log_separator => ('-' x 72) . "\n";
-  use vars qw/$TZ $limit $color $pager $non_recursive $verbose $oneline
-              %rusers $show_commit $incremental/;
-  
-  # Option set in git-svn
-  our $_git_format;
-  
-  sub cmt_showable {
-  	my ($c) = @_;
-  	return 1 if defined $c->{r};
-  
-  	# big commit message got truncated by the 16k pretty buffer in rev-list
-  	if ($c->{l} && $c->{l}->[-1] eq "...\n" &&
-  				$c->{a_raw} =~ /\@([a-f\d\-]+)>$/) {
-  		@{$c->{l}} = ();
-  		my @log = command(qw/cat-file commit/, $c->{c});
-  
-  		# shift off the headers
-  		shift @log while ($log[0] ne '');
-  		shift @log;
-  
-  		# TODO: make $c->{l} not have a trailing newline in the future
-  		@{$c->{l}} = map { "$_\n" } grep !/^git-svn-id: /, @log;
-  
-  		(undef, $c->{r}, undef) = ::extract_metadata(
-  				(grep(/^git-svn-id: /, @log))[-1]);
-  	}
-  	return defined $c->{r};
-  }
-  
-  sub log_use_color {
-  	return $color || Git->repository->get_colorbool('color.diff');
-  }
-  
-  sub git_svn_log_cmd {
-  	my ($r_min, $r_max, @args) = @_;
-  	my $head = 'HEAD';
-  	my (@files, @log_opts);
-  	foreach my $x (@args) {
-  		if ($x eq '--' || @files) {
-  			push @files, $x;
-  		} else {
-  			if (::verify_ref("$x^0")) {
-  				$head = $x;
-  			} else {
-  				push @log_opts, $x;
-  			}
-  		}
-  	}
-  
-  	my ($url, $rev, $uuid, $gs) = ::working_head_info($head);
-  
-  	require Git::SVN;
-  	$gs ||= Git::SVN->_new;
-  	my @cmd = (qw/log --abbrev-commit --pretty=raw --default/,
-  	           $gs->refname);
-  	push @cmd, '-r' unless $non_recursive;
-  	push @cmd, qw/--raw --name-status/ if $verbose;
-  	push @cmd, '--color' if log_use_color();
-  	push @cmd, @log_opts;
-  	if (defined $r_max && $r_max == $r_min) {
-  		push @cmd, '--max-count=1';
-  		if (my $c = $gs->rev_map_get($r_max)) {
-  			push @cmd, $c;
-  		}
-  	} elsif (defined $r_max) {
-  		if ($r_max < $r_min) {
-  			($r_min, $r_max) = ($r_max, $r_min);
-  		}
-  		my (undef, $c_max) = $gs->find_rev_before($r_max, 1, $r_min);
-  		my (undef, $c_min) = $gs->find_rev_after($r_min, 1, $r_max);
-  		# If there are no commits in the range, both $c_max and $c_min
-  		# will be undefined.  If there is at least 1 commit in the
-  		# range, both will be defined.
-  		return () if !defined $c_min || !defined $c_max;
-  		if ($c_min eq $c_max) {
-  			push @cmd, '--max-count=1', $c_min;
-  		} else {
-  			push @cmd, '--boundary', "$c_min..$c_max";
-  		}
-  	}
-  	return (@cmd, @files);
-  }
-  
-  # adapted from pager.c
-  sub config_pager {
-  	if (! -t *STDOUT) {
-  		$ENV{GIT_PAGER_IN_USE} = 'false';
-  		$pager = undef;
-  		return;
-  	}
-  	chomp($pager = command_oneline(qw(var GIT_PAGER)));
-  	if ($pager eq 'cat') {
-  		$pager = undef;
-  	}
-  	$ENV{GIT_PAGER_IN_USE} = defined($pager);
-  }
-  
-  sub run_pager {
-  	return unless defined $pager;
-  	pipe my ($rfd, $wfd) or return;
-  	defined(my $pid = fork) or fatal "Can't fork: $!";
-  	if (!$pid) {
-  		open STDOUT, '>&', $wfd or
-  		                     fatal "Can't redirect to stdout: $!";
-  		return;
-  	}
-  	open STDIN, '<&', $rfd or fatal "Can't redirect stdin: $!";
-  	$ENV{LESS} ||= 'FRX';
-  	$ENV{LV} ||= '-c';
-  	exec $pager or fatal "Can't run pager: $! ($pager)";
-  }
-  
-  sub format_svn_date {
-  	my $t = shift || time;
-  	require Git::SVN;
-  	my $gmoff = get_tz_offset($t);
-  	return strftime("%Y-%m-%d %H:%M:%S $gmoff (%a, %d %b %Y)", localtime($t));
-  }
-  
-  sub parse_git_date {
-  	my ($t, $tz) = @_;
-  	# Date::Parse isn't in the standard Perl distro :(
-  	if ($tz =~ s/^\+//) {
-  		$t += tz_to_s_offset($tz);
-  	} elsif ($tz =~ s/^\-//) {
-  		$t -= tz_to_s_offset($tz);
-  	}
-  	return $t;
-  }
-  
-  sub set_local_timezone {
-  	if (defined $TZ) {
-  		$ENV{TZ} = $TZ;
-  	} else {
-  		delete $ENV{TZ};
-  	}
-  }
-  
-  sub tz_to_s_offset {
-  	my ($tz) = @_;
-  	$tz =~ s/(\d\d)$//;
-  	return ($1 * 60) + ($tz * 3600);
-  }
-  
-  sub get_author_info {
-  	my ($dest, $author, $t, $tz) = @_;
-  	$author =~ s/(?:^\s*|\s*$)//g;
-  	$dest->{a_raw} = $author;
-  	my $au;
-  	if ($::_authors) {
-  		$au = $rusers{$author} || undef;
-  	}
-  	if (!$au) {
-  		($au) = ($author =~ /<([^>]+)\@[^>]+>$/);
-  	}
-  	$dest->{t} = $t;
-  	$dest->{tz} = $tz;
-  	$dest->{a} = $au;
-  	$dest->{t_utc} = parse_git_date($t, $tz);
-  }
-  
-  sub process_commit {
-  	my ($c, $r_min, $r_max, $defer) = @_;
-  	if (defined $r_min && defined $r_max) {
-  		if ($r_min == $c->{r} && $r_min == $r_max) {
-  			show_commit($c);
-  			return 0;
-  		}
-  		return 1 if $r_min == $r_max;
-  		if ($r_min < $r_max) {
-  			# we need to reverse the print order
-  			return 0 if (defined $limit && --$limit < 0);
-  			push @$defer, $c;
-  			return 1;
-  		}
-  		if ($r_min != $r_max) {
-  			return 1 if ($r_min < $c->{r});
-  			return 1 if ($r_max > $c->{r});
-  		}
-  	}
-  	return 0 if (defined $limit && --$limit < 0);
-  	show_commit($c);
-  	return 1;
-  }
-  
-  my $l_fmt;
-  sub show_commit {
-  	my $c = shift;
-  	if ($oneline) {
-  		my $x = "\n";
-  		if (my $l = $c->{l}) {
-  			while ($l->[0] =~ /^\s*$/) { shift @$l }
-  			$x = $l->[0];
-  		}
-  		$l_fmt ||= 'A' . length($c->{r});
-  		print 'r',pack($l_fmt, $c->{r}),' | ';
-  		print "$c->{c} | " if $show_commit;
-  		print $x;
-  	} else {
-  		show_commit_normal($c);
-  	}
-  }
-  
-  sub show_commit_changed_paths {
-  	my ($c) = @_;
-  	return unless $c->{changed};
-  	print "Changed paths:\n", @{$c->{changed}};
-  }
-  
-  sub show_commit_normal {
-  	my ($c) = @_;
-  	print commit_log_separator, "r$c->{r} | ";
-  	print "$c->{c} | " if $show_commit;
-  	print "$c->{a} | ", format_svn_date($c->{t_utc}), ' | ';
-  	my $nr_line = 0;
-  
-  	if (my $l = $c->{l}) {
-  		while ($l->[$#$l] eq "\n" && $#$l > 0
-  		                          && $l->[($#$l - 1)] eq "\n") {
-  			pop @$l;
-  		}
-  		$nr_line = scalar @$l;
-  		if (!$nr_line) {
-  			print "1 line\n\n\n";
-  		} else {
-  			if ($nr_line == 1) {
-  				$nr_line = '1 line';
-  			} else {
-  				$nr_line .= ' lines';
-  			}
-  			print $nr_line, "\n";
-  			show_commit_changed_paths($c);
-  			print "\n";
-  			print $_ foreach @$l;
-  		}
-  	} else {
-  		print "1 line\n";
-  		show_commit_changed_paths($c);
-  		print "\n";
-  
-  	}
-  	foreach my $x (qw/raw stat diff/) {
-  		if ($c->{$x}) {
-  			print "\n";
-  			print $_ foreach @{$c->{$x}}
-  		}
-  	}
-  }
-  
-  sub cmd_show_log {
-  	my (@args) = @_;
-  	my ($r_min, $r_max);
-  	my $r_last = -1; # prevent dupes
-  	set_local_timezone();
-  	if (defined $::_revision) {
-  		if ($::_revision =~ /^(\d+):(\d+)$/) {
-  			($r_min, $r_max) = ($1, $2);
-  		} elsif ($::_revision =~ /^\d+$/) {
-  			$r_min = $r_max = $::_revision;
-  		} else {
-  			fatal "-r$::_revision is not supported, use ",
-  				"standard 'git log' arguments instead";
-  		}
-  	}
-  
-  	config_pager();
-  	@args = git_svn_log_cmd($r_min, $r_max, @args);
-  	if (!@args) {
-  		print commit_log_separator unless $incremental || $oneline;
-  		return;
-  	}
-  	my $log = command_output_pipe(@args);
-  	run_pager();
-  	my (@k, $c, $d, $stat);
-  	my $esc_color = qr/(?:\033\[(?:(?:\d+;)*\d*)?m)*/;
-  	while (<$log>) {
-  		if (/^${esc_color}commit (?:- )?($::sha1_short)/o) {
-  			my $cmt = $1;
-  			if ($c && cmt_showable($c) && $c->{r} != $r_last) {
-  				$r_last = $c->{r};
-  				process_commit($c, $r_min, $r_max, \@k) or
-  								goto out;
-  			}
-  			$d = undef;
-  			$c = { c => $cmt };
-  		} elsif (/^${esc_color}author (.+) (\d+) ([\-\+]?\d+)$/o) {
-  			get_author_info($c, $1, $2, $3);
-  		} elsif (/^${esc_color}(?:tree|parent|committer) /o) {
-  			# ignore
-  		} elsif (/^${esc_color}:\d{6} \d{6} $::sha1_short/o) {
-  			push @{$c->{raw}}, $_;
-  		} elsif (/^${esc_color}[ACRMDT]\t/) {
-  			# we could add $SVN->{svn_path} here, but that requires
-  			# remote access at the moment (repo_path_split)...
-  			s#^(${esc_color})([ACRMDT])\t#$1   $2 #o;
-  			push @{$c->{changed}}, $_;
-  		} elsif (/^${esc_color}diff /o) {
-  			$d = 1;
-  			push @{$c->{diff}}, $_;
-  		} elsif ($d) {
-  			push @{$c->{diff}}, $_;
-  		} elsif (/^\ .+\ \|\s*\d+\ $esc_color[\+\-]*
-  		          $esc_color*[\+\-]*$esc_color$/x) {
-  			$stat = 1;
-  			push @{$c->{stat}}, $_;
-  		} elsif ($stat && /^ \d+ files changed, \d+ insertions/) {
-  			push @{$c->{stat}}, $_;
-  			$stat = undef;
-  		} elsif (/^${esc_color}    (git-svn-id:.+)$/o) {
-  			($c->{url}, $c->{r}, undef) = ::extract_metadata($1);
-  		} elsif (s/^${esc_color}    //o) {
-  			push @{$c->{l}}, $_;
-  		}
-  	}
-  	if ($c && defined $c->{r} && $c->{r} != $r_last) {
-  		$r_last = $c->{r};
-  		process_commit($c, $r_min, $r_max, \@k);
-  	}
-  	if (@k) {
-  		($r_min, $r_max) = ($r_max, $r_min);
-  		process_commit($_, $r_min, $r_max) foreach reverse @k;
-  	}
-  out:
-  	close $log;
-  	print commit_log_separator unless $incremental || $oneline;
-  }
-  
-  sub cmd_blame {
-  	my $path = pop;
-  
-  	config_pager();
-  	run_pager();
-  
-  	my ($fh, $ctx, $rev);
-  
-  	if ($_git_format) {
-  		($fh, $ctx) = command_output_pipe('blame', @_, $path);
-  		while (my $line = <$fh>) {
-  			if ($line =~ /^\^?([[:xdigit:]]+)\s/) {
-  				# Uncommitted edits show up as a rev ID of
-  				# all zeros, which we can't look up with
-  				# cmt_metadata
-  				if ($1 !~ /^0+$/) {
-  					(undef, $rev, undef) =
-  						::cmt_metadata($1);
-  					$rev = '0' if (!$rev);
-  				} else {
-  					$rev = '0';
-  				}
-  				$rev = sprintf('%-10s', $rev);
-  				$line =~ s/^\^?[[:xdigit:]]+(\s)/$rev$1/;
-  			}
-  			print $line;
-  		}
-  	} else {
-  		($fh, $ctx) = command_output_pipe('blame', '-p', @_, 'HEAD',
-  						  '--', $path);
-  		my ($sha1);
-  		my %authors;
-  		my @buffer;
-  		my %dsha; #distinct sha keys
-  
-  		while (my $line = <$fh>) {
-  			push @buffer, $line;
-  			if ($line =~ /^([[:xdigit:]]{40})\s\d+\s\d+/) {
-  				$dsha{$1} = 1;
-  			}
-  		}
-  
-  		my $s2r = ::cmt_sha2rev_batch([keys %dsha]);
-  
-  		foreach my $line (@buffer) {
-  			if ($line =~ /^([[:xdigit:]]{40})\s\d+\s\d+/) {
-  				$rev = $s2r->{$1};
-  				$rev = '0' if (!$rev)
-  			}
-  			elsif ($line =~ /^author (.*)/) {
-  				$authors{$rev} = $1;
-  				$authors{$rev} =~ s/\s/_/g;
-  			}
-  			elsif ($line =~ /^\t(.*)$/) {
-  				printf("%6s %10s %s\n", $rev, $authors{$rev}, $1);
-  			}
-  		}
-  	}
-  	command_close_pipe($fh, $ctx);
-  }
-  
-  1;
-GIT_SVN_LOG
-
-$fatpacked{"Git/SVN/Memoize/YAML.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'GIT_SVN_MEMOIZE_YAML';
-  package Git::SVN::Memoize::YAML;
-  use warnings;
-  use strict;
-  use YAML::Any ();
-  
-  # based on Memoize::Storable.
-  
-  sub TIEHASH {
-  	my $package = shift;
-  	my $filename = shift;
-  	my $truehash = (-e $filename) ? YAML::Any::LoadFile($filename) : {};
-  	my $self = {FILENAME => $filename, H => $truehash};
-  	bless $self => $package;
-  }
-  
-  sub STORE {
-  	my $self = shift;
-  	$self->{H}{$_[0]} = $_[1];
-  }
-  
-  sub FETCH {
-  	my $self = shift;
-  	$self->{H}{$_[0]};
-  }
-  
-  sub EXISTS {
-  	my $self = shift;
-  	exists $self->{H}{$_[0]};
-  }
-  
-  sub DESTROY {
-  	my $self = shift;
-  	YAML::Any::DumpFile($self->{FILENAME}, $self->{H});
-  }
-  
-  sub SCALAR {
-  	my $self = shift;
-  	scalar(%{$self->{H}});
-  }
-  
-  sub FIRSTKEY {
-  	'Fake hash from Git::SVN::Memoize::YAML';
-  }
-  
-  sub NEXTKEY {
-  	undef;
-  }
-  
-  1;
-  __END__
-  
-  =head1 NAME
-  
-  Git::SVN::Memoize::YAML - store Memoized data in YAML format
-  
-  =head1 SYNOPSIS
-  
-      use Memoize;
-      use Git::SVN::Memoize::YAML;
-  
-      tie my %cache => 'Git::SVN::Memoize::YAML', $filename;
-      memoize('slow_function', SCALAR_CACHE => [HASH => \%cache]);
-      slow_function(arguments);
-  
-  =head1 DESCRIPTION
-  
-  This module provides a class that can be used to tie a hash to a
-  YAML file.  The file is read when the hash is initialized and
-  rewritten when the hash is destroyed.
-  
-  The intent is to allow L<Memoize> to back its cache with a file in
-  YAML format, just like L<Memoize::Storable> allows L<Memoize> to
-  back its cache with a file in Storable format.  Unlike the Storable
-  format, the YAML format is platform-independent and fairly stable.
-  
-  Carps on error.
-  
-  =head1 DIAGNOSTICS
-  
-  See L<YAML::Any>.
-  
-  =head1 DEPENDENCIES
-  
-  L<YAML::Any> from CPAN.
-  
-  =head1 INCOMPATIBILITIES
-  
-  None reported.
-  
-  =head1 BUGS
-  
-  The entire cache is read into a Perl hash when loading the file,
-  so this is not very scalable.
-GIT_SVN_MEMOIZE_YAML
-
-$fatpacked{"Git/SVN/Migration.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'GIT_SVN_MIGRATION';
-  package Git::SVN::Migration;
-  # these version numbers do NOT correspond to actual version numbers
-  # of git or git-svn.  They are just relative.
-  #
-  # v0 layout: .git/$id/info/url, refs/heads/$id-HEAD
-  #
-  # v1 layout: .git/$id/info/url, refs/remotes/$id
-  #
-  # v2 layout: .git/svn/$id/info/url, refs/remotes/$id
-  #
-  # v3 layout: .git/svn/$id, refs/remotes/$id
-  #            - info/url may remain for backwards compatibility
-  #            - this is what we migrate up to this layout automatically,
-  #            - this will be used by git svn init on single branches
-  # v3.1 layout (auto migrated):
-  #            - .rev_db => .rev_db.$UUID, .rev_db will remain as a symlink
-  #              for backwards compatibility
-  #
-  # v4 layout: .git/svn/$repo_id/$id, refs/remotes/$repo_id/$id
-  #            - this is only created for newly multi-init-ed
-  #              repositories.  Similar in spirit to the
-  #              --use-separate-remotes option in git-clone (now default)
-  #            - we do not automatically migrate to this (following
-  #              the example set by core git)
-  #
-  # v5 layout: .rev_db.$UUID => .rev_map.$UUID
-  #            - newer, more-efficient format that uses 24-bytes per record
-  #              with no filler space.
-  #            - use xxd -c24 < .rev_map.$UUID to view and debug
-  #            - This is a one-way migration, repositories updated to the
-  #              new format will not be able to use old git-svn without
-  #              rebuilding the .rev_db.  Rebuilding the rev_db is not
-  #              possible if noMetadata or useSvmProps are set; but should
-  #              be no problem for users that use the (sensible) defaults.
-  use strict;
-  use warnings;
-  use Carp qw/croak/;
-  use File::Path qw/mkpath/;
-  use File::Basename qw/dirname basename/;
-  
-  our $_minimize;
-  use Git qw(
-  	command
-  	command_noisy
-  	command_output_pipe
-  	command_close_pipe
-  	command_oneline
-  );
-  use Git::SVN;
-  
-  sub migrate_from_v0 {
-  	my $git_dir = $ENV{GIT_DIR};
-  	return undef unless -d $git_dir;
-  	my ($fh, $ctx) = command_output_pipe(qw/rev-parse --symbolic --all/);
-  	my $migrated = 0;
-  	while (<$fh>) {
-  		chomp;
-  		my ($id, $orig_ref) = ($_, $_);
-  		next unless $id =~ s#^refs/heads/(.+)-HEAD$#$1#;
-  		my $info_url = command_oneline(qw(rev-parse --git-path),
-  						"$id/info/url");
-  		next unless -f $info_url;
-  		my $new_ref = "refs/remotes/$id";
-  		if (::verify_ref("$new_ref^0")) {
-  			print STDERR "W: $orig_ref is probably an old ",
-  			             "branch used by an ancient version of ",
-  				     "git-svn.\n",
-  				     "However, $new_ref also exists.\n",
-  				     "We will not be able ",
-  				     "to use this branch until this ",
-  				     "ambiguity is resolved.\n";
-  			next;
-  		}
-  		print STDERR "Migrating from v0 layout...\n" if !$migrated;
-  		print STDERR "Renaming ref: $orig_ref => $new_ref\n";
-  		command_noisy('update-ref', $new_ref, $orig_ref);
-  		command_noisy('update-ref', '-d', $orig_ref, $orig_ref);
-  		$migrated++;
-  	}
-  	command_close_pipe($fh, $ctx);
-  	print STDERR "Done migrating from v0 layout...\n" if $migrated;
-  	$migrated;
-  }
-  
-  sub migrate_from_v1 {
-  	my $git_dir = $ENV{GIT_DIR};
-  	my $migrated = 0;
-  	return $migrated unless -d $git_dir;
-  	my $svn_dir = Git::SVN::svn_dir();
-  
-  	# just in case somebody used 'svn' as their $id at some point...
-  	return $migrated if -d $svn_dir && ! -f "$svn_dir/info/url";
-  
-  	print STDERR "Migrating from a git-svn v1 layout...\n";
-  	mkpath([$svn_dir]);
-  	print STDERR "Data from a previous version of git-svn exists, but\n\t",
-  	             "$svn_dir\n\t(required for this version ",
-  	             "($::VERSION) of git-svn) does not exist.\n";
-  	my ($fh, $ctx) = command_output_pipe(qw/rev-parse --symbolic --all/);
-  	while (<$fh>) {
-  		my $x = $_;
-  		next unless $x =~ s#^refs/remotes/##;
-  		chomp $x;
-  		my $info_url = command_oneline(qw(rev-parse --git-path),
-  						"$x/info/url");
-  		next unless -f $info_url;
-  		my $u = eval { ::file_to_s($info_url) };
-  		next unless $u;
-  		my $dn = dirname("$svn_dir/$x");
-  		mkpath([$dn]) unless -d $dn;
-  		if ($x eq 'svn') { # they used 'svn' as GIT_SVN_ID:
-  			mkpath(["$svn_dir/svn"]);
-  			print STDERR " - $git_dir/$x/info => ",
-  			                "$svn_dir/$x/info\n";
-  			rename "$git_dir/$x/info", "$svn_dir/$x/info" or
-  			       croak "$!: $x";
-  			# don't worry too much about these, they probably
-  			# don't exist with repos this old (save for index,
-  			# and we can easily regenerate that)
-  			foreach my $f (qw/unhandled.log index .rev_db/) {
-  				rename "$git_dir/$x/$f", "$svn_dir/$x/$f";
-  			}
-  		} else {
-  			print STDERR " - $git_dir/$x => $svn_dir/$x\n";
-  			rename "$git_dir/$x", "$svn_dir/$x" or croak "$!: $x";
-  		}
-  		$migrated++;
-  	}
-  	command_close_pipe($fh, $ctx);
-  	print STDERR "Done migrating from a git-svn v1 layout\n";
-  	$migrated;
-  }
-  
-  sub read_old_urls {
-  	my ($l_map, $pfx, $path) = @_;
-  	my @dir;
-  	foreach (<$path/*>) {
-  		if (-r "$_/info/url") {
-  			$pfx .= '/' if $pfx && $pfx !~ m!/$!;
-  			my $ref_id = $pfx . basename $_;
-  			my $url = ::file_to_s("$_/info/url");
-  			$l_map->{$ref_id} = $url;
-  		} elsif (-d $_) {
-  			push @dir, $_;
-  		}
-  	}
-  	my $svn_dir = Git::SVN::svn_dir();
-  	foreach (@dir) {
-  		my $x = $_;
-  		$x =~ s!^\Q$svn_dir\E/!!o;
-  		read_old_urls($l_map, $x, $_);
-  	}
-  }
-  
-  sub migrate_from_v2 {
-  	my @cfg = command(qw/config -l/);
-  	return if grep /^svn-remote\..+\.url=/, @cfg;
-  	my %l_map;
-  	read_old_urls(\%l_map, '', Git::SVN::svn_dir());
-  	my $migrated = 0;
-  
-  	require Git::SVN;
-  	foreach my $ref_id (sort keys %l_map) {
-  		eval { Git::SVN->init($l_map{$ref_id}, '', undef, $ref_id) };
-  		if ($@) {
-  			Git::SVN->init($l_map{$ref_id}, '', $ref_id, $ref_id);
-  		}
-  		$migrated++;
-  	}
-  	$migrated;
-  }
-  
-  sub minimize_connections {
-  	require Git::SVN;
-  	require Git::SVN::Ra;
-  
-  	my $r = Git::SVN::read_all_remotes();
-  	my $new_urls = {};
-  	my $root_repos = {};
-  	foreach my $repo_id (keys %$r) {
-  		my $url = $r->{$repo_id}->{url} or next;
-  		my $fetch = $r->{$repo_id}->{fetch} or next;
-  		my $ra = Git::SVN::Ra->new($url);
-  
-  		# skip existing cases where we already connect to the root
-  		if (($ra->url eq $ra->{repos_root}) ||
-  		    ($ra->{repos_root} eq $repo_id)) {
-  			$root_repos->{$ra->url} = $repo_id;
-  			next;
-  		}
-  
-  		my $root_ra = Git::SVN::Ra->new($ra->{repos_root});
-  		my $root_path = $ra->url;
-  		$root_path =~ s#^\Q$ra->{repos_root}\E(/|$)##;
-  		foreach my $path (keys %$fetch) {
-  			my $ref_id = $fetch->{$path};
-  			my $gs = Git::SVN->new($ref_id, $repo_id, $path);
-  
-  			# make sure we can read when connecting to
-  			# a higher level of a repository
-  			my ($last_rev, undef) = $gs->last_rev_commit;
-  			if (!defined $last_rev) {
-  				$last_rev = eval {
-  					$root_ra->get_latest_revnum;
-  				};
-  				next if $@;
-  			}
-  			my $new = $root_path;
-  			$new .= length $path ? "/$path" : '';
-  			eval {
-  				$root_ra->get_log([$new], $last_rev, $last_rev,
-  			                          0, 0, 1, sub { });
-  			};
-  			next if $@;
-  			$new_urls->{$ra->{repos_root}}->{$new} =
-  			        { ref_id => $ref_id,
-  				  old_repo_id => $repo_id,
-  				  old_path => $path };
-  		}
-  	}
-  
-  	my @emptied;
-  	foreach my $url (keys %$new_urls) {
-  		# see if we can re-use an existing [svn-remote "repo_id"]
-  		# instead of creating a(n ugly) new section:
-  		my $repo_id = $root_repos->{$url} || $url;
-  
-  		my $fetch = $new_urls->{$url};
-  		foreach my $path (keys %$fetch) {
-  			my $x = $fetch->{$path};
-  			Git::SVN->init($url, $path, $repo_id, $x->{ref_id});
-  			my $pfx = "svn-remote.$x->{old_repo_id}";
-  
-  			my $old_fetch = quotemeta("$x->{old_path}:".
-  			                          "$x->{ref_id}");
-  			command_noisy(qw/config --unset/,
-  			              "$pfx.fetch", '^'. $old_fetch . '$');
-  			delete $r->{$x->{old_repo_id}}->
-  			       {fetch}->{$x->{old_path}};
-  			if (!keys %{$r->{$x->{old_repo_id}}->{fetch}}) {
-  				command_noisy(qw/config --unset/,
-  				              "$pfx.url");
-  				push @emptied, $x->{old_repo_id}
-  			}
-  		}
-  	}
-  	if (@emptied) {
-  		my $file = $ENV{GIT_CONFIG} ||
-  			command_oneline(qw(rev-parse --git-path config));
-  		print STDERR <<EOF;
-  The following [svn-remote] sections in your config file ($file) are empty
-  and can be safely removed:
-  EOF
-  		print STDERR "[svn-remote \"$_\"]\n" foreach @emptied;
-  	}
-  }
-  
-  sub migration_check {
-  	migrate_from_v0();
-  	migrate_from_v1();
-  	migrate_from_v2();
-  	minimize_connections() if $_minimize;
-  }
-  
-  1;
-GIT_SVN_MIGRATION
-
-$fatpacked{"Git/SVN/Prompt.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'GIT_SVN_PROMPT';
-  package Git::SVN::Prompt;
-  use strict;
-  use warnings;
-  require SVN::Core;
-  use vars qw/$_no_auth_cache $_username/;
-  
-  sub simple {
-  	my ($cred, $realm, $default_username, $may_save, $pool) = @_;
-  	$may_save = undef if $_no_auth_cache;
-  	$default_username = $_username if defined $_username;
-  	if (defined $default_username && length $default_username) {
-  		if (defined $realm && length $realm) {
-  			print STDERR "Authentication realm: $realm\n";
-  			STDERR->flush;
-  		}
-  		$cred->username($default_username);
-  	} else {
-  		username($cred, $realm, $may_save, $pool);
-  	}
-  	$cred->password(_read_password("Password for '" .
-  	                               $cred->username . "': ", $realm));
-  	$cred->may_save($may_save);
-  	$SVN::_Core::SVN_NO_ERROR;
-  }
-  
-  sub ssl_server_trust {
-  	my ($cred, $realm, $failures, $cert_info, $may_save, $pool) = @_;
-  	$may_save = undef if $_no_auth_cache;
-  	print STDERR "Error validating server certificate for '$realm':\n";
-  	{
-  		no warnings 'once';
-  		# All variables SVN::Auth::SSL::* are used only once,
-  		# so we're shutting up Perl warnings about this.
-  		if ($failures & $SVN::Auth::SSL::UNKNOWNCA) {
-  			print STDERR " - The certificate is not issued ",
-  			    "by a trusted authority. Use the\n",
-  			    "   fingerprint to validate ",
-  			    "the certificate manually!\n";
-  		}
-  		if ($failures & $SVN::Auth::SSL::CNMISMATCH) {
-  			print STDERR " - The certificate hostname ",
-  			    "does not match.\n";
-  		}
-  		if ($failures & $SVN::Auth::SSL::NOTYETVALID) {
-  			print STDERR " - The certificate is not yet valid.\n";
-  		}
-  		if ($failures & $SVN::Auth::SSL::EXPIRED) {
-  			print STDERR " - The certificate has expired.\n";
-  		}
-  		if ($failures & $SVN::Auth::SSL::OTHER) {
-  			print STDERR " - The certificate has ",
-  			    "an unknown error.\n";
-  		}
-  	} # no warnings 'once'
-  	printf STDERR
-  	        "Certificate information:\n".
-  	        " - Hostname: %s\n".
-  	        " - Valid: from %s until %s\n".
-  	        " - Issuer: %s\n".
-  	        " - Fingerprint: %s\n",
-  	        map $cert_info->$_, qw(hostname valid_from valid_until
-  	                               issuer_dname fingerprint);
-  	my $choice;
-  prompt:
-  	my $options = $may_save ?
-  	      "(R)eject, accept (t)emporarily or accept (p)ermanently? " :
-  	      "(R)eject or accept (t)emporarily? ";
-  	STDERR->flush;
-  	$choice = lc(substr(Git::prompt("Certificate problem.\n" . $options) || 'R', 0, 1));
-  	if ($choice eq 't') {
-  		$cred->may_save(undef);
-  	} elsif ($choice eq 'r') {
-  		return -1;
-  	} elsif ($may_save && $choice eq 'p') {
-  		$cred->may_save($may_save);
-  	} else {
-  		goto prompt;
-  	}
-  	$cred->accepted_failures($failures);
-  	$SVN::_Core::SVN_NO_ERROR;
-  }
-  
-  sub ssl_client_cert {
-  	my ($cred, $realm, $may_save, $pool) = @_;
-  	$may_save = undef if $_no_auth_cache;
-  	print STDERR "Client certificate filename: ";
-  	STDERR->flush;
-  	chomp(my $filename = <STDIN>);
-  	$cred->cert_file($filename);
-  	$cred->may_save($may_save);
-  	$SVN::_Core::SVN_NO_ERROR;
-  }
-  
-  sub ssl_client_cert_pw {
-  	my ($cred, $realm, $may_save, $pool) = @_;
-  	$may_save = undef if $_no_auth_cache;
-  	$cred->password(_read_password("Password: ", $realm));
-  	$cred->may_save($may_save);
-  	$SVN::_Core::SVN_NO_ERROR;
-  }
-  
-  sub username {
-  	my ($cred, $realm, $may_save, $pool) = @_;
-  	$may_save = undef if $_no_auth_cache;
-  	if (defined $realm && length $realm) {
-  		print STDERR "Authentication realm: $realm\n";
-  	}
-  	my $username;
-  	if (defined $_username) {
-  		$username = $_username;
-  	} else {
-  		$username = Git::prompt("Username: ");
-  	}
-  	$cred->username($username);
-  	$cred->may_save($may_save);
-  	$SVN::_Core::SVN_NO_ERROR;
-  }
-  
-  sub _read_password {
-  	my ($prompt, $realm) = @_;
-  	my $password = Git::prompt($prompt, 1);
-  	$password;
-  }
-  
-  1;
-  __END__
-  
-  =head1 NAME
-  
-  Git::SVN::Prompt - authentication callbacks for git-svn
-  
-  =head1 SYNOPSIS
-  
-      use Git::SVN::Prompt qw(simple ssl_client_cert ssl_client_cert_pw
-                              ssl_server_trust username);
-      use SVN::Client ();
-  
-      my $cached_simple = SVN::Client::get_simple_provider();
-      my $git_simple = SVN::Client::get_simple_prompt_provider(\&simple, 2);
-      my $cached_ssl = SVN::Client::get_ssl_server_trust_file_provider();
-      my $git_ssl = SVN::Client::get_ssl_server_trust_prompt_provider(
-          \&ssl_server_trust);
-      my $cached_cert = SVN::Client::get_ssl_client_cert_file_provider();
-      my $git_cert = SVN::Client::get_ssl_client_cert_prompt_provider(
-          \&ssl_client_cert, 2);
-      my $cached_cert_pw = SVN::Client::get_ssl_client_cert_pw_file_provider();
-      my $git_cert_pw = SVN::Client::get_ssl_client_cert_pw_prompt_provider(
-          \&ssl_client_cert_pw, 2);
-      my $cached_username = SVN::Client::get_username_provider();
-      my $git_username = SVN::Client::get_username_prompt_provider(
-          \&username, 2);
-  
-      my $ctx = new SVN::Client(
-          auth => [
-              $cached_simple, $git_simple,
-              $cached_ssl, $git_ssl,
-              $cached_cert, $git_cert,
-              $cached_cert_pw, $git_cert_pw,
-              $cached_username, $git_username
-          ]);
-  
-  =head1 DESCRIPTION
-  
-  This module is an implementation detail of the "git svn" command.
-  It implements git-svn's authentication policy.  Do not use it unless
-  you are developing git-svn.
-  
-  The interface will change as git-svn evolves.
-  
-  =head1 DEPENDENCIES
-  
-  L<SVN::Core>.
-  
-  =head1 SEE ALSO
-  
-  L<SVN::Client>.
-  
-  =head1 INCOMPATIBILITIES
-  
-  None reported.
-  
-  =head1 BUGS
-  
-  None.
-GIT_SVN_PROMPT
-
-$fatpacked{"Git/SVN/Ra.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'GIT_SVN_RA';
-  package Git::SVN::Ra;
-  use vars qw/@ISA $config_dir $_ignore_refs_regex $_log_window_size/;
-  use strict;
-  use warnings;
-  use Memoize;
-  use Git::SVN::Utils qw(
-  	canonicalize_url
-  	canonicalize_path
-  	add_path_to_url
-  );
-  
-  use SVN::Ra;
-  BEGIN {
-  	@ISA = qw(SVN::Ra);
-  }
-  
-  my ($ra_invalid, $can_do_switch, %ignored_err, $RA);
-  
-  BEGIN {
-  	# enforce temporary pool usage for some simple functions
-  	no strict 'refs';
-  	for my $f (qw/rev_proplist get_latest_revnum get_uuid get_repos_root
-  	              get_file/) {
-  		my $SUPER = "SUPER::$f";
-  		*$f = sub {
-  			my $self = shift;
-  			my $pool = SVN::Pool->new;
-  			my @ret = $self->$SUPER(@_,$pool);
-  			$pool->clear;
-  			wantarray ? @ret : $ret[0];
-  		};
-  	}
-  }
-  
-  # serf has a bug that leads to a coredump upon termination if the
-  # remote access object is left around (not fixed yet in serf 1.3.1).
-  # Explicitly free it to work around the issue.
-  END {
-  	$RA = undef;
-  	$ra_invalid = 1;
-  }
-  
-  sub _auth_providers () {
-  	require SVN::Client;
-  	my @rv = (
-  	  SVN::Client::get_simple_provider(),
-  	  SVN::Client::get_ssl_server_trust_file_provider(),
-  	  SVN::Client::get_simple_prompt_provider(
-  	    \&Git::SVN::Prompt::simple, 2),
-  	  SVN::Client::get_ssl_client_cert_file_provider(),
-  	  SVN::Client::get_ssl_client_cert_prompt_provider(
-  	    \&Git::SVN::Prompt::ssl_client_cert, 2),
-  	  SVN::Client::get_ssl_client_cert_pw_file_provider(),
-  	  SVN::Client::get_ssl_client_cert_pw_prompt_provider(
-  	    \&Git::SVN::Prompt::ssl_client_cert_pw, 2),
-  	  SVN::Client::get_username_provider(),
-  	  SVN::Client::get_ssl_server_trust_prompt_provider(
-  	    \&Git::SVN::Prompt::ssl_server_trust),
-  	  SVN::Client::get_username_prompt_provider(
-  	    \&Git::SVN::Prompt::username, 2)
-  	);
-  
-  	# earlier 1.6.x versions would segfault, and <= 1.5.x didn't have
-  	# this function
-  	if (::compare_svn_version('1.6.15') >= 0) {
-  		my $config = SVN::Core::config_get_config($config_dir);
-  		my ($p, @a);
-  		# config_get_config returns all config files from
-  		# ~/.subversion, auth_get_platform_specific_client_providers
-  		# just wants the config "file".
-  		@a = ($config->{'config'}, undef);
-  		$p = SVN::Core::auth_get_platform_specific_client_providers(@a);
-  		# Insert the return value from
-  		# auth_get_platform_specific_providers
-  		unshift @rv, @$p;
-  	}
-  	\@rv;
-  }
-  
-  sub prepare_config_once {
-  	SVN::_Core::svn_config_ensure($config_dir, undef);
-  	my ($baton, $callbacks) = SVN::Core::auth_open_helper(_auth_providers);
-  	my $config = SVN::Core::config_get_config($config_dir);
-  	my $conf_t = $config->{'config'};
-  
-  	no warnings 'once';
-  	# The usage of $SVN::_Core::SVN_CONFIG_* variables
-  	# produces warnings that variables are used only once.
-  	# I had not found the better way to shut them up, so
-  	# the warnings of type 'once' are disabled in this block.
-  	if (SVN::_Core::svn_config_get_bool($conf_t,
-  	    $SVN::_Core::SVN_CONFIG_SECTION_AUTH,
-  	    $SVN::_Core::SVN_CONFIG_OPTION_STORE_PASSWORDS,
-  	    1) == 0) {
-  		my $val = '1';
-  		if (::compare_svn_version('1.9.0') < 0) { # pre-SVN r1553823
-  			my $dont_store_passwords = 1;
-  			$val = bless \$dont_store_passwords, "_p_void";
-  		}
-  		SVN::_Core::svn_auth_set_parameter($baton,
-  		    $SVN::_Core::SVN_AUTH_PARAM_DONT_STORE_PASSWORDS,
-  		    $val);
-  	}
-  	if (SVN::_Core::svn_config_get_bool($conf_t,
-  	    $SVN::_Core::SVN_CONFIG_SECTION_AUTH,
-  	    $SVN::_Core::SVN_CONFIG_OPTION_STORE_AUTH_CREDS,
-  	    1) == 0) {
-  		$Git::SVN::Prompt::_no_auth_cache = 1;
-  	}
-  
-  	return ($config, $baton, $callbacks);
-  } # no warnings 'once'
-  
-  INIT {
-  	Memoize::memoize '_auth_providers';
-  	Memoize::memoize 'prepare_config_once';
-  }
-  
-  sub new {
-  	my ($class, $url) = @_;
-  	$url = canonicalize_url($url);
-  	return $RA if ($RA && $RA->url eq $url);
-  
-  	::_req_svn();
-  
-  	$RA = undef;
-  	my ($config, $baton, $callbacks) = prepare_config_once();
-  	my $self = SVN::Ra->new(url => $url, auth => $baton,
-  	                      config => $config,
-  			      pool => SVN::Pool->new,
-  	                      auth_provider_callbacks => $callbacks);
-  	$RA = bless $self, $class;
-  
-  	# Make sure its canonicalized
-  	$self->url($url);
-  	$self->{svn_path} = $url;
-  	$self->{repos_root} = $self->get_repos_root;
-  	$self->{svn_path} =~ s#^\Q$self->{repos_root}\E(/|$)##;
-  	$self->{cache} = { check_path => { r => 0, data => {} },
-  	                   get_dir => { r => 0, data => {} } };
-  
-  	return $RA;
-  }
-  
-  sub url {
-  	my $self = shift;
-  
-  	if (@_) {
-  		my $url = shift;
-  		$self->{url} = canonicalize_url($url);
-  		return;
-  	}
-  
-  	return $self->{url};
-  }
-  
-  sub check_path {
-  	my ($self, $path, $r) = @_;
-  	my $cache = $self->{cache}->{check_path};
-  	if ($r == $cache->{r} && exists $cache->{data}->{$path}) {
-  		return $cache->{data}->{$path};
-  	}
-  	my $pool = SVN::Pool->new;
-  	my $t = $self->SUPER::check_path($path, $r, $pool);
-  	$pool->clear;
-  	if ($r != $cache->{r}) {
-  		%{$cache->{data}} = ();
-  		$cache->{r} = $r;
-  	}
-  	$cache->{data}->{$path} = $t;
-  }
-  
-  sub get_dir {
-  	my ($self, $dir, $r) = @_;
-  	my $cache = $self->{cache}->{get_dir};
-  	if ($r == $cache->{r}) {
-  		if (my $x = $cache->{data}->{$dir}) {
-  			return wantarray ? @$x : $x->[0];
-  		}
-  	}
-  	my $pool = SVN::Pool->new;
-  	my ($d, undef, $props);
-  
-  	if (::compare_svn_version('1.4.0') >= 0) {
-  		# n.b. in addition to being potentially more efficient,
-  		# this works around what appears to be a bug in some
-  		# SVN 1.8 versions
-  		my $kind = 1; # SVN_DIRENT_KIND
-  		($d, undef, $props) = $self->get_dir2($dir, $r, $kind, $pool);
-  	} else {
-  		($d, undef, $props) = $self->SUPER::get_dir($dir, $r, $pool);
-  	}
-  	my %dirents = map { $_ => { kind => $d->{$_}->kind } } keys %$d;
-  	$pool->clear;
-  	if ($r != $cache->{r}) {
-  		%{$cache->{data}} = ();
-  		$cache->{r} = $r;
-  	}
-  	$cache->{data}->{$dir} = [ \%dirents, $r, $props ];
-  	wantarray ? (\%dirents, $r, $props) : \%dirents;
-  }
-  
-  # get_log(paths, start, end, limit,
-  #         discover_changed_paths, strict_node_history, receiver)
-  sub get_log {
-  	my ($self, @args) = @_;
-  	my $pool = SVN::Pool->new;
-  
-  	# svn_log_changed_path_t objects passed to get_log are likely to be
-  	# overwritten even if only the refs are copied to an external variable,
-  	# so we should dup the structures in their entirety.  Using an
-  	# externally passed pool (instead of our temporary and quickly cleared
-  	# pool in Git::SVN::Ra) does not help matters at all...
-  	my $receiver = pop @args;
-  	my $prefix = "/".$self->{svn_path};
-  	$prefix =~ s#/+($)##;
-  	my $prefix_regex = qr#^\Q$prefix\E#;
-  	push(@args, sub {
-  		my ($paths) = $_[0];
-  		return &$receiver(@_) unless $paths;
-  		$_[0] = ();
-  		foreach my $p (keys %$paths) {
-  			my $i = $paths->{$p};
-  			# Make path relative to our url, not repos_root
-  			$p =~ s/$prefix_regex//;
-  			my %s = map { $_ => $i->$_; }
-  				qw/copyfrom_path copyfrom_rev action/;
-  			if ($s{'copyfrom_path'}) {
-  				$s{'copyfrom_path'} =~ s/$prefix_regex//;
-  				$s{'copyfrom_path'} = canonicalize_path($s{'copyfrom_path'});
-  			}
-  			$_[0]{$p} = \%s;
-  		}
-  		&$receiver(@_);
-  	});
-  
-  
-  	# the limit parameter was not supported in SVN 1.1.x, so we
-  	# drop it.  Therefore, the receiver callback passed to it
-  	# is made aware of this limitation by being wrapped if
-  	# the limit passed to is being wrapped.
-  	if (::compare_svn_version('1.2.0') <= 0) {
-  		my $limit = splice(@args, 3, 1);
-  		if ($limit > 0) {
-  			my $receiver = pop @args;
-  			push(@args, sub { &$receiver(@_) if (--$limit >= 0) });
-  		}
-  	}
-  	my $ret = $self->SUPER::get_log(@args, $pool);
-  	$pool->clear;
-  	$ret;
-  }
-  
-  # uncommon, only for ancient SVN (<= 1.4.2)
-  sub trees_match {
-  	require IO::File;
-  	require SVN::Client;
-  	my ($self, $url1, $rev1, $url2, $rev2) = @_;
-  	my $ctx = SVN::Client->new(auth => _auth_providers);
-  	my $out = IO::File->new_tmpfile;
-  
-  	# older SVN (1.1.x) doesn't take $pool as the last parameter for
-  	# $ctx->diff(), so we'll create a default one
-  	my $pool = SVN::Pool->new_default_sub;
-  
-  	$ra_invalid = 1; # this will open a new SVN::Ra connection to $url1
-  	$ctx->diff([], $url1, $rev1, $url2, $rev2, 1, 1, 0, $out, $out);
-  	$out->flush;
-  	my $ret = (($out->stat)[7] == 0);
-  	close $out or croak $!;
-  
-  	$ret;
-  }
-  
-  sub get_commit_editor {
-  	my ($self, $log, $cb, $pool) = @_;
-  
-  	my @lock = (::compare_svn_version('1.2.0') >= 0) ? (undef, 0) : ();
-  	$self->SUPER::get_commit_editor($log, $cb, @lock, $pool);
-  }
-  
-  sub gs_do_update {
-  	my ($self, $rev_a, $rev_b, $gs, $editor) = @_;
-  	my $new = ($rev_a == $rev_b);
-  	my $path = $gs->path;
-  
-  	if ($new && -e $gs->{index}) {
-  		unlink $gs->{index} or die
-  		  "Couldn't unlink index: $gs->{index}: $!\n";
-  	}
-  	my $pool = SVN::Pool->new;
-  	$editor->set_path_strip($path);
-  	my (@pc) = split m#/#, $path;
-  	my $reporter = $self->do_update($rev_b, (@pc ? shift @pc : ''),
-  	                                1, $editor, $pool);
-  	my @lock = (::compare_svn_version('1.2.0') >= 0) ? (undef) : ();
-  
-  	# Since we can't rely on svn_ra_reparent being available, we'll
-  	# just have to do some magic with set_path to make it so
-  	# we only want a partial path.
-  	my $sp = '';
-  	my $final = join('/', @pc);
-  	while (@pc) {
-  		$reporter->set_path($sp, $rev_b, 0, @lock, $pool);
-  		$sp .= '/' if length $sp;
-  		$sp .= shift @pc;
-  	}
-  	die "BUG: '$sp' != '$final'\n" if ($sp ne $final);
-  
-  	$reporter->set_path($sp, $rev_a, $new, @lock, $pool);
-  
-  	$reporter->finish_report($pool);
-  	$pool->clear;
-  	$editor->{git_commit_ok};
-  }
-  
-  # this requires SVN 1.4.3 or later (do_switch didn't work before 1.4.3, and
-  # svn_ra_reparent didn't work before 1.4)
-  sub gs_do_switch {
-  	my ($self, $rev_a, $rev_b, $gs, $url_b, $editor) = @_;
-  	my $path = $gs->path;
-  	my $pool = SVN::Pool->new;
-  
-  	my $old_url = $self->url;
-  	my $full_url = add_path_to_url( $self->url, $path );
-  	my ($ra, $reparented);
-  
-  	if ($old_url =~ m#^svn(\+\w+)?://# ||
-  	    ($full_url =~ m#^https?://# &&
-  	     canonicalize_url($full_url) ne $full_url)) {
-  		$_[0] = undef;
-  		$self = undef;
-  		$RA = undef;
-  		$ra = Git::SVN::Ra->new($full_url);
-  		$ra_invalid = 1;
-  	} elsif ($old_url ne $full_url) {
-  		SVN::_Ra::svn_ra_reparent(
-  			$self->{session},
-  			canonicalize_url($full_url),
-  			$pool
-  		);
-  		$self->url($full_url);
-  		$reparented = 1;
-  	}
-  
-  	$ra ||= $self;
-  	$url_b = canonicalize_url($url_b);
-  	my $reporter = $ra->do_switch($rev_b, '', 1, $url_b, $editor, $pool);
-  	my @lock = (::compare_svn_version('1.2.0') >= 0) ? (undef) : ();
-  	$reporter->set_path('', $rev_a, 0, @lock, $pool);
-  	$reporter->finish_report($pool);
-  
-  	if ($reparented) {
-  		SVN::_Ra::svn_ra_reparent($self->{session}, $old_url, $pool);
-  		$self->url($old_url);
-  	}
-  
-  	$pool->clear;
-  	$editor->{git_commit_ok};
-  }
-  
-  sub longest_common_path {
-  	my ($gsv, $globs) = @_;
-  	my %common;
-  	my $common_max = scalar @$gsv;
-  
-  	foreach my $gs (@$gsv) {
-  		my @tmp = split m#/#, $gs->path;
-  		my $p = '';
-  		foreach (@tmp) {
-  			$p .= length($p) ? "/$_" : $_;
-  			$common{$p} ||= 0;
-  			$common{$p}++;
-  		}
-  	}
-  	$globs ||= [];
-  	$common_max += scalar @$globs;
-  	foreach my $glob (@$globs) {
-  		my @tmp = split m#/#, $glob->{path}->{left};
-  		my $p = '';
-  		foreach (@tmp) {
-  			$p .= length($p) ? "/$_" : $_;
-  			$common{$p} ||= 0;
-  			$common{$p}++;
-  		}
-  	}
-  
-  	my $longest_path = '';
-  	foreach (sort {length $b <=> length $a} keys %common) {
-  		if ($common{$_} == $common_max) {
-  			$longest_path = $_;
-  			last;
-  		}
-  	}
-  	$longest_path;
-  }
-  
-  sub gs_fetch_loop_common {
-  	my ($self, $base, $head, $gsv, $globs) = @_;
-  	return if ($base > $head);
-  	# Make sure the cat_blob open2 FileHandle is created before calling
-  	# SVN::Pool::new_default so that it does not incorrectly end up in the pool.
-  	$::_repository->_open_cat_blob_if_needed;
-  	my $gpool = SVN::Pool->new_default;
-  	my $ra_url = $self->url;
-  	my $reload_ra = sub {
-  		$_[0] = undef;
-  		$self = undef;
-  		$RA = undef;
-  		$gpool->clear;
-  		$self = Git::SVN::Ra->new($ra_url);
-  		$ra_invalid = undef;
-  	};
-  	my $inc = $_log_window_size;
-  	my ($min, $max) = ($base, $head < $base + $inc ? $head : $base + $inc);
-  	my $longest_path = longest_common_path($gsv, $globs);
-  	my $find_trailing_edge;
-  	while (1) {
-  		my %revs;
-  		my $err;
-  		my $err_handler = $SVN::Error::handler;
-  		$SVN::Error::handler = sub {
-  			($err) = @_;
-  			skip_unknown_revs($err);
-  		};
-  		sub _cb {
-  			my ($paths, $r, $author, $date, $log) = @_;
-  			[ $paths,
-  			  { author => $author, date => $date, log => $log } ];
-  		}
-  		$self->get_log([$longest_path], $min, $max, 0, 1, 1,
-  		               sub { $revs{$_[1]} = _cb(@_) });
-  		if ($err) {
-  			print "Checked through r$max\r";
-  		} else {
-  			$find_trailing_edge = 1;
-  		}
-  		if ($err and $find_trailing_edge) {
-  			print STDERR "Path '$longest_path' ",
-  				     "was probably deleted:\n",
-  				     $err->expanded_message,
-  				     "\nWill attempt to follow ",
-  				     "revisions r$min .. r$max ",
-  				     "committed before the deletion\n";
-  			my $hi = $max;
-  			while (--$hi >= $min) {
-  				my $ok;
-  				$self->get_log([$longest_path], $min, $hi,
-  				               0, 1, 1, sub {
-  				               $ok = $_[1];
-  				               $revs{$_[1]} = _cb(@_) });
-  				if ($ok) {
-  					print STDERR "r$min .. r$ok OK\n";
-  					last;
-  				}
-  			}
-  			$find_trailing_edge = 0;
-  		}
-  		$SVN::Error::handler = $err_handler;
-  
-  		my %exists = map { $_->path => $_ } @$gsv;
-  		foreach my $r (sort {$a <=> $b} keys %revs) {
-  			my ($paths, $logged) = @{delete $revs{$r}};
-  
-  			foreach my $gs ($self->match_globs(\%exists, $paths,
-  			                                   $globs, $r)) {
-  				if ($gs->rev_map_max >= $r) {
-  					next;
-  				}
-  				next unless $gs->match_paths($paths, $r);
-  				$gs->{logged_rev_props} = $logged;
-  				if (my $last_commit = $gs->last_commit) {
-  					$gs->assert_index_clean($last_commit);
-  				}
-  				my $log_entry = $gs->do_fetch($paths, $r);
-  				if ($log_entry) {
-  					$gs->do_git_commit($log_entry);
-  				}
-  				$Git::SVN::INDEX_FILES{$gs->{index}} = 1;
-  			}
-  			foreach my $g (@$globs) {
-  				my $k = "svn-remote.$g->{remote}." .
-  				        "$g->{t}-maxRev";
-  				Git::SVN::tmp_config($k, $r);
-  			}
-  			$reload_ra->() if $ra_invalid;
-  		}
-  		# pre-fill the .rev_db since it'll eventually get filled in
-  		# with '0' x40 if something new gets committed
-  		foreach my $gs (@$gsv) {
-  			next if $gs->rev_map_max >= $max;
-  			next if defined $gs->rev_map_get($max);
-  			$gs->rev_map_set($max, 0 x40);
-  		}
-  		foreach my $g (@$globs) {
-  			my $k = "svn-remote.$g->{remote}.$g->{t}-maxRev";
-  			Git::SVN::tmp_config($k, $max);
-  		}
-  		last if $max >= $head;
-  		$min = $max + 1;
-  		$max += $inc;
-  		$max = $head if ($max > $head);
-  
-  		$reload_ra->();
-  	}
-  	Git::SVN::gc();
-  }
-  
-  sub get_dir_globbed {
-  	my ($self, $left, $depth, $r) = @_;
-  
-  	my @x = eval { $self->get_dir($left, $r) };
-  	return unless scalar @x == 3;
-  	my $dirents = $x[0];
-  	my @finalents;
-  	foreach my $de (keys %$dirents) {
-  		next if $dirents->{$de}->{kind} != $SVN::Node::dir;
-  		if ($depth > 1) {
-  			my @args = ("$left/$de", $depth - 1, $r);
-  			foreach my $dir ($self->get_dir_globbed(@args)) {
-  				push @finalents, "$de/$dir";
-  			}
-  		} else {
-  			push @finalents, $de;
-  		}
-  	}
-  	@finalents;
-  }
-  
-  # return value: 0 -- don't ignore, 1 -- ignore
-  sub is_ref_ignored {
-  	my ($g, $p) = @_;
-  	my $refname = $g->{ref}->full_path($p);
-  	return 1 if defined($g->{ignore_refs_regex}) &&
-  	            $refname =~ m!$g->{ignore_refs_regex}!;
-  	return 0 unless defined($_ignore_refs_regex);
-  	return 1 if $refname =~ m!$_ignore_refs_regex!o;
-  	return 0;
-  }
-  
-  sub match_globs {
-  	my ($self, $exists, $paths, $globs, $r) = @_;
-  
-  	sub get_dir_check {
-  		my ($self, $exists, $g, $r) = @_;
-  
-  		my @dirs = $self->get_dir_globbed($g->{path}->{left},
-  		                                  $g->{path}->{depth},
-  		                                  $r);
-  
-  		foreach my $de (@dirs) {
-  			my $p = $g->{path}->full_path($de);
-  			next if $exists->{$p};
-  			next if (length $g->{path}->{right} &&
-  				 ($self->check_path($p, $r) !=
-  				  $SVN::Node::dir));
-  			next unless $p =~ /$g->{path}->{regex}/;
-  			$exists->{$p} = Git::SVN->init($self->url, $p, undef,
-  					 $g->{ref}->full_path($de), 1);
-  		}
-  	}
-  	foreach my $g (@$globs) {
-  		if (my $path = $paths->{"/$g->{path}->{left}"}) {
-  			if ($path->{action} =~ /^[AR]$/) {
-  				get_dir_check($self, $exists, $g, $r);
-  			}
-  		}
-  		foreach (keys %$paths) {
-  			if (/$g->{path}->{left_regex}/ &&
-  			    !/$g->{path}->{regex}/) {
-  				next if $paths->{$_}->{action} !~ /^[AR]$/;
-  				get_dir_check($self, $exists, $g, $r);
-  			}
-  			next unless /$g->{path}->{regex}/;
-  			my $p = $1;
-  			my $pathname = $g->{path}->full_path($p);
-  			next if is_ref_ignored($g, $p);
-  			next if $exists->{$pathname};
-  			next if ($self->check_path($pathname, $r) !=
-  			         $SVN::Node::dir);
-  			$exists->{$pathname} = Git::SVN->init(
-  			                      $self->url, $pathname, undef,
-  			                      $g->{ref}->full_path($p), 1);
-  		}
-  		my $c = '';
-  		foreach (split m#/#, $g->{path}->{left}) {
-  			$c .= "/$_";
-  			next unless ($paths->{$c} &&
-  			             ($paths->{$c}->{action} =~ /^[AR]$/));
-  			get_dir_check($self, $exists, $g, $r);
-  		}
-  	}
-  	values %$exists;
-  }
-  
-  sub minimize_url {
-  	my ($self) = @_;
-  	return $self->url if ($self->url eq $self->{repos_root});
-  	my $url = $self->{repos_root};
-  	my @components = split(m!/!, $self->{svn_path});
-  	my $c = '';
-  	do {
-  		$url = add_path_to_url($url, $c);
-  		eval {
-  			my $ra = (ref $self)->new($url);
-  			my $latest = $ra->get_latest_revnum;
-  			$ra->get_log("", $latest, 0, 1, 0, 1, sub {});
-  		};
-  	} while ($@ && defined($c = shift @components));
-  
-  	return canonicalize_url($url);
-  }
-  
-  sub can_do_switch {
-  	my $self = shift;
-  	unless (defined $can_do_switch) {
-  		my $pool = SVN::Pool->new;
-  		my $rep = eval {
-  			$self->do_switch(1, '', 0, $self->url,
-  			                 SVN::Delta::Editor->new, $pool);
-  		};
-  		if ($@) {
-  			$can_do_switch = 0;
-  		} else {
-  			$rep->abort_report($pool);
-  			$can_do_switch = 1;
-  		}
-  		$pool->clear;
-  	}
-  	$can_do_switch;
-  }
-  
-  sub skip_unknown_revs {
-  	my ($err) = @_;
-  	my $errno = $err->apr_err();
-  	# Maybe the branch we're tracking didn't
-  	# exist when the repo started, so it's
-  	# not an error if it doesn't, just continue
-  	#
-  	# Wonderfully consistent library, eh?
-  	# 160013 - svn:// and file://
-  	# 175002 - http(s)://
-  	# 175007 - http(s):// (this repo required authorization, too...)
-  	#   More codes may be discovered later...
-  	if ($errno == 175007 || $errno == 175002 || $errno == 160013) {
-  		my $err_key = $err->expanded_message;
-  		# revision numbers change every time, filter them out
-  		$err_key =~ s/\d+/\0/g;
-  		$err_key = "$errno\0$err_key";
-  		unless ($ignored_err{$err_key}) {
-  			warn "W: Ignoring error from SVN, path probably ",
-  			     "does not exist: ($errno): ",
-  			     $err->expanded_message,"\n";
-  			warn "W: Do not be alarmed at the above message ",
-  			     "git-svn is just searching aggressively for ",
-  			     "old history.\n",
-  			     "This may take a while on large repositories\n";
-  			$ignored_err{$err_key} = 1;
-  		}
-  		return;
-  	}
-  	die "Error from SVN, ($errno): ", $err->expanded_message,"\n";
-  }
-  
-  1;
-  __END__
-  
-  =head1 NAME
-  
-  Git::SVN::Ra - Subversion remote access functions for git-svn
-  
-  =head1 SYNOPSIS
-  
-      use Git::SVN::Ra;
-  
-      my $ra = Git::SVN::Ra->new($branchurl);
-      my ($dirents, $fetched_revnum, $props) =
-          $ra->get_dir('.', $SVN::Core::INVALID_REVNUM);
-  
-  =head1 DESCRIPTION
-  
-  This is a wrapper around the L<SVN::Ra> module for use by B<git-svn>.
-  It fills in some default parameters (such as the authentication
-  scheme), smooths over incompatibilities between libsvn versions, adds
-  caching, and implements some functions specific to B<git-svn>.
-  
-  Do not use it unless you are developing git-svn.  The interface will
-  change as git-svn evolves.
-  
-  =head1 DEPENDENCIES
-  
-  Subversion perl bindings,
-  L<Git::SVN>.
-  
-  C<Git::SVN::Ra> has not been tested using callers other than
-  B<git-svn> itself.
-  
-  =head1 SEE ALSO
-  
-  L<SVN::Ra>.
-  
-  =head1 INCOMPATIBILITIES
-  
-  None reported.
-  
-  =head1 BUGS
-  
-  None.
-GIT_SVN_RA
-
-$fatpacked{"Git/SVN/Utils.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'GIT_SVN_UTILS';
-  package Git::SVN::Utils;
-  
-  use strict;
-  use warnings;
-  
-  use SVN::Core;
-  
-  use base qw(Exporter);
-  
-  our @EXPORT_OK = qw(
-  	fatal
-  	can_compress
-  	canonicalize_path
-  	canonicalize_url
-  	join_paths
-  	add_path_to_url
-  );
-  
-  
-  =head1 NAME
-  
-  Git::SVN::Utils - utility functions used across Git::SVN
-  
-  =head1 SYNOPSIS
-  
-      use Git::SVN::Utils qw(functions to import);
-  
-  =head1 DESCRIPTION
-  
-  This module contains functions which are useful across many different
-  parts of Git::SVN.  Mostly it's a place to put utility functions
-  rather than duplicate the code or have classes grabbing at other
-  classes.
-  
-  =head1 FUNCTIONS
-  
-  All functions can be imported only on request.
-  
-  =head3 fatal
-  
-      fatal(@message);
-  
-  Display a message and exit with a fatal error code.
+  This library is free software; you can redistribute it and/or
+  modify it under the same terms as Perl itself.
   
   =cut
-  
-  # Note: not certain why this is in use instead of die.  Probably because
-  # the exit code of die is 255?  Doesn't appear to be used consistently.
-  sub fatal (@) { print STDERR "@_\n"; exit 1 }
-  
-  
-  =head3 can_compress
-  
-      my $can_compress = can_compress;
-  
-  Returns true if Compress::Zlib is available, false otherwise.
-  
-  =cut
-  
-  my $can_compress;
-  sub can_compress {
-  	return $can_compress if defined $can_compress;
-  
-  	return $can_compress = eval { require Compress::Zlib; };
-  }
-  
-  
-  =head3 canonicalize_path
-  
-      my $canoncalized_path = canonicalize_path($path);
-  
-  Converts $path into a canonical form which is safe to pass to the SVN
-  API as a file path.
-  
-  =cut
-  
-  # Turn foo/../bar into bar
-  sub _collapse_dotdot {
-  	my $path = shift;
-  
-  	1 while $path =~ s{/[^/]+/+\.\.}{};
-  	1 while $path =~ s{[^/]+/+\.\./}{};
-  	1 while $path =~ s{[^/]+/+\.\.}{};
-  
-  	return $path;
-  }
-  
-  
-  sub canonicalize_path {
-  	my $path = shift;
-  	my $rv;
-  
-  	# The 1.7 way to do it
-  	if ( defined &SVN::_Core::svn_dirent_canonicalize ) {
-  		$path = _collapse_dotdot($path);
-  		$rv = SVN::_Core::svn_dirent_canonicalize($path);
-  	}
-  	# The 1.6 way to do it
-  	# This can return undef on subversion-perl-1.4.2-2.el5 (CentOS 5.2)
-  	elsif ( defined &SVN::_Core::svn_path_canonicalize ) {
-  		$path = _collapse_dotdot($path);
-  		$rv = SVN::_Core::svn_path_canonicalize($path);
-  	}
-  
-  	return $rv if defined $rv;
-  
-  	# No SVN API canonicalization is available, or the SVN API
-  	# didn't return a successful result, do it ourselves
-  	return _canonicalize_path_ourselves($path);
-  }
-  
-  
-  sub _canonicalize_path_ourselves {
-  	my ($path) = @_;
-  	my $dot_slash_added = 0;
-  	if (substr($path, 0, 1) ne "/") {
-  		$path = "./" . $path;
-  		$dot_slash_added = 1;
-  	}
-  	$path =~ s#/+#/#g;
-  	$path =~ s#/\.(?:/|$)#/#g;
-  	$path = _collapse_dotdot($path);
-  	$path =~ s#/$##g;
-  	$path =~ s#^\./## if $dot_slash_added;
-  	$path =~ s#^\.$##;
-  	return $path;
-  }
-  
-  
-  =head3 canonicalize_url
-  
-      my $canonicalized_url = canonicalize_url($url);
-  
-  Converts $url into a canonical form which is safe to pass to the SVN
-  API as a URL.
-  
-  =cut
-  
-  sub canonicalize_url {
-  	my $url = shift;
-  
-  	# The 1.7 way to do it
-  	if ( defined &SVN::_Core::svn_uri_canonicalize ) {
-  		return SVN::_Core::svn_uri_canonicalize($url);
-  	}
-  	# There wasn't a 1.6 way to do it, so we do it ourself.
-  	else {
-  		return _canonicalize_url_ourselves($url);
-  	}
-  }
-  
-  
-  sub _canonicalize_url_path {
-  	my ($uri_path) = @_;
-  
-  	my @parts;
-  	foreach my $part (split m{/+}, $uri_path) {
-  		$part =~ s/([^!\$%&'()*+,.\/\w:=\@_`~-]|%(?![a-fA-F0-9]{2}))/sprintf("%%%02X",ord($1))/eg;
-  		push @parts, $part;
-  	}
-  
-  	return join('/', @parts);
-  }
-  
-  sub _canonicalize_url_ourselves {
-  	my ($url) = @_;
-  	if ($url =~ m#^([^:]+)://([^/]*)(.*)$#) {
-  		my ($scheme, $domain, $uri) = ($1, $2, _canonicalize_url_path(canonicalize_path($3)));
-  		$url = "$scheme://$domain$uri";
-  	}
-  	$url;
-  }
-  
-  
-  =head3 join_paths
-  
-      my $new_path = join_paths(@paths);
-  
-  Appends @paths together into a single path.  Any empty paths are ignored.
-  
-  =cut
-  
-  sub join_paths {
-  	my @paths = @_;
-  
-  	@paths = grep { defined $_ && length $_ } @paths;
-  
-  	return '' unless @paths;
-  	return $paths[0] if @paths == 1;
-  
-  	my $new_path = shift @paths;
-  	$new_path =~ s{/+$}{};
-  
-  	my $last_path = pop @paths;
-  	$last_path =~ s{^/+}{};
-  
-  	for my $path (@paths) {
-  		$path =~ s{^/+}{};
-  		$path =~ s{/+$}{};
-  		$new_path .= "/$path";
-  	}
-  
-  	return $new_path .= "/$last_path";
-  }
-  
-  
-  =head3 add_path_to_url
-  
-      my $new_url = add_path_to_url($url, $path);
-  
-  Appends $path onto the $url.  If $path is empty, $url is returned unchanged.
-  
-  =cut
-  
-  sub add_path_to_url {
-  	my($url, $path) = @_;
-  
-  	return $url if !defined $path or !length $path;
-  
-  	# Strip trailing and leading slashes so we don't
-  	# wind up with http://x.com///path
-  	$url  =~ s{/+$}{};
-  	$path =~ s{^/+}{};
-  
-  	# If a path has a % in it, URI escape it so it's not
-  	# mistaken for a URI escape later.
-  	$path =~ s{%}{%25}g;
-  
-  	return join '/', $url, $path;
-  }
-  
-  1;
-GIT_SVN_UTILS
+URI_FILE
 
-$fatpacked{"private-Error.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'PRIVATE-ERROR';
-  # Error.pm
-  #
-  # Copyright (c) 1997-8 Graham Barr <gbarr@ti.com>. All rights reserved.
-  # This program is free software; you can redistribute it and/or
-  # modify it under the same terms as Perl itself.
-  #
-  # Based on my original Error.pm, and Exceptions.pm by Peter Seibel
-  # <peter@weblogic.com> and adapted by Jesse Glick <jglick@sig.bsh.com>.
-  #
-  # but modified ***significantly***
-  
-  package Error;
+$fatpacked{"URI/file/Base.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'URI_FILE_BASE';
+  package URI::file::Base;
   
   use strict;
-  use vars qw($VERSION);
-  use 5.004;
+  use warnings;
   
-  $VERSION = "0.15009";
+  use URI::Escape ();
   
-  use overload (
-  	'""'	   =>	'stringify',
-  	'0+'	   =>	'value',
-  	'bool'     =>	sub { return 1; },
-  	'fallback' =>	1
-  );
+  our $VERSION = '5.12';
   
-  $Error::Depth = 0;	# Depth to pass to caller()
-  $Error::Debug = 0;	# Generate verbose stack traces
-  @Error::STACK = ();	# Clause stack for try
-  $Error::THROWN = undef;	# last error thrown, a workaround until die $ref works
-  
-  my $LAST;		# Last error created
-  my %ERROR;		# Last error associated with package
-  
-  sub throw_Error_Simple
+  sub new
   {
-      my $args = shift;
-      return Error::Simple->new($args->{'text'});
-  }
+      my $class = shift;
+      my $path  = shift;
+      $path = "" unless defined $path;
   
-  $Error::ObjectifyCallback = \&throw_Error_Simple;
+      my($auth, $escaped_auth, $escaped_path);
   
+      ($auth, $escaped_auth) = $class->_file_extract_authority($path);
+      ($path, $escaped_path) = $class->_file_extract_path($path);
   
-  # Exported subs are defined in Error::subs
-  
-  sub import {
-      shift;
-      local $Exporter::ExportLevel = $Exporter::ExportLevel + 1;
-      Error::subs->import(@_);
-  }
-  
-  # I really want to use last for the name of this method, but it is a keyword
-  # which prevent the syntax  last Error
-  
-  sub prior {
-      shift; # ignore
-  
-      return $LAST unless @_;
-  
-      my $pkg = shift;
-      return exists $ERROR{$pkg} ? $ERROR{$pkg} : undef
-  	unless ref($pkg);
-  
-      my $obj = $pkg;
-      my $err = undef;
-      if($obj->isa('HASH')) {
-  	$err = $obj->{'__Error__'}
-  	    if exists $obj->{'__Error__'};
-      }
-      elsif($obj->isa('GLOB')) {
-  	$err = ${*$obj}{'__Error__'}
-  	    if exists ${*$obj}{'__Error__'};
+      if (defined $auth) {
+  	$auth =~ s,%,%25,g unless $escaped_auth;
+  	$auth =~ s,([/?\#]), URI::Escape::escape_char($1),eg;
+  	$auth = "//$auth";
+  	if (defined $path) {
+  	    $path = "/$path" unless substr($path, 0, 1) eq "/";
+  	} else {
+  	    $path = "";
+  	}
+      } else {
+  	return undef unless defined $path;
+  	$auth = "";
       }
   
-      $err;
+      $path =~ s,([%;?]), URI::Escape::escape_char($1),eg unless $escaped_path;
+      $path =~ s/\#/%23/g;
+  
+      my $uri = $auth . $path;
+      $uri = "file:$uri" if substr($uri, 0, 1) eq "/";
+  
+      URI->new($uri, "file");
   }
   
-  sub flush {
-      shift; #ignore
-  
-      unless (@_) {
-         $LAST = undef;
-         return;
-      }
-  
-      my $pkg = shift;
-      return unless ref($pkg);
-  
-      undef $ERROR{$pkg} if defined $ERROR{$pkg};
+  sub _file_extract_authority
+  {
+      my($class, $path) = @_;
+      return undef unless $class->_file_is_absolute($path);
+      return $URI::file::DEFAULT_AUTHORITY;
   }
   
-  # Return as much information as possible about where the error
-  # happened. The -stacktrace element only exists if $Error::DEBUG
-  # was set when the error was created
+  sub _file_extract_path
+  {
+      return undef;
+  }
   
-  sub stacktrace {
+  sub _file_is_absolute
+  {
+      return 0;
+  }
+  
+  sub _file_is_localhost
+  {
+      shift; # class
+      my $host = lc(shift);
+      return 1 if $host eq "localhost";
+      eval {
+  	require Net::Domain;
+  	lc(Net::Domain::hostfqdn() || '') eq $host ||
+  	lc(Net::Domain::hostname() || '') eq $host;
+      };
+  }
+  
+  sub file
+  {
+      undef;
+  }
+  
+  sub dir
+  {
       my $self = shift;
-  
-      return $self->{'-stacktrace'}
-  	if exists $self->{'-stacktrace'};
-  
-      my $text = exists $self->{'-text'} ? $self->{'-text'} : "Died";
-  
-      $text .= sprintf(" at %s line %d.\n", $self->file, $self->line)
-  	unless($text =~ /\n$/s);
-  
-      $text;
+      $self->file(@_);
   }
   
-  # Allow error propagation, ie
-  #
-  # $ber->encode(...) or
-  #    return Error->prior($ber)->associate($ldap);
+  1;
+URI_FILE_BASE
+
+$fatpacked{"URI/file/FAT.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'URI_FILE_FAT';
+  package URI::file::FAT;
   
-  sub associate {
-      my $err = shift;
-      my $obj = shift;
+  use strict;
+  use warnings;
   
-      return unless ref($obj);
+  use parent 'URI::file::Win32';
   
-      if($obj->isa('HASH')) {
-  	$obj->{'__Error__'} = $err;
+  our $VERSION = '5.12';
+  
+  sub fix_path
+  {
+      shift; # class
+      for (@_) {
+  	# turn it into 8.3 names
+  	my @p = map uc, split(/\./, $_, -1);
+  	return if @p > 2;     # more than 1 dot is not allowed
+  	@p = ("") unless @p;  # split bug? (returns nothing when splitting "")
+  	$_ = substr($p[0], 0, 8);
+          if (@p > 1) {
+  	    my $ext = substr($p[1], 0, 3);
+  	    $_ .= ".$ext" if length $ext;
+  	}
       }
-      elsif($obj->isa('GLOB')) {
-  	${*$obj}{'__Error__'} = $err;
-      }
-      $obj = ref($obj);
-      $ERROR{ ref($obj) } = $err;
+      1;  # ok
+  }
   
+  1;
+URI_FILE_FAT
+
+$fatpacked{"URI/file/Mac.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'URI_FILE_MAC';
+  package URI::file::Mac;
+  
+  use strict;
+  use warnings;
+  
+  use parent 'URI::file::Base';
+  
+  use URI::Escape qw(uri_unescape);
+  
+  our $VERSION = '5.12';
+  
+  sub _file_extract_path
+  {
+      my $class = shift;
+      my $path = shift;
+  
+      my @pre;
+      if ($path =~ s/^(:+)//) {
+  	if (length($1) == 1) {
+  	    @pre = (".") unless length($path);
+  	} else {
+  	    @pre = ("..") x (length($1) - 1);
+  	}
+      } else { #absolute
+  	$pre[0] = "";
+      }
+  
+      my $isdir = ($path =~ s/:$//);
+      $path =~ s,([%/;]), URI::Escape::escape_char($1),eg;
+  
+      my @path = split(/:/, $path, -1);
+      for (@path) {
+  	if ($_ eq "." || $_ eq "..") {
+  	    $_ = "%2E" x length($_);
+  	}
+  	$_ = ".." unless length($_);
+      }
+      push (@path,"") if $isdir;
+      (join("/", @pre, @path), 1);
+  }
+  
+  
+  sub file
+  {
+      my $class = shift;
+      my $uri = shift;
+      my @path;
+  
+      my $auth = $uri->authority;
+      if (defined $auth) {
+  	if (lc($auth) ne "localhost" && $auth ne "") {
+  	    my $u_auth = uri_unescape($auth);
+  	    if (!$class->_file_is_localhost($u_auth)) {
+  		# some other host (use it as volume name)
+  		@path = ("", $auth);
+  		# XXX or just return to make it illegal;
+  	    }
+  	}
+      }
+      my @ps = split("/", $uri->path, -1);
+      shift @ps if @path;
+      push(@path, @ps);
+  
+      my $pre = "";
+      if (!@path) {
+  	return;  # empty path; XXX return ":" instead?
+      } elsif ($path[0] eq "") {
+  	# absolute
+  	shift(@path);
+  	if (@path == 1) {
+  	    return if $path[0] eq "";  # not root directory
+  	    push(@path, "");           # volume only, effectively append ":"
+  	}
+  	@ps = @path;
+  	@path = ();
+          my $part;
+  	for (@ps) {  #fix up "." and "..", including interior, in relatives
+  	    next if $_ eq ".";
+  	    $part = $_ eq ".." ? "" : $_;
+  	    push(@path,$part);
+  	}
+  	if ($ps[-1] eq "..") {  #if this happens, we need another :
+  	    push(@path,"");
+  	}
+  	
+      } else {
+  	$pre = ":";
+  	@ps = @path;
+  	@path = ();
+          my $part;
+  	for (@ps) {  #fix up "." and "..", including interior, in relatives
+  	    next if $_ eq ".";
+  	    $part = $_ eq ".." ? "" : $_;
+  	    push(@path,$part);
+  	}
+  	if ($ps[-1] eq "..") {  #if this happens, we need another :
+  	    push(@path,"");
+  	}
+  	
+      }
+      return unless $pre || @path;
+      for (@path) {
+  	s/;.*//;  # get rid of parameters
+  	#return unless length; # XXX
+  	$_ = uri_unescape($_);
+  	return if /\0/;
+  	return if /:/;  # Should we?
+      }
+      $pre . join(":", @path);
+  }
+  
+  sub dir
+  {
+      my $class = shift;
+      my $path = $class->file(@_);
+      return unless defined $path;
+      $path .= ":" unless $path =~ /:$/;
+      $path;
+  }
+  
+  1;
+URI_FILE_MAC
+
+$fatpacked{"URI/file/OS2.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'URI_FILE_OS2';
+  package URI::file::OS2;
+  
+  use strict;
+  use warnings;
+  
+  use parent 'URI::file::Win32';
+  
+  our $VERSION = '5.12';
+  
+  # The Win32 version translates k:/foo to file://k:/foo  (?!)
+  # We add an empty host
+  
+  sub _file_extract_authority
+  {
+      my $class = shift;
+      return $1 if $_[0] =~ s,^\\\\([^\\]+),,;  # UNC
+      return $1 if $_[0] =~ s,^//([^/]+),,;     # UNC too?
+  
+      if ($_[0] =~ m#^[a-zA-Z]{1,2}:#) {	      # allow for ab: drives
+  	return "";
+      }
       return;
   }
   
-  sub new {
-      my $self = shift;
-      my($pkg,$file,$line) = caller($Error::Depth);
-  
-      my $err = bless {
-  	'-package' => $pkg,
-  	'-file'    => $file,
-  	'-line'    => $line,
-  	@_
-      }, $self;
-  
-      $err->associate($err->{'-object'})
-  	if(exists $err->{'-object'});
-  
-      # To always create a stacktrace would be very inefficient, so
-      # we only do it if $Error::Debug is set
-  
-      if($Error::Debug) {
-  	require Carp;
-  	local $Carp::CarpLevel = $Error::Depth;
-  	my $text = defined($err->{'-text'}) ? $err->{'-text'} : "Error";
-  	my $trace = Carp::longmess($text);
-  	# Remove try calls from the trace
-  	$trace =~ s/(\n\s+\S+__ANON__[^\n]+)?\n\s+eval[^\n]+\n\s+Error::subs::try[^\n]+(?=\n)//sog;
-  	$trace =~ s/(\n\s+\S+__ANON__[^\n]+)?\n\s+eval[^\n]+\n\s+Error::subs::run_clauses[^\n]+\n\s+Error::subs::try[^\n]+(?=\n)//sog;
-  	$err->{'-stacktrace'} = $trace
-      }
-  
-      $@ = $LAST = $ERROR{$pkg} = $err;
-  }
-  
-  # Throw an error. this contains some very gory code.
-  
-  sub throw {
-      my $self = shift;
-      local $Error::Depth = $Error::Depth + 1;
-  
-      # if we are not rethrow-ing then create the object to throw
-      $self = $self->new(@_) unless ref($self);
-  
-      die $Error::THROWN = $self;
-  }
-  
-  # syntactic sugar for
-  #
-  #    die with Error( ... );
-  
-  sub with {
-      my $self = shift;
-      local $Error::Depth = $Error::Depth + 1;
-  
-      $self->new(@_);
-  }
-  
-  # syntactic sugar for
-  #
-  #    record Error( ... ) and return;
-  
-  sub record {
-      my $self = shift;
-      local $Error::Depth = $Error::Depth + 1;
-  
-      $self->new(@_);
-  }
-  
-  # catch clause for
-  #
-  # try { ... } catch CLASS with { ... }
-  
-  sub catch {
-      my $pkg = shift;
-      my $code = shift;
-      my $clauses = shift || {};
-      my $catch = $clauses->{'catch'} ||= [];
-  
-      unshift @$catch,  $pkg, $code;
-  
-      $clauses;
-  }
-  
-  # Object query methods
-  
-  sub object {
-      my $self = shift;
-      exists $self->{'-object'} ? $self->{'-object'} : undef;
-  }
-  
   sub file {
-      my $self = shift;
-      exists $self->{'-file'} ? $self->{'-file'} : undef;
+    my $p = &URI::file::Win32::file;
+    return unless defined $p;
+    $p =~ s,\\,/,g;
+    $p;
   }
   
-  sub line {
-      my $self = shift;
-      exists $self->{'-line'} ? $self->{'-line'} : undef;
+  1;
+URI_FILE_OS2
+
+$fatpacked{"URI/file/QNX.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'URI_FILE_QNX';
+  package URI::file::QNX;
+  
+  use strict;
+  use warnings;
+  
+  use parent 'URI::file::Unix';
+  
+  our $VERSION = '5.12';
+  
+  sub _file_extract_path
+  {
+      my($class, $path) = @_;
+      # tidy path
+      $path =~ s,(.)//+,$1/,g; # ^// is correct
+      $path =~ s,(/\.)+/,/,g;
+      $path = "./$path" if $path =~ m,^[^:/]+:,,; # look like "scheme:"
+      $path;
   }
   
-  sub text {
-      my $self = shift;
-      exists $self->{'-text'} ? $self->{'-text'} : undef;
+  1;
+URI_FILE_QNX
+
+$fatpacked{"URI/file/Unix.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'URI_FILE_UNIX';
+  package URI::file::Unix;
+  
+  use strict;
+  use warnings;
+  
+  use parent 'URI::file::Base';
+  
+  use URI::Escape qw(uri_unescape);
+  
+  our $VERSION = '5.12';
+  
+  sub _file_extract_path
+  {
+      my($class, $path) = @_;
+  
+      # tidy path
+      $path =~ s,//+,/,g;
+      $path =~ s,(/\.)+/,/,g;
+      $path = "./$path" if $path =~ m,^[^:/]+:,,; # look like "scheme:"
+  
+      return $path;
   }
   
-  # overload methods
-  
-  sub stringify {
-      my $self = shift;
-      defined $self->{'-text'} ? $self->{'-text'} : "Died";
+  sub _file_is_absolute {
+      my($class, $path) = @_;
+      return $path =~ m,^/,;
   }
   
-  sub value {
-      my $self = shift;
-      exists $self->{'-value'} ? $self->{'-value'} : undef;
-  }
+  sub file
+  {
+      my $class = shift;
+      my $uri = shift;
+      my @path;
   
-  package Error::Simple;
-  
-  @Error::Simple::ISA = qw(Error);
-  
-  sub new {
-      my $self  = shift;
-      my $text  = "" . shift;
-      my $value = shift;
-      my(@args) = ();
-  
-      local $Error::Depth = $Error::Depth + 1;
-  
-      @args = ( -file => $1, -line => $2)
-  	if($text =~ s/\s+at\s+(\S+)\s+line\s+(\d+)(?:,\s*<[^>]*>\s+line\s+\d+)?\.?\n?$//s);
-      push(@args, '-value', 0 + $value)
-  	if defined($value);
-  
-      $self->SUPER::new(-text => $text, @args);
-  }
-  
-  sub stringify {
-      my $self = shift;
-      my $text = $self->SUPER::stringify;
-      $text .= sprintf(" at %s line %d.\n", $self->file, $self->line)
-  	unless($text =~ /\n$/s);
-      $text;
-  }
-  
-  ##########################################################################
-  ##########################################################################
-  
-  # Inspired by code from Jesse Glick <jglick@sig.bsh.com> and
-  # Peter Seibel <peter@weblogic.com>
-  
-  package Error::subs;
-  
-  use Exporter ();
-  use vars qw(@EXPORT_OK @ISA %EXPORT_TAGS);
-  
-  @EXPORT_OK   = qw(try with finally except otherwise);
-  %EXPORT_TAGS = (try => \@EXPORT_OK);
-  
-  @ISA = qw(Exporter);
-  
-  
-  sub blessed {
-  	my $item = shift;
-  	local $@; # don't kill an outer $@
-  	ref $item and eval { $item->can('can') };
-  }
-  
-  
-  sub run_clauses ($$$\@) {
-      my($clauses,$err,$wantarray,$result) = @_;
-      my $code = undef;
-  
-      $err = $Error::ObjectifyCallback->({'text' =>$err}) unless ref($err);
-  
-      CATCH: {
-  
-  	# catch
-  	my $catch;
-  	if(defined($catch = $clauses->{'catch'})) {
-  	    my $i = 0;
-  
-  	    CATCHLOOP:
-  	    for( ; $i < @$catch ; $i += 2) {
-  		my $pkg = $catch->[$i];
-  		unless(defined $pkg) {
-  		    #except
-  		    splice(@$catch,$i,2,$catch->[$i+1]->());
-  		    $i -= 2;
-  		    next CATCHLOOP;
-  		}
-  		elsif(blessed($err) && $err->isa($pkg)) {
-  		    $code = $catch->[$i+1];
-  		    while(1) {
-  			my $more = 0;
-  			local($Error::THROWN);
-  			my $ok = eval {
-  			    if($wantarray) {
-  				@{$result} = $code->($err,\$more);
-  			    }
-  			    elsif(defined($wantarray)) {
-  			        @{$result} = ();
-  				$result->[0] = $code->($err,\$more);
-  			    }
-  			    else {
-  				$code->($err,\$more);
-  			    }
-  			    1;
-  			};
-  			if( $ok ) {
-  			    next CATCHLOOP if $more;
-  			    undef $err;
-  			}
-  			else {
-  			    $err = defined($Error::THROWN)
-  				    ? $Error::THROWN : $@;
-                  $err = $Error::ObjectifyCallback->({'text' =>$err})
-                      unless ref($err);
-  			}
-  			last CATCH;
-  		    };
-  		}
-  	    }
-  	}
-  
-  	# otherwise
-  	my $owise;
-  	if(defined($owise = $clauses->{'otherwise'})) {
-  	    my $code = $clauses->{'otherwise'};
-  	    my $more = 0;
-  	    my $ok = eval {
-  		if($wantarray) {
-  		    @{$result} = $code->($err,\$more);
-  		}
-  		elsif(defined($wantarray)) {
-  		    @{$result} = ();
-  		    $result->[0] = $code->($err,\$more);
-  		}
-  		else {
-  		    $code->($err,\$more);
-  		}
-  		1;
-  	    };
-  	    if( $ok ) {
-  		undef $err;
-  	    }
-  	    else {
-  		$err = defined($Error::THROWN)
-  			? $Error::THROWN : $@;
-  
-          $err = $Error::ObjectifyCallback->({'text' =>$err})
-              unless ref($err);
+      my $auth = $uri->authority;
+      if (defined($auth)) {
+  	if (lc($auth) ne "localhost" && $auth ne "") {
+  	    $auth = uri_unescape($auth);
+  	    unless ($class->_file_is_localhost($auth)) {
+  		push(@path, "", "", $auth);
   	    }
   	}
       }
-      $err;
-  }
   
-  sub try (&;$) {
-      my $try = shift;
-      my $clauses = @_ ? shift : {};
-      my $ok = 0;
-      my $err = undef;
-      my @result = ();
+      my @ps = $uri->path_segments;
+      shift @ps if @path;
+      push(@path, @ps);
   
-      unshift @Error::STACK, $clauses;
-  
-      my $wantarray = wantarray();
-  
-      do {
-  	local $Error::THROWN = undef;
-      local $@ = undef;
-  
-  	$ok = eval {
-  	    if($wantarray) {
-  		@result = $try->();
-  	    }
-  	    elsif(defined $wantarray) {
-  		$result[0] = $try->();
-  	    }
-  	    else {
-  		$try->();
-  	    }
-  	    1;
-  	};
-  
-  	$err = defined($Error::THROWN) ? $Error::THROWN : $@
-  	    unless $ok;
-      };
-  
-      shift @Error::STACK;
-  
-      $err = run_clauses($clauses,$err,wantarray,@result)
-  	unless($ok);
-  
-      $clauses->{'finally'}->()
-  	if(defined($clauses->{'finally'}));
-  
-      if (defined($err))
-      {
-          if (blessed($err) && $err->can('throw'))
-          {
-              throw $err;
-          }
-          else
-          {
-              die $err;
-          }
+      for (@path) {
+  	# Unix file/directory names are not allowed to contain '\0' or '/'
+  	return undef if /\0/;
+  	return undef if /\//;  # should we really?
       }
   
-      wantarray ? @result : $result[0];
+      return join("/", @path);
   }
   
-  # Each clause adds a sub to the list of clauses. The finally clause is
-  # always the last, and the otherwise clause is always added just before
-  # the finally clause.
-  #
-  # All clauses, except the finally clause, add a sub which takes one argument
-  # this argument will be the error being thrown. The sub will return a code ref
-  # if that clause can handle that error, otherwise undef is returned.
-  #
-  # The otherwise clause adds a sub which unconditionally returns the users
-  # code reference, this is why it is forced to be last.
-  #
-  # The catch clause is defined in Error.pm, as the syntax causes it to
-  # be called as a method
+  1;
+URI_FILE_UNIX
+
+$fatpacked{"URI/file/Win32.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'URI_FILE_WIN32';
+  package URI::file::Win32;
   
-  sub with (&;$) {
-      @_
+  use strict;
+  use warnings;
+  
+  use parent 'URI::file::Base';
+  
+  use URI::Escape qw(uri_unescape);
+  
+  our $VERSION = '5.12';
+  
+  sub _file_extract_authority
+  {
+      my $class = shift;
+  
+      return $class->SUPER::_file_extract_authority($_[0])
+  	if defined $URI::file::DEFAULT_AUTHORITY;
+  
+      return $1 if $_[0] =~ s,^\\\\([^\\]+),,;  # UNC
+      return $1 if $_[0] =~ s,^//([^/]+),,;     # UNC too?
+  
+      if ($_[0] =~ s,^([a-zA-Z]:),,) {
+  	my $auth = $1;
+  	$auth .= "relative" if $_[0] !~ m,^[\\/],;
+  	return $auth;
+      }
+      return undef;
   }
   
-  sub finally (&) {
-      my $code = shift;
-      my $clauses = { 'finally' => $code };
-      $clauses;
+  sub _file_extract_path
+  {
+      my($class, $path) = @_;
+      $path =~ s,\\,/,g;
+      #$path =~ s,//+,/,g;
+      $path =~ s,(/\.)+/,/,g;
+  
+      if (defined $URI::file::DEFAULT_AUTHORITY) {
+  	$path =~ s,^([a-zA-Z]:),/$1,;
+      }
+  
+      return $path;
   }
   
-  # The except clause is a block which returns a hashref or a list of
-  # key-value pairs, where the keys are the classes and the values are subs.
+  sub _file_is_absolute {
+      my($class, $path) = @_;
+      return $path =~ m,^[a-zA-Z]:, || $path =~ m,^[/\\],;
+  }
   
-  sub except (&;$) {
-      my $code = shift;
-      my $clauses = shift || {};
-      my $catch = $clauses->{'catch'} ||= [];
+  sub file
+  {
+      my $class = shift;
+      my $uri = shift;
+      my $auth = $uri->authority;
+      my $rel; # is filename relative to drive specified in authority
+      if (defined $auth) {
+          $auth = uri_unescape($auth);
+  	if ($auth =~ /^([a-zA-Z])[:|](relative)?/) {
+  	    $auth = uc($1) . ":";
+  	    $rel++ if $2;
+  	} elsif (lc($auth) eq "localhost") {
+  	    $auth = "";
+  	} elsif (length $auth) {
+  	    $auth = "\\\\" . $auth;  # UNC
+  	}
+      } else {
+  	$auth = "";
+      }
   
-      my $sub = sub {
-  	my $ref;
-  	my(@array) = $code->($_[0]);
-  	if(@array == 1 && ref($array[0])) {
-  	    $ref = $array[0];
-  	    $ref = [ %$ref ]
-  		if(UNIVERSAL::isa($ref,'HASH'));
+      my @path = $uri->path_segments;
+      for (@path) {
+  	return undef if /\0/;
+  	return undef if /\//;
+  	#return undef if /\\/;        # URLs with "\" is not uncommon
+      }
+      return undef unless $class->fix_path(@path);
+  
+      my $path = join("\\", @path);
+      $path =~ s/^\\// if $rel;
+      $path = $auth . $path;
+      $path =~ s,^\\([a-zA-Z])[:|],\u$1:,;
+  
+      return $path;
+  }
+  
+  sub fix_path { 1; }
+  
+  1;
+URI_FILE_WIN32
+
+$fatpacked{"URI/ftp.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'URI_FTP';
+  package URI::ftp;
+  
+  use strict;
+  use warnings;
+  
+  our $VERSION = '5.12';
+  
+  use parent qw(URI::_server URI::_userpass);
+  
+  sub default_port { 21 }
+  
+  sub path { shift->path_query(@_) }  # XXX
+  
+  sub _user     { shift->SUPER::user(@_);     }
+  sub _password { shift->SUPER::password(@_); }
+  
+  sub user
+  {
+      my $self = shift;
+      my $user = $self->_user(@_);
+      $user = "anonymous" unless defined $user;
+      $user;
+  }
+  
+  sub password
+  {
+      my $self = shift;
+      my $pass = $self->_password(@_);
+      unless (defined $pass) {
+  	my $user = $self->user;
+  	if ($user eq 'anonymous' || $user eq 'ftp') {
+  	    # anonymous ftp login password
+              # If there is no ftp anonymous password specified
+              # then we'll just use 'anonymous@'
+              # We don't try to send the read e-mail address because:
+              # - We want to remain anonymous
+              # - We want to stop SPAM
+              # - We don't want to let ftp sites to discriminate by the user,
+              #   host, country or ftp client being used.
+  	    $pass = 'anonymous@';
+  	}
+      }
+      $pass;
+  }
+  
+  1;
+URI_FTP
+
+$fatpacked{"URI/gopher.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'URI_GOPHER';
+  package URI::gopher;  # <draft-murali-url-gopher>, Dec 4, 1996
+  
+  use strict;
+  use warnings;
+  
+  our $VERSION = '5.12';
+  
+  use parent 'URI::_server';
+  
+  use URI::Escape qw(uri_unescape);
+  
+  #  A Gopher URL follows the common internet scheme syntax as defined in 
+  #  section 4.3 of [RFC-URL-SYNTAX]:
+  #
+  #        gopher://<host>[:<port>]/<gopher-path>
+  #
+  #  where
+  #
+  #        <gopher-path> :=  <gopher-type><selector> | 
+  #                          <gopher-type><selector>%09<search> |
+  #                          <gopher-type><selector>%09<search>%09<gopher+_string>
+  #
+  #        <gopher-type> := '0' | '1' | '2' | '3' | '4' | '5' | '6' | '7'
+  #                         '8' | '9' | '+' | 'I' | 'g' | 'T'
+  #
+  #        <selector>    := *pchar     Refer to RFC 1808 [4]
+  #        <search>      := *pchar
+  #        <gopher+_string> := *uchar  Refer to RFC 1738 [3]
+  #        
+  #  If the optional port is omitted, the port defaults to 70. 
+  
+  sub default_port { 70 }
+  
+  sub _gopher_type
+  {
+      my $self = shift;
+      my $path = $self->path_query;
+      $path =~ s,^/,,;
+      my $gtype = $1 if $path =~ s/^(.)//s;
+      if (@_) {
+  	my $new_type = shift;
+  	if (defined($new_type)) {
+  	    Carp::croak("Bad gopher type '$new_type'")
+                 unless length($new_type) == 1;
+  	    substr($path, 0, 0) = $new_type;
+  	    $self->path_query($path);
+  	} else {
+  	    Carp::croak("Can't delete gopher type when selector is present")
+  		if length($path);
+  	    $self->path_query(undef);
+  	}
+      }
+      return $gtype;
+  }
+  
+  sub gopher_type
+  {
+      my $self = shift;
+      my $gtype = $self->_gopher_type(@_);
+      $gtype = "1" unless defined $gtype;
+      $gtype;
+  }
+  
+  sub gtype { goto &gopher_type }  # URI::URL compatibility
+  
+  sub selector { shift->_gfield(0, @_) }
+  sub search   { shift->_gfield(1, @_) }
+  sub string   { shift->_gfield(2, @_) }
+  
+  sub _gfield
+  {
+      my $self = shift;
+      my $fno  = shift;
+      my $path = $self->path_query;
+  
+      # not according to spec., but many popular browsers accept
+      # gopher URLs with a '?' before the search string.
+      $path =~ s/\?/\t/;
+      $path = uri_unescape($path);
+      $path =~ s,^/,,;
+      my $gtype = $1 if $path =~ s,^(.),,s;
+      my @path = split(/\t/, $path, 3);
+      if (@_) {
+  	# modify
+  	my $new = shift;
+  	$path[$fno] = $new;
+  	pop(@path) while @path && !defined($path[-1]);
+  	for (@path) { $_="" unless defined }
+  	$path = $gtype;
+  	$path = "1" unless defined $path;
+  	$path .= join("\t", @path);
+  	$self->path_query($path);
+      }
+      $path[$fno];
+  }
+  
+  1;
+URI_GOPHER
+
+$fatpacked{"URI/http.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'URI_HTTP';
+  package URI::http;
+  
+  use strict;
+  use warnings;
+  
+  our $VERSION = '5.12';
+  
+  use parent 'URI::_server';
+  
+  sub default_port { 80 }
+  
+  sub canonical
+  {
+      my $self = shift;
+      my $other = $self->SUPER::canonical;
+  
+      my $slash_path = defined($other->authority) &&
+          !length($other->path) && !defined($other->query);
+  
+      if ($slash_path) {
+  	$other = $other->clone if $other == $self;
+  	$other->path("/");
+      }
+      $other;
+  }
+  
+  1;
+URI_HTTP
+
+$fatpacked{"URI/https.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'URI_HTTPS';
+  package URI::https;
+  
+  use strict;
+  use warnings;
+  
+  our $VERSION = '5.12';
+  
+  use parent 'URI::http';
+  
+  sub default_port { 443 }
+  
+  sub secure { 1 }
+  
+  1;
+URI_HTTPS
+
+$fatpacked{"URI/ldap.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'URI_LDAP';
+  # Copyright (c) 1998 Graham Barr <gbarr@pobox.com>. All rights reserved.
+  # This program is free software; you can redistribute it and/or
+  # modify it under the same terms as Perl itself.
+  
+  package URI::ldap;
+  
+  use strict;
+  use warnings;
+  
+  our $VERSION = '5.12';
+  
+  use parent qw(URI::_ldap URI::_server);
+  
+  sub default_port { 389 }
+  
+  sub _nonldap_canonical {
+      my $self = shift;
+      $self->URI::_server::canonical(@_);
+  }
+  
+  1;
+  
+  __END__
+  
+  =head1 NAME
+  
+  URI::ldap - LDAP Uniform Resource Locators
+  
+  =head1 SYNOPSIS
+  
+    use URI;
+  
+    $uri = URI->new("ldap:$uri_string");
+    $dn     = $uri->dn;
+    $filter = $uri->filter;
+    @attr   = $uri->attributes;
+    $scope  = $uri->scope;
+    %extn   = $uri->extensions;
+    
+    $uri = URI->new("ldap:");  # start empty
+    $uri->host("ldap.itd.umich.edu");
+    $uri->dn("o=University of Michigan,c=US");
+    $uri->attributes(qw(postalAddress));
+    $uri->scope('sub');
+    $uri->filter('(cn=Babs Jensen)');
+    print $uri->as_string,"\n";
+  
+  =head1 DESCRIPTION
+  
+  C<URI::ldap> provides an interface to parse an LDAP URI into its
+  constituent parts and also to build a URI as described in
+  RFC 2255.
+  
+  =head1 METHODS
+  
+  C<URI::ldap> supports all the generic and server methods defined by
+  L<URI>, plus the following.
+  
+  Each of the following methods can be used to set or get the value in
+  the URI. The values are passed in unescaped form.  None of these
+  return undefined values, but elements without a default can be empty.
+  If arguments are given, then a new value is set for the given part
+  of the URI.
+  
+  =over 4
+  
+  =item $uri->dn( [$new_dn] )
+  
+  Sets or gets the I<Distinguished Name> part of the URI.  The DN
+  identifies the base object of the LDAP search.
+  
+  =item $uri->attributes( [@new_attrs] )
+  
+  Sets or gets the list of attribute names which are
+  returned by the search.
+  
+  =item $uri->scope( [$new_scope] )
+  
+  Sets or gets the scope to be used by the search. The value can be one of
+  C<"base">, C<"one"> or C<"sub">. If none is given in the URI then the
+  return value defaults to C<"base">.
+  
+  =item $uri->_scope( [$new_scope] )
+  
+  Same as scope(), but does not default to anything.
+  
+  =item $uri->filter( [$new_filter] )
+  
+  Sets or gets the filter to be used by the search. If none is given in
+  the URI then the return value defaults to C<"(objectClass=*)">.
+  
+  =item $uri->_filter( [$new_filter] )
+  
+  Same as filter(), but does not default to anything.
+  
+  =item $uri->extensions( [$etype => $evalue,...] )
+  
+  Sets or gets the extensions used for the search. The list passed should
+  be in the form etype1 => evalue1, etype2 => evalue2,... This is also
+  the form of list that is returned.
+  
+  =back
+  
+  =head1 SEE ALSO
+  
+  L<http://tools.ietf.org/html/rfc2255>
+  
+  =head1 AUTHOR
+  
+  Graham Barr E<lt>F<gbarr@pobox.com>E<gt>
+  
+  Slightly modified by Gisle Aas to fit into the URI distribution.
+  
+  =head1 COPYRIGHT
+  
+  Copyright (c) 1998 Graham Barr. All rights reserved. This program is
+  free software; you can redistribute it and/or modify it under the same
+  terms as Perl itself.
+  
+  =cut
+URI_LDAP
+
+$fatpacked{"URI/ldapi.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'URI_LDAPI';
+  package URI::ldapi;
+  
+  use strict;
+  use warnings;
+  
+  our $VERSION = '5.12';
+  
+  use parent qw(URI::_ldap URI::_generic);
+  
+  use URI::Escape ();
+  
+  sub un_path {
+      my $self = shift;
+      my $old = URI::Escape::uri_unescape($self->authority);
+      if (@_) {
+  	my $p = shift;
+  	$p =~ s/:/%3A/g;
+  	$p =~ s/\@/%40/g;
+  	$self->authority($p);
+      }
+      return $old;
+  }
+  
+  sub _nonldap_canonical {
+      my $self = shift;
+      $self->URI::_generic::canonical(@_);
+  }
+  
+  1;
+URI_LDAPI
+
+$fatpacked{"URI/ldaps.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'URI_LDAPS';
+  package URI::ldaps;
+  
+  use strict;
+  use warnings;
+  
+  our $VERSION = '5.12';
+  
+  use parent 'URI::ldap';
+  
+  sub default_port { 636 }
+  
+  sub secure { 1 }
+  
+  1;
+URI_LDAPS
+
+$fatpacked{"URI/mailto.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'URI_MAILTO';
+  package URI::mailto;  # RFC 2368
+  
+  use strict;
+  use warnings;
+  
+  our $VERSION = '5.12';
+  
+  use parent qw(URI URI::_query);
+  
+  sub to
+  {
+      my $self = shift;
+      my @old = $self->headers;
+      if (@_) {
+  	my @new = @old;
+  	# get rid of any other to: fields
+  	for (my $i = 0; $i < @new; $i += 2) {
+  	    if (lc($new[$i] || '') eq "to") {
+  		splice(@new, $i, 2);
+  		redo;
+  	    }
+  	}
+  
+  	my $to = shift;
+  	$to = "" unless defined $to;
+  	unshift(@new, "to" => $to);
+  	$self->headers(@new);
+      }
+      return unless defined wantarray;
+  
+      my @to;
+      while (@old) {
+  	my $h = shift @old;
+  	my $v = shift @old;
+  	push(@to, $v) if lc($h) eq "to";
+      }
+      join(",", @to);
+  }
+  
+  
+  sub headers 
+  {
+      my $self = shift;
+  
+      # The trick is to just treat everything as the query string...
+      my $opaque = "to=" . $self->opaque;
+      $opaque =~ s/\?/&/;
+  
+      if (@_) {
+  	my @new = @_;
+  
+  	# strip out any "to" fields
+  	my @to;
+  	for (my $i=0; $i < @new; $i += 2) {
+  	    if (lc($new[$i] || '') eq "to") {
+  		push(@to, (splice(@new, $i, 2))[1]);  # remove header
+  		redo;
+  	    }
+  	}
+  
+  	my $new = join(",",@to);
+  	$new =~ s/%/%25/g;
+  	$new =~ s/\?/%3F/g;
+  	$self->opaque($new);
+  	$self->query_form(@new) if @new;
+      }
+      return unless defined wantarray;
+  
+      # I am lazy today...
+      URI->new("mailto:?$opaque")->query_form;
+  }
+  
+  # https://datatracker.ietf.org/doc/html/rfc6068#section-5 requires 
+  # plus signs (+) not to be turned into spaces
+  sub query_form 
+  {
+      my $self   = shift;
+      my @fields = $self->SUPER::query_form(@_);
+      for ( my $i = 0 ; $i < @fields ; $i += 2 ) {
+          if ( $fields[0] eq 'to' ) {
+              $fields[1] =~ s/ /+/g;
+              last;
+          }
+      }
+      return @fields;
+  }
+  
+  1;
+URI_MAILTO
+
+$fatpacked{"URI/mms.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'URI_MMS';
+  package URI::mms;
+  
+  use strict;
+  use warnings;
+  
+  our $VERSION = '5.12';
+  
+  use parent 'URI::http';
+  
+  sub default_port { 1755 }
+  
+  1;
+URI_MMS
+
+$fatpacked{"URI/news.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'URI_NEWS';
+  package URI::news;  # draft-gilman-news-url-01
+  
+  use strict;
+  use warnings;
+  
+  our $VERSION = '5.12';
+  
+  use parent 'URI::_server';
+  
+  use URI::Escape qw(uri_unescape);
+  use Carp ();
+  
+  sub default_port { 119 }
+  
+  #   newsURL      =  scheme ":" [ news-server ] [ refbygroup | message ]
+  #   scheme       =  "news" | "snews" | "nntp"
+  #   news-server  =  "//" server "/"
+  #   refbygroup   = group [ "/" messageno [ "-" messageno ] ]
+  #   message      = local-part "@" domain
+  
+  sub _group
+  {
+      my $self = shift;
+      my $old = $self->path;
+      if (@_) {
+  	my($group,$from,$to) = @_;
+  	if ($group =~ /\@/) {
+              $group =~ s/^<(.*)>$/$1/;  # "<" and ">" should not be part of it
+  	}
+  	$group =~ s,%,%25,g;
+  	$group =~ s,/,%2F,g;
+  	my $path = $group;
+  	if (defined $from) {
+  	    $path .= "/$from";
+  	    $path .= "-$to" if defined $to;
+  	}
+  	$self->path($path);
+      }
+  
+      $old =~ s,^/,,;
+      if ($old !~ /\@/ && $old =~ s,/(.*),, && wantarray) {
+  	my $extra = $1;
+  	return (uri_unescape($old), split(/-/, $extra));
+      }
+      uri_unescape($old);
+  }
+  
+  
+  sub group
+  {
+      my $self = shift;
+      if (@_) {
+  	Carp::croak("Group name can't contain '\@'") if $_[0] =~ /\@/;
+      }
+      my @old = $self->_group(@_);
+      return if $old[0] =~ /\@/;
+      wantarray ? @old : $old[0];
+  }
+  
+  sub message
+  {
+      my $self = shift;
+      if (@_) {
+  	Carp::croak("Message must contain '\@'") unless $_[0] =~ /\@/;
+      }
+      my $old = $self->_group(@_);
+      return undef unless $old =~ /\@/;
+      return $old;
+  }
+  
+  1;
+URI_NEWS
+
+$fatpacked{"URI/nntp.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'URI_NNTP';
+  package URI::nntp;  # draft-gilman-news-url-01
+  
+  use strict;
+  use warnings;
+  
+  our $VERSION = '5.12';
+  
+  use parent 'URI::news';
+  
+  1;
+URI_NNTP
+
+$fatpacked{"URI/nntps.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'URI_NNTPS';
+  package URI::nntps;
+  
+  use strict;
+  use warnings;
+  
+  our $VERSION = '5.12';
+  
+  use parent 'URI::nntp';
+  
+  sub default_port { 563 }
+  
+  sub secure { 1 }
+  
+  1;
+URI_NNTPS
+
+$fatpacked{"URI/pop.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'URI_POP';
+  package URI::pop;   # RFC 2384
+  
+  use strict;
+  use warnings;
+  
+  our $VERSION = '5.12';
+  
+  use parent 'URI::_server';
+  
+  use URI::Escape qw(uri_unescape);
+  
+  sub default_port { 110 }
+  
+  #pop://<user>;auth=<auth>@<host>:<port>
+  
+  sub user
+  {
+      my $self = shift;
+      my $old = $self->userinfo;
+  
+      if (@_) {
+  	my $new_info = $old;
+  	$new_info = "" unless defined $new_info;
+  	$new_info =~ s/^[^;]*//;
+  
+  	my $new = shift;
+  	if (!defined($new) && !length($new_info)) {
+  	    $self->userinfo(undef);
+  	} else {
+  	    $new = "" unless defined $new;
+  	    $new =~ s/%/%25/g;
+  	    $new =~ s/;/%3B/g;
+  	    $self->userinfo("$new$new_info");
+  	}
+      }
+  
+      return undef unless defined $old;
+      $old =~ s/;.*//;
+      return uri_unescape($old);
+  }
+  
+  sub auth
+  {
+      my $self = shift;
+      my $old = $self->userinfo;
+  
+      if (@_) {
+  	my $new = $old;
+  	$new = "" unless defined $new;
+  	$new =~ s/(^[^;]*)//;
+  	my $user = $1;
+  	$new =~ s/;auth=[^;]*//i;
+  
+  	
+  	my $auth = shift;
+  	if (defined $auth) {
+  	    $auth =~ s/%/%25/g;
+  	    $auth =~ s/;/%3B/g;
+  	    $new = ";AUTH=$auth$new";
+  	}
+  	$self->userinfo("$user$new");
+  	
+      }
+  
+      return undef unless defined $old;
+      $old =~ s/^[^;]*//;
+      return uri_unescape($1) if $old =~ /;auth=(.*)/i;
+      return;
+  }
+  
+  1;
+URI_POP
+
+$fatpacked{"URI/rlogin.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'URI_RLOGIN';
+  package URI::rlogin;
+  
+  use strict;
+  use warnings;
+  
+  our $VERSION = '5.12';
+  
+  use parent 'URI::_login';
+  
+  sub default_port { 513 }
+  
+  1;
+URI_RLOGIN
+
+$fatpacked{"URI/rsync.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'URI_RSYNC';
+  package URI::rsync;  # http://rsync.samba.org/
+  
+  # rsync://[USER@]HOST[:PORT]/SRC
+  
+  use strict;
+  use warnings;
+  
+  our $VERSION = '5.12';
+  
+  use parent qw(URI::_server URI::_userpass);
+  
+  sub default_port { 873 }
+  
+  1;
+URI_RSYNC
+
+$fatpacked{"URI/rtsp.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'URI_RTSP';
+  package URI::rtsp;
+  
+  use strict;
+  use warnings;
+  
+  our $VERSION = '5.12';
+  
+  use parent 'URI::http';
+  
+  sub default_port { 554 }
+  
+  1;
+URI_RTSP
+
+$fatpacked{"URI/rtspu.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'URI_RTSPU';
+  package URI::rtspu;
+  
+  use strict;
+  use warnings;
+  
+  our $VERSION = '5.12';
+  
+  use parent 'URI::rtsp';
+  
+  sub default_port { 554 }
+  
+  1;
+URI_RTSPU
+
+$fatpacked{"URI/sftp.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'URI_SFTP';
+  package URI::sftp;
+  
+  use strict;
+  use warnings;
+  
+  use parent 'URI::ssh';
+  
+  our $VERSION = '5.12';
+  
+  1;
+URI_SFTP
+
+$fatpacked{"URI/sip.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'URI_SIP';
+  #
+  # Written by Ryan Kereliuk <ryker@ryker.org>.  This file may be
+  # distributed under the same terms as Perl itself.
+  #
+  # The RFC 3261 sip URI is <scheme>:<authority>;<params>?<query>.
+  #
+  
+  package URI::sip;
+  
+  use strict;
+  use warnings;
+  
+  use parent qw(URI::_server URI::_userpass);
+  
+  use URI::Escape ();
+  
+  our $VERSION = '5.12';
+  
+  sub default_port { 5060 }
+  
+  sub authority
+  {
+      my $self = shift;
+      $$self =~ m,^($URI::scheme_re:)?([^;?]*)(.*)$,os or die;
+      my $old = $2;
+  
+      if (@_) {
+          my $auth = shift;
+          $$self = defined($1) ? $1 : "";
+          my $rest = $3;
+          if (defined $auth) {
+              $auth =~ s/([^$URI::uric])/ URI::Escape::escape_char($1)/ego;
+              $$self .= "$auth";
+          }
+          $$self .= $rest;
+      }
+      $old;
+  }
+  
+  sub params_form
+  {
+      my $self = shift;
+      $$self =~ m,^((?:$URI::scheme_re:)?)(?:([^;?]*))?(;[^?]*)?(.*)$,os or die;
+      my $paramstr = $3;
+  
+      if (@_) {
+      	my @args = @_; 
+          $$self = $1 . $2;
+          my $rest = $4;
+  	my @new;
+  	for (my $i=0; $i < @args; $i += 2) {
+  	    push(@new, "$args[$i]=$args[$i+1]");
+  	}
+  	$paramstr = join(";", @new);
+  	$$self .= ";" . $paramstr . $rest;
+      }
+      $paramstr =~ s/^;//o;
+      return split(/[;=]/, $paramstr);
+  }
+  
+  sub params
+  {
+      my $self = shift;
+      $$self =~ m,^((?:$URI::scheme_re:)?)(?:([^;?]*))?(;[^?]*)?(.*)$,os or die;
+      my $paramstr = $3;
+  
+      if (@_) {
+      	my $new = shift; 
+          $$self = $1 . $2;
+          my $rest = $4;
+  	$$self .= $paramstr . $rest;
+      }
+      $paramstr =~ s/^;//o;
+      return $paramstr;
+  }
+  
+  # Inherited methods that make no sense for a SIP URI.
+  sub path {}
+  sub path_query {}
+  sub path_segments {}
+  sub abs { shift }
+  sub rel { shift }
+  sub query_keywords {}
+  
+  1;
+URI_SIP
+
+$fatpacked{"URI/sips.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'URI_SIPS';
+  package URI::sips;
+  
+  use strict;
+  use warnings;
+  
+  our $VERSION = '5.12';
+  
+  use parent 'URI::sip';
+  
+  sub default_port { 5061 }
+  
+  sub secure { 1 }
+  
+  1;
+URI_SIPS
+
+$fatpacked{"URI/snews.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'URI_SNEWS';
+  package URI::snews;  # draft-gilman-news-url-01
+  
+  use strict;
+  use warnings;
+  
+  our $VERSION = '5.12';
+  
+  use parent 'URI::news';
+  
+  sub default_port { 563 }
+  
+  sub secure { 1 }
+  
+  1;
+URI_SNEWS
+
+$fatpacked{"URI/ssh.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'URI_SSH';
+  package URI::ssh;
+  
+  use strict;
+  use warnings;
+  
+  our $VERSION = '5.12';
+  
+  use parent 'URI::_login';
+  
+  # ssh://[USER@]HOST[:PORT]/SRC
+  
+  sub default_port { 22 }
+  
+  sub secure { 1 }
+  
+  1;
+URI_SSH
+
+$fatpacked{"URI/telnet.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'URI_TELNET';
+  package URI::telnet;
+  
+  use strict;
+  use warnings;
+  
+  our $VERSION = '5.12';
+  
+  use parent 'URI::_login';
+  
+  sub default_port { 23 }
+  
+  1;
+URI_TELNET
+
+$fatpacked{"URI/tn3270.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'URI_TN3270';
+  package URI::tn3270;
+  
+  use strict;
+  use warnings;
+  
+  our $VERSION = '5.12';
+  
+  use parent 'URI::_login';
+  
+  sub default_port { 23 }
+  
+  1;
+URI_TN3270
+
+$fatpacked{"URI/urn.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'URI_URN';
+  package URI::urn;  # RFC 2141
+  
+  use strict;
+  use warnings;
+  
+  our $VERSION = '5.12';
+  
+  use parent 'URI';
+  
+  use Carp qw(carp);
+  
+  my %implementor;
+  my %require_attempted;
+  
+  sub _init {
+      my $class = shift;
+      my $self = $class->SUPER::_init(@_);
+      my $nid = $self->nid;
+  
+      my $impclass = $implementor{$nid};
+      return $impclass->_urn_init($self, $nid) if $impclass;
+  
+      $impclass = "URI::urn";
+      if ($nid =~ /^[A-Za-z\d][A-Za-z\d\-]*\z/) {
+  	my $id = $nid;
+  	# make it a legal perl identifier
+  	$id =~ s/-/_/g;
+  	$id = "_$id" if $id =~ /^\d/;
+  
+  	$impclass = "URI::urn::$id";
+  	no strict 'refs';
+  	unless (@{"${impclass}::ISA"}) {
+              if (not exists $require_attempted{$impclass}) {
+                  # Try to load it
+                  my $_old_error = $@;
+                  eval "require $impclass";
+                  die $@ if $@ && $@ !~ /Can\'t locate.*in \@INC/;
+                  $@ = $_old_error;
+              }
+  	    $impclass = "URI::urn" unless @{"${impclass}::ISA"};
+  	}
+      }
+      else {
+  	carp("Illegal namespace identifier '$nid' for URN '$self'") if $^W;
+      }
+      $implementor{$nid} = $impclass;
+  
+      return $impclass->_urn_init($self, $nid);
+  }
+  
+  sub _urn_init {
+      my($class, $self, $nid) = @_;
+      bless $self, $class;
+  }
+  
+  sub _nid {
+      my $self = shift;
+      my $opaque = $self->opaque;
+      if (@_) {
+  	my $v = $opaque;
+  	my $new = shift;
+  	$v =~ s/[^:]*/$new/;
+  	$self->opaque($v);
+  	# XXX possible rebless
+      }
+      $opaque =~ s/:.*//s;
+      return $opaque;
+  }
+  
+  sub nid {  # namespace identifier
+      my $self = shift;
+      my $nid = $self->_nid(@_);
+      $nid = lc($nid) if defined($nid);
+      return $nid;
+  }
+  
+  sub nss {  # namespace specific string
+      my $self = shift;
+      my $opaque = $self->opaque;
+      if (@_) {
+  	my $v = $opaque;
+  	my $new = shift;
+  	if (defined $new) {
+  	    $v =~ s/(:|\z).*/:$new/;
   	}
   	else {
-  	    $ref = \@array;
+  	    $v =~ s/:.*//s;
   	}
-  	@$ref
-      };
-  
-      unshift @{$catch}, undef, $sub;
-  
-      $clauses;
+  	$self->opaque($v);
+      }
+      return undef unless $opaque =~ s/^[^:]*://;
+      return $opaque;
   }
   
-  sub otherwise (&;$) {
-      my $code = shift;
-      my $clauses = shift || {};
+  sub canonical {
+      my $self = shift;
+      my $nid = $self->_nid;
+      my $new = $self->SUPER::canonical;
+      return $new if $nid !~ /[A-Z]/ || $nid =~ /%/;
+      $new = $new->clone if $new == $self;
+      $new->nid(lc($nid));
+      return $new;
+  }
   
-      if(exists $clauses->{'otherwise'}) {
-  	require Carp;
-  	Carp::croak("Multiple otherwise clauses");
+  1;
+URI_URN
+
+$fatpacked{"URI/urn/isbn.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'URI_URN_ISBN';
+  package URI::urn::isbn;  # RFC 3187
+  
+  use strict;
+  use warnings;
+  
+  our $VERSION = '5.12';
+  
+  use parent 'URI::urn';
+  
+  use Carp qw(carp);
+  
+  BEGIN {
+      require Business::ISBN;
+  
+      local $^W = 0; # don't warn about dev versions, perl5.004 style
+      warn "Using Business::ISBN version " . Business::ISBN->VERSION .
+          " which is deprecated.\nUpgrade to Business::ISBN version 3.005\n"
+          if Business::ISBN->VERSION < 3.005;
       }
   
-      $clauses->{'otherwise'} = $code;
-  
-      $clauses;
+  sub _isbn {
+      my $nss = shift;
+      $nss = $nss->nss if ref($nss);
+      my $isbn = Business::ISBN->new($nss);
+      $isbn = undef if $isbn && !$isbn->is_valid;
+      return $isbn;
   }
+  
+  sub _nss_isbn {
+      my $self = shift;
+      my $nss = $self->nss(@_);
+      my $isbn = _isbn($nss);
+      $isbn = $isbn->as_string if $isbn;
+      return($nss, $isbn);
+  }
+  
+  sub isbn {
+      my $self = shift;
+      my $isbn;
+      (undef, $isbn) = $self->_nss_isbn(@_);
+      return $isbn;
+  }
+  
+  sub isbn_publisher_code {
+      my $isbn = shift->_isbn || return undef;
+      return $isbn->publisher_code;
+  }
+  
+  BEGIN {
+  my $group_method = do {
+      local $^W = 0; # don't warn about dev versions, perl5.004 style
+      Business::ISBN->VERSION >= 2 ? 'group_code' : 'country_code';
+      };
+  
+  sub isbn_group_code {
+      my $isbn = shift->_isbn || return undef;
+      return $isbn->$group_method;
+  }
+  }
+  
+  sub isbn_country_code {
+      my $name = (caller(0))[3]; $name =~ s/.*:://;
+      carp "$name is DEPRECATED. Use isbn_group_code instead";
+  
+      no strict 'refs';
+      &isbn_group_code;
+  }
+  
+  BEGIN {
+  my $isbn13_method = do {
+      local $^W = 0; # don't warn about dev versions, perl5.004 style
+      Business::ISBN->VERSION >= 2 ? 'as_isbn13' : 'as_ean';
+      };
+  
+  sub isbn13 {
+      my $isbn = shift->_isbn || return undef;
+  
+      # Business::ISBN 1.x didn't put hyphens in the EAN, and it was just a string
+      # Business::ISBN 2.0 doesn't do EAN, but it does ISBN-13 objects
+      #   and it uses the hyphens, so call as_string with an empty anon array
+      # or, adjust the test and features to say that it comes out with hyphens.
+      my $thingy = $isbn->$isbn13_method;
+      return eval { $thingy->can( 'as_string' ) } ? $thingy->as_string([]) : $thingy;
+  }
+  }
+  
+  sub isbn_as_ean {
+      my $name = (caller(0))[3]; $name =~ s/.*:://;
+      carp "$name is DEPRECATED. Use isbn13 instead";
+  
+      no strict 'refs';
+      &isbn13;
+  }
+  
+  sub canonical {
+      my $self = shift;
+      my($nss, $isbn) = $self->_nss_isbn;
+      my $new = $self->SUPER::canonical;
+      return $new unless $nss && $isbn && $nss ne $isbn;
+      $new = $new->clone if $new == $self;
+      $new->nss($isbn);
+      return $new;
+  }
+  
+  1;
+URI_URN_ISBN
+
+$fatpacked{"URI/urn/oid.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'URI_URN_OID';
+  package URI::urn::oid;  # RFC 2061
+  
+  use strict;
+  use warnings;
+  
+  our $VERSION = '5.12';
+  
+  use parent 'URI::urn';
+  
+  sub oid {
+      my $self = shift;
+      my $old = $self->nss;
+      if (@_) {
+  	$self->nss(join(".", @_));
+      }
+      return split(/\./, $old) if wantarray;
+      return $old;
+  }
+  
+  1;
+URI_URN_OID
+
+$fatpacked{"x86_64-linux/Clone.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'X86_64-LINUX_CLONE';
+  package Clone;
+  
+  use strict;
+  use vars qw($VERSION @ISA @EXPORT @EXPORT_OK $AUTOLOAD);
+  
+  require Exporter;
+  require DynaLoader;
+  require AutoLoader;
+  
+  @ISA       = qw(Exporter DynaLoader);
+  @EXPORT    = qw();
+  @EXPORT_OK = qw( clone );
+  
+  $VERSION = '0.45';
+  
+  bootstrap Clone $VERSION;
   
   1;
   __END__
   
   =head1 NAME
   
-  Error - Error/exception handling in an OO-ish way
+  Clone - recursively copy Perl datatypes
+  
+  =for html
+  <a href="https://travis-ci.org/garu/Clone"><img src="https://travis-ci.org/garu/Clone.png?branch=master" alt="Build Status"></a>
+  <a href="https://coveralls.io/r/garu/Clone?branch=master"><img src="https://coveralls.io/repos/garu/Clone/badge.png?branch=master" alt="Coverage Status"></a>
+  <a href="https://metacpan.org/pod/Clone"><img src="https://badge.fury.io/pl/Clone.svg" alt="CPAN version"></a>
   
   =head1 SYNOPSIS
   
-      use Error qw(:try);
+      use Clone 'clone';
   
-      throw Error::Simple( "A simple error");
+      my $data = {
+         set => [ 1 .. 50 ],
+         foo => {
+             answer => 42,
+             object => SomeObject->new,
+         },
+      };
   
-      sub xyz {
-          ...
-  	record Error::Simple("A simple error")
-  	    and return;
-      }
+      my $cloned_data = clone($data);
   
-      unlink($file) or throw Error::Simple("$file: $!",$!);
+      $cloned_data->{foo}{answer} = 1;
+      print $cloned_data->{foo}{answer};  # '1'
+      print $data->{foo}{answer};         # '42'
   
-      try {
-  	do_some_stuff();
-  	die "error!" if $condition;
-  	throw Error::Simple -text => "Oops!" if $other_condition;
-      }
-      catch Error::IO with {
-  	my $E = shift;
-  	print STDERR "File ", $E->{'-file'}, " had a problem\n";
-      }
-      except {
-  	my $E = shift;
-  	my $general_handler=sub {send_message $E->{-description}};
-  	return {
-  	    UserException1 => $general_handler,
-  	    UserException2 => $general_handler
-  	};
-      }
-      otherwise {
-  	print STDERR "Well I don't know what to say\n";
-      }
-      finally {
-  	close_the_garage_door_already(); # Should be reliable
-      }; # Don't forget the trailing ; or you might be surprised
+  You can also add it to your class:
+  
+      package Foo;
+      use parent 'Clone';
+      sub new { bless {}, shift }
+  
+      package main;
+  
+      my $obj = Foo->new;
+      my $copy = $obj->clone;
   
   =head1 DESCRIPTION
   
-  The C<Error> package provides two interfaces. Firstly C<Error> provides
-  a procedural interface to exception handling. Secondly C<Error> is a
-  base class for errors/exceptions that can either be thrown, for
-  subsequent catch, or can simply be recorded.
+  This module provides a C<clone()> method which makes recursive
+  copies of nested hash, array, scalar and reference types,
+  including tied variables and objects.
   
-  Errors in the class C<Error> should not be thrown directly, but the
-  user should throw errors from a sub-class of C<Error>.
+  C<clone()> takes a scalar argument and duplicates it. To duplicate lists,
+  arrays or hashes, pass them in by reference, e.g.
   
-  =head1 PROCEDURAL INTERFACE
+      my $copy = clone (\@array);
   
-  C<Error> exports subroutines to perform exception handling. These will
-  be exported if the C<:try> tag is used in the C<use> line.
+      # or
   
-  =over 4
+      my %copy = %{ clone (\%hash) };
   
-  =item try BLOCK CLAUSES
+  =head1 SEE ALSO
   
-  C<try> is the main subroutine called by the user. All other subroutines
-  exported are clauses to the try subroutine.
+  L<Storable>'s C<dclone()> is a flexible solution for cloning variables,
+  albeit slower for average-sized data structures. Simple
+  and naive benchmarks show that Clone is faster for data structures
+  with 3 or fewer levels, while C<dclone()> can be faster for structures
+  4 or more levels deep.
   
-  The BLOCK will be evaluated and, if no error is throw, try will return
-  the result of the block.
+  =head1 COPYRIGHT
   
-  C<CLAUSES> are the subroutines below, which describe what to do in the
-  event of an error being thrown within BLOCK.
+  Copyright 2001-2019 Ray Finch. All Rights Reserved.
   
-  =item catch CLASS with BLOCK
+  This module is free software; you can redistribute it and/or
+  modify it under the same terms as Perl itself.
   
-  This clauses will cause all errors that satisfy C<$err-E<gt>isa(CLASS)>
-  to be caught and handled by evaluating C<BLOCK>.
+  =head1 AUTHOR
   
-  C<BLOCK> will be passed two arguments. The first will be the error
-  being thrown. The second is a reference to a scalar variable. If this
-  variable is set by the catch block then, on return from the catch
-  block, try will continue processing as if the catch block was never
-  found.
+  Ray Finch C<< <rdf@cpan.org> >>
   
-  To propagate the error the catch block may call C<$err-E<gt>throw>
-  
-  If the scalar reference by the second argument is not set, and the
-  error is not thrown. Then the current try block will return with the
-  result from the catch block.
-  
-  =item except BLOCK
-  
-  When C<try> is looking for a handler, if an except clause is found
-  C<BLOCK> is evaluated. The return value from this block should be a
-  HASHREF or a list of key-value pairs, where the keys are class names
-  and the values are CODE references for the handler of errors of that
-  type.
-  
-  =item otherwise BLOCK
-  
-  Catch any error by executing the code in C<BLOCK>
-  
-  When evaluated C<BLOCK> will be passed one argument, which will be the
-  error being processed.
-  
-  Only one otherwise block may be specified per try block
-  
-  =item finally BLOCK
-  
-  Execute the code in C<BLOCK> either after the code in the try block has
-  successfully completed, or if the try block throws an error then
-  C<BLOCK> will be executed after the handler has completed.
-  
-  If the handler throws an error then the error will be caught, the
-  finally block will be executed and the error will be re-thrown.
-  
-  Only one finally block may be specified per try block
-  
-  =back
-  
-  =head1 CLASS INTERFACE
-  
-  =head2 CONSTRUCTORS
-  
-  The C<Error> object is implemented as a HASH. This HASH is initialized
-  with the arguments that are passed to its constructor. The elements
-  that are used by, or are retrievable by the C<Error> class are listed
-  below, other classes may add to these.
-  
-  	-file
-  	-line
-  	-text
-  	-value
-  	-object
-  
-  If C<-file> or C<-line> are not specified in the constructor arguments
-  then these will be initialized with the file name and line number where
-  the constructor was called from.
-  
-  If the error is associated with an object then the object should be
-  passed as the C<-object> argument. This will allow the C<Error> package
-  to associate the error with the object.
-  
-  The C<Error> package remembers the last error created, and also the
-  last error associated with a package. This could either be the last
-  error created by a sub in that package, or the last error which passed
-  an object blessed into that package as the C<-object> argument.
-  
-  =over 4
-  
-  =item throw ( [ ARGS ] )
-  
-  Create a new C<Error> object and throw an error, which will be caught
-  by a surrounding C<try> block, if there is one. Otherwise it will cause
-  the program to exit.
-  
-  C<throw> may also be called on an existing error to re-throw it.
-  
-  =item with ( [ ARGS ] )
-  
-  Create a new C<Error> object and returns it. This is defined for
-  syntactic sugar, eg
-  
-      die with Some::Error ( ... );
-  
-  =item record ( [ ARGS ] )
-  
-  Create a new C<Error> object and returns it. This is defined for
-  syntactic sugar, eg
-  
-      record Some::Error ( ... )
-  	and return;
-  
-  =back
-  
-  =head2 STATIC METHODS
-  
-  =over 4
-  
-  =item prior ( [ PACKAGE ] )
-  
-  Return the last error created, or the last error associated with
-  C<PACKAGE>
-  
-  =item flush ( [ PACKAGE ] )
-  
-  Flush the last error created, or the last error associated with
-  C<PACKAGE>.It is necessary to clear the error stack before exiting the
-  package or uncaught errors generated using C<record> will be reported.
-  
-       $Error->flush;
+  Breno G. de Oliveira C<< <garu@cpan.org> >> and
+  Florian Ragwitz C<< <rafl@debian.org> >> perform routine maintenance
+  releases since 2012.
   
   =cut
-  
-  =back
-  
-  =head2 OBJECT METHODS
-  
-  =over 4
-  
-  =item stacktrace
-  
-  If the variable C<$Error::Debug> was non-zero when the error was
-  created, then C<stacktrace> returns a string created by calling
-  C<Carp::longmess>. If the variable was zero the C<stacktrace> returns
-  the text of the error appended with the filename and line number of
-  where the error was created, providing the text does not end with a
-  newline.
-  
-  =item object
-  
-  The object this error was associated with
-  
-  =item file
-  
-  The file where the constructor of this error was called from
-  
-  =item line
-  
-  The line where the constructor of this error was called from
-  
-  =item text
-  
-  The text of the error
-  
-  =back
-  
-  =head2 OVERLOAD METHODS
-  
-  =over 4
-  
-  =item stringify
-  
-  A method that converts the object into a string. This method may simply
-  return the same as the C<text> method, or it may append more
-  information. For example the file name and line number.
-  
-  By default this method returns the C<-text> argument that was passed to
-  the constructor, or the string C<"Died"> if none was given.
-  
-  =item value
-  
-  A method that will return a value that can be associated with the
-  error. For example if an error was created due to the failure of a
-  system call, then this may return the numeric value of C<$!> at the
-  time.
-  
-  By default this method returns the C<-value> argument that was passed
-  to the constructor.
-  
-  =back
-  
-  =head1 PRE-DEFINED ERROR CLASSES
-  
-  =over 4
-  
-  =item Error::Simple
-  
-  This class can be used to hold simple error strings and values. Its
-  constructor takes two arguments. The first is a text value, the second
-  is a numeric value. These values are what will be returned by the
-  overload methods.
-  
-  If the text value ends with C<at file line 1> as $@ strings do, then
-  this information will be used to set the C<-file> and C<-line> arguments
-  of the error object.
-  
-  This class is used internally if an eval'd block die's with an error
-  that is a plain string. (Unless C<$Error::ObjectifyCallback> is modified)
-  
-  =back
-  
-  =head1 $Error::ObjectifyCallback
-  
-  This variable holds a reference to a subroutine that converts errors that
-  are plain strings to objects. It is used by Error.pm to convert textual
-  errors to objects, and can be overridden by the user.
-  
-  It accepts a single argument which is a hash reference to named parameters.
-  Currently the only named parameter passed is C<'text'> which is the text
-  of the error, but others may be available in the future.
-  
-  For example the following code will cause Error.pm to throw objects of the
-  class MyError::Bar by default:
-  
-      sub throw_MyError_Bar
-      {
-          my $args = shift;
-          my $err = MyError::Bar->new();
-          $err->{'MyBarText'} = $args->{'text'};
-          return $err;
-      }
-  
-      {
-          local $Error::ObjectifyCallback = \&throw_MyError_Bar;
-  
-          # Error handling here.
-      }
-  
-  =head1 KNOWN BUGS
-  
-  None, but that does not mean there are not any.
-  
-  =head1 AUTHORS
-  
-  Graham Barr <gbarr@pobox.com>
-  
-  The code that inspired me to write this was originally written by
-  Peter Seibel <peter@weblogic.com> and adapted by Jesse Glick
-  <jglick@sig.bsh.com>.
-  
-  =head1 MAINTAINER
-  
-  Shlomi Fish <shlomif@iglu.org.il>
-  
-  =head1 PAST MAINTAINERS
-  
-  Arun Kumar U <u_arunkumar@yahoo.com>
-  
-  =cut
-PRIVATE-ERROR
+X86_64-LINUX_CLONE
 
 s/^  //mg for values %fatpacked;
 
@@ -10026,14 +18802,24 @@ unshift @INC, bless \%fatpacked, $class;
   } # END OF FATPACK CODE
 
 
+use strict;
+use warnings;
 use v5.14;
 
-use lib qw(lib);
+use LWP::UserAgent;
 
-use Action qw(getRef);
+my $GITHUB_TOKEN=$ENV{'GITHUB_TOKEN'};
+my $repo=$ENV{'GITHUB_REPOSITORY'};
+my $ua = LWP::UserAgent->new();
+my $request = new HTTP::Request('GET' => "https://api.github.com/repos/$repo/actions/artifacts",
+                                [
+                                 'Authorization' => "Bearer $GITHUB_TOKEN",
+                                 'Accept' =>  'application/vnd.github+json',
+                                 'X-GitHub-Api-Version' => '2022-11-28'
+                                ]);
 
-my $ref= getRef();
+my $response;
 
-say "Ref is $ref";
+eval { $response = $ua->request($request)->as_string() };
 
-exit(1) unless $ref;
+say $response;
