@@ -24283,6 +24283,6 @@ my $request = new HTTP::Request('GET' => "https://api.github.com/repos/$repo/act
 
 my $response;
 
-eval { $response = decode_json($ua->request($request)->as_string()) };
+eval { $response = $ua->request($request)->decoded_content } || die "Can't decode $!";
 
-say $response->{'artifacts'}[0];
+say $response;

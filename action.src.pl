@@ -19,6 +19,6 @@ my $request = new HTTP::Request('GET' => "https://api.github.com/repos/$repo/act
 
 my $response;
 
-eval { $response = $ua->request($request) };
+eval { $response = $ua->request($request)->decoded_content } || die "Can't decode $!";
 
-say $response || $!;
+say $response;
