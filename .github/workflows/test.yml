@@ -1,0 +1,12 @@
+name: Local checks
+on: [push]
+
+jobs:
+  hello_world_job:
+    runs-on: ubuntu-latest
+    name: Testing
+    steps:
+    - name: checkout
+      uses: actions/checkout@v4
+    - id: foo
+      uses: ./
