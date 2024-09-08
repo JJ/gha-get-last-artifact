@@ -1,10 +1,5 @@
-name: 'Hello Perl'
-description: 'Perl Github Action Template'
-inputs:
-  template-input:  # Change this
-    description: 'What it is about'
-    required: false # or not
-    default: 'World'
+name: 'Get Last Artifact'
+description: 'Retrieves the last artifact with a certain name'
 runs:
   using: "composite"
   steps:
@@ -13,3 +8,5 @@ runs:
       shell: perl {0}
     - run: ${GITHUB_ACTION_PATH}/action.pl
       shell: bash
+      with:
+        GITHUB_TOKEN: ${{ github.token }}
