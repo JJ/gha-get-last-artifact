@@ -21,4 +21,4 @@ my $response;
 
 eval { $response = $ua->request($request) };
 
-say $response;
+say $response || $!;
