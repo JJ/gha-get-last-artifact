@@ -8,6 +8,10 @@ jobs:
     steps:
     - name: checkout
       uses: actions/checkout@v4
+    - name: Perl test
+      run: prove
+      env:
+        GITHUB_TOKEN: ${{ github.token }}
     - id: running-tests
       name: Run local tests
       uses: ./
