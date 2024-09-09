@@ -24295,5 +24295,5 @@ my $download_url = $response->{'artifacts'}->[0]->{'archive_download_url'};
 my $artifact_request = makeRequest($download_url, $GITHUB_TOKEN );
 eval { $response = $ua->request( $artifact_request ) } || die "Can't download $download_url: $!";
 
-say "$download_url ", $response->status_line, " ", $response->header( 'Location' );
+say "$download_url ", $response->status_line;
 
