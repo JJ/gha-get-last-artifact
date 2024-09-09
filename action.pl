@@ -24290,7 +24290,7 @@ my $request = makeRequest($url, $GITHUB_TOKEN );
 my $response;
 
 eval { $response = decode_json( $ua->request($request)->decoded_content ) } || die "Can't decode $!";
-say "«$url» ", $response->status_line;
+say "«$url» all good ";
 my $download_url = $response->{'artifacts'}->[0]->{'archive_download_url'};
 
 my $artifact_request = makeRequest($download_url, $GITHUB_TOKEN );
