@@ -8,6 +8,11 @@ jobs:
     steps:
     - name: checkout
       uses: actions/checkout@v4
+    - name: Libraries for testing
+      uses: awalsh128/cache-apt-pkgs-action@latest
+      with:
+        packages: liblwp-protocol-https-perl
+        version: 1.0
     - name: Perl test
       run: prove
       env:

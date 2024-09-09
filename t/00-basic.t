@@ -1,5 +1,8 @@
 # -*- mode: cperl -*-
 
+use strict;
+use warnings;
+
 use LWP::UserAgent;
 use Test::More;
 
