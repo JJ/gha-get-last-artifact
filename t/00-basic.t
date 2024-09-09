@@ -18,4 +18,4 @@ my $request = makeRequest( "https://api.github.com/emojis", $token );
 
 my $response = $ua->request($request);
 
-is( $response->status, 200, "Request made correctly" );
+ok( $response->is_success, "Request made correctly" );
