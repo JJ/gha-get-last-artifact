@@ -8,7 +8,7 @@ use v5.14;
 
 our @EXPORT_OK = qw(makeRequest);
 
-sub makeRequest() {
+sub makeRequest {
   my ($url,$token) = @_;
   return  new HTTP::Request('GET' => $url,
                                 [
