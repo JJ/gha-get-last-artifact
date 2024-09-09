@@ -24277,9 +24277,9 @@ use v5.14;
 use LWP::UserAgent;
 use JSON;
 
-use lib qw( ./lib lib );
+use lib qw( lib );
 
-use Action;
+use Action qw(makeRequest);
 
 my $GITHUB_TOKEN=$ENV{'GITHUB_TOKEN'};
 my $repo=$ENV{'GITHUB_REPOSITORY'};
