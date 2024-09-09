@@ -1,5 +1,7 @@
 # Template for composite actions that use Perl
 
+[![Local checks](https://github.com/JJ/gha-get-last-artifact/actions/workflows/test.yml/badge.svg)](https://github.com/JJ/gha-get-last-artifact/actions/workflows/test.yml)
+
 This is a very basic public template for composite actions written in Perl. Perl
 is included as part of all the basic runners, so you do not need to specifically
 set it up.

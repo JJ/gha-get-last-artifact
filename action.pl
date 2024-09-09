@@ -8,16 +8,22 @@ my %fatpacked;
 $fatpacked{"Action.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'ACTION';
   package Action;
   
-  use Git;
+  use HTTP::Request;
   
   use parent Exporter;
   
   use v5.14;
   
-  our @EXPORT_OK = qw(getRef);
+  our @EXPORT_OK = qw(makeRequest);
   
-  sub getRef() {
-    return $ENV{'GITHUB_REF'};
+  sub makeRequest {
+    my ($url,$token) = @_;
+    return  new HTTP::Request('GET' => $url,
+                                  [
+                                   'Authorization' => "Bearer $token",
+                                   'Accept' =>  'application/vnd.github+json',
+                                   'X-GitHub-Api-Version' => '2022-11-28'
+                                  ]);
   }
 ACTION
 
@@ -24271,18 +24277,23 @@ use v5.14;
 use LWP::UserAgent;
 use JSON;
 
+use lib qw( ./lib );
+
+use Action;
+
 my $GITHUB_TOKEN=$ENV{'GITHUB_TOKEN'};
 my $repo=$ENV{'GITHUB_REPOSITORY'};
 my $ua = LWP::UserAgent->new();
-my $request = new HTTP::Request('GET' => "https://api.github.com/repos/$repo/actions/artifacts",
-                                [
-                                 'Authorization' => "Bearer $GITHUB_TOKEN",
-                                 'Accept' =>  'application/vnd.github+json',
-                                 'X-GitHub-Api-Version' => '2022-11-28'
-                                ]);
+my $request = makeRequest("https://api.github.com/repos/$repo/actions/artifacts", $GITHUB_TOKEN );
 
 my $response;
 
 eval { $response = decode_json( $ua->request($request)->decoded_content ) } || die "Can't decode $!";
 
-say %{$response->{'artifacts'}->[0]};
+my $download_url = $response->{'artifacts'}->[0]->{'archive_download_url'};
+
+my $artifact_request = makeRequest($download_url, $GITHUB_TOKEN );
+eval { $response = $ua->request( $artifact_request ) } || die "Can't download $download_url: $!";
+
+say $response;
+
