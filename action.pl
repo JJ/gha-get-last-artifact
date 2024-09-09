@@ -24298,4 +24298,11 @@ $ua->max_redirect(0);
 eval { $response = $ua->request( $artifact_request ) } || die "Can't download $download_url: $!";
 
 say "«$download_url» ", $response->status_line;
+my $actual_download_url = $response->header('Location');
+say "Location $actual_download_url";
+my $real_artifact_request = makeRequest( $actual_download_url, $GITHUB_TOKEN );
+
+eval { $response = $ua->request( $real_artifact_request ) } || die "Can't download $download_url: $!";
+
+say "$actual_download_url, ", $response->status_line;
 
