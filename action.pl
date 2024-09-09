@@ -21,7 +21,6 @@ $fatpacked{"Action.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'ACTION';
     return  new HTTP::Request('GET' => $url,
                                   [
                                    'Authorization' => "Bearer $token",
-                                   'X-Github-Token' => "Bearer $token",
                                    'Accept' =>  'application/vnd.github+json',
                                    'X-GitHub-Api-Version' => '2022-11-28'
                                   ]);
