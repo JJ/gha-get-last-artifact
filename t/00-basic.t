@@ -7,7 +7,7 @@ use LWP::UserAgent;
 use Test::More;
 
 use lib qw( ../lib lib );
-use Action;
+use Action qw(makeRequest);
 
 die "To be run in CI" unless $ENV{'CI'};
 
