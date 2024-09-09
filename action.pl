@@ -24277,7 +24277,7 @@ use v5.14;
 use LWP::UserAgent;
 use JSON;
 
-use lib qw( ./lib );
+use lib qw( ./lib lib );
 
 use Action;
 
