@@ -13,15 +13,16 @@ use Action qw(makeRequest);
 
 my $GITHUB_TOKEN=$ENV{'GITHUB_TOKEN'};
 my $repo=$ENV{'GITHUB_REPOSITORY'};
+my $artifact_name = $ENV{'ARTIFACT_NAME'};
 my $ua = LWP::UserAgent->new();
-my $url = "https://api.github.com/repos/$repo/actions/artifacts";
+my $url = "https://api.github.com/repos/$repo/actions/artifacts?name=$artifact_name";
 my $request = makeRequest($url, $GITHUB_TOKEN );
 
 my $response;
 
 eval { $response = decode_json( $ua->request($request)->decoded_content ) } || die "Can't decode $!";
 my $download_url = $response->{'artifacts'}->[0]->{'archive_download_url'};
-say %{ $response->{'artifacts'}->[0] }, %{ $response->{'artifacts'}->[1] };
+
 my $artifact_request = makeRequest($download_url, $GITHUB_TOKEN );
 $ua->max_redirect(0);
 eval { $response = $ua->request( $artifact_request ) } || die "Can't download $download_url: $!";

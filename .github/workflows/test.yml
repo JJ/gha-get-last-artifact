@@ -20,6 +20,8 @@ jobs:
     - id: running-tests
       name: Run local tests
       uses: ./
+      with:
+        artifact-name: last_run_id
     - name: After tests, check that the file has been retrieved
       run: ls
     - name: Creates artifact

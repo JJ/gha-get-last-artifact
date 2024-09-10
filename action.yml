@@ -1,5 +1,9 @@
 name: 'Get Last Artifact'
 description: 'Retrieves the last artifact with a certain name'
+inputs:
+  artifact-name:  # Change this
+    description: Name of the artifact you want
+    required: true
 runs:
   using: "composite"
   steps:
@@ -12,3 +16,4 @@ runs:
       shell: bash
       env:
         GITHUB_TOKEN: ${{ github.token }}
+        ARTIFACT_NAME: ${{ inputs.artifact-name }}
