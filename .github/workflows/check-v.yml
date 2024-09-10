@@ -9,7 +9,7 @@ jobs:
     runs-on: ubuntu-latest
     name: Test version in example
     steps:
-    - name: Checkout
+    - name: Checkout (just the source)
       uses: actions/checkout@v4
       with:
         fetch-depth: 0
