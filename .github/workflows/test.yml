@@ -20,6 +20,8 @@ jobs:
     - id: running-tests
       name: Run local tests
       uses: ./
+    - name: After tests, check that the file has been retrieved
+      run: ls
     - name: Creates artifact
       run: echo "$GITHUB_RUN_ID" > last_run_id
     - name: Upload test artifact

@@ -30,9 +30,10 @@ eval { $response = $ua->request( $artifact_request ) } || die "Can't download $d
 say "«$download_url» ", $response->status_line;
 my $actual_download_url = $response->header('Location');
 say "Location $actual_download_url";
-my $real_artifact_request =  new HTTP::Request('GET' => $url);
 
-eval { $response = $ua->request( $real_artifact_request ) } || die "Can't download $download_url: $!";
+`curl -s $actual_download_url -o /tmp/file.zip`;
+`unzip /tmp/file.zip`;
 
-say "$actual_download_url, ", $response->status_line;
+
+
 
