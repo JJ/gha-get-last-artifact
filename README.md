@@ -45,4 +45,4 @@ You know where to find them.
 
 (c) JJ Merelo, 2024
 
-Licensed under GPL v3. See [LICENSE](LICENSE) for details
+Licensed under GPL v3. See [LICENSE](LICENSE) for details.
