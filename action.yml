@@ -1,5 +1,8 @@
 name: 'Get Last Artifact'
 description: 'Retrieves the last artifact with a certain name'
+branding:
+  icon: 'briefcase'
+  color: 'blue'
 inputs:
   artifact-name:  # Change this
     description: Name of the artifact you want
