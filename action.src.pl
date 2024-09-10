@@ -21,7 +21,7 @@ my $response;
 
 eval { $response = decode_json( $ua->request($request)->decoded_content ) } || die "Can't decode $!";
 my $download_url = $response->{'artifacts'}->[0]->{'archive_download_url'};
-say %{ $response->{'artifacts'}->[0] }, %{ $response->{'artifacts'}->[0] };
+say %{ $response->{'artifacts'}->[0] }, %{ $response->{'artifacts'}->[1] };
 my $artifact_request = makeRequest($download_url, $GITHUB_TOKEN );
 $ua->max_redirect(0);
 eval { $response = $ua->request( $artifact_request ) } || die "Can't download $download_url: $!";
