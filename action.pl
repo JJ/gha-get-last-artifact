@@ -24304,7 +24304,9 @@ my @args = ("curl", "-o", "file.zip", $actual_download_url );
 system(@args) == 0 or die "system @args failed: $?";
 
 system('ls', '-alt');
+system('unzip', 'file.zip');
 
+system('ls', '-alt');
 
 
 
