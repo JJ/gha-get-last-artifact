@@ -17,3 +17,5 @@ sub makeRequest {
                                  'X-GitHub-Api-Version' => '2022-11-28'
                                 ]);
 }
+
+42; # Magic true value at the end of library
