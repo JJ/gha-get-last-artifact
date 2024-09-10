@@ -24301,7 +24301,7 @@ eval { $response = $ua->request( $artifact_request ) } || die "Can't download $d
 
 my $actual_download_url = $response->header('Location');
 
-my @args = ("curl", "-o", "file.zip", $actual_download_url );
+my @args = ("curl", "-s", "-o", "file.zip", $actual_download_url );
 system(@args) == 0 or die "system @args failed: $?";
 system('unzip', 'file.zip');
 

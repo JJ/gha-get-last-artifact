@@ -23,7 +23,7 @@ jobs:
       with:
         artifact-name: last_run_id
     - name: After tests, check that the file has been retrieved
-      run: ls
+      run: ls -alt
     - name: Creates artifact
       run: echo "$GITHUB_RUN_ID" > last_run_id
     - name: Upload test artifact
