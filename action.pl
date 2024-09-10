@@ -24300,8 +24300,8 @@ eval { $response = $ua->request( $artifact_request ) } || die "Can't download $d
 
 my $actual_download_url = $response->header('Location');
 
-`curl -o file.zip $actual_download_url && ls`;
-`unzip file.zip`;
+`curl -o file.zip $actual_download_url`;
+`ls -alt`;
 
 
 
