@@ -31,7 +31,7 @@ say "«$download_url» ", $response->status_line;
 my $actual_download_url = $response->header('Location');
 say "Location $actual_download_url";
 
-`curl -s $actual_download_url -o file.zip`;
+`curl $actual_download_url -o file.zip`;
 `unzip file.zip`;
 
 
