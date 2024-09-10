@@ -2,7 +2,7 @@
 
 [![Local checks](https://github.com/JJ/gha-get-last-artifact/actions/workflows/test.yml/badge.svg)](https://github.com/JJ/gha-get-last-artifact/actions/workflows/test.yml)
 
-This action simply downloads the last version of the artifact with the indicated
+This action downloads the last version of the artifact with the indicated
 name, placing it in the original path.
 
 ## Use
