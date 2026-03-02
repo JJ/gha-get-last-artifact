@@ -27,7 +27,7 @@ jobs:
     - name: Creates artifact
       run: echo "$GITHUB_RUN_ID" > last_run_id
     - name: Upload test artifact
-      uses: actions/upload-artifact@v6
+      uses: actions/upload-artifact@v7
       with:
         name: last_run_id
         path: last_run_id
