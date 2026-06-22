@@ -7,7 +7,7 @@ jobs:
     name: Testing
     steps:
     - name: checkout
-      uses: actions/checkout@v6
+      uses: actions/checkout@v7
     - name: Libraries for testing
       uses: awalsh128/cache-apt-pkgs-action@latest
       with:
